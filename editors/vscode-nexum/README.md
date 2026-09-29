@@ -13,8 +13,11 @@ nx setup --apply  # writes it (keeps a .bak backup)
 
 * **vscode-icons**: writes our blue N into `%APPDATA%/Nexum/icons` and adds
   the `.nx` mapping — your other icons untouched.
-* **Material Icon Theme**: maps `*.nx` to its Python icon.
-* **Anything else**: select the bundled **Nexum Icons** file icon theme.
+* **Material Icon Theme**: writes our N into `.vscode/extensions/icons/`
+  and maps `*.nx` to it (their documented custom-SVG mechanism).
+* **Anything else** (Catppuccin explicitly refuses custom SVGs; the rest
+  have no API): setup leaves your theme **untouched** — no borrowed icons.
+  Select the bundled **Nexum Icons** file icon theme if you want the N.
 
 ## Install (pick one)
 

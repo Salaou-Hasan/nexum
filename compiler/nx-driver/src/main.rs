@@ -728,7 +728,11 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
             }
         }
     } else {
-        log("nx setup: theme has no per-file additions; select the 'Nexum Icons' file icon theme");
+        // Policy: only vscode-icons and Material Icon Theme accept custom
+        // SVGs (verified; Catppuccin explicitly refuses, the rest have no
+        // API). Never borrow another pack's icon — leave the theme alone.
+        log(&format!("nx setup: '{theme}' has no custom-icon support, leaving it untouched"));
+        log("nx setup: to see the N logo, select the 'Nexum Icons' file icon theme");
         log("nx setup: Preferences -> File Icon Theme -> Nexum Icons (ships in the vsix)");
         ExitCode::SUCCESS
     }
