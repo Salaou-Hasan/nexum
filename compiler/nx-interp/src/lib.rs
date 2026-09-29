@@ -8,6 +8,8 @@ pub enum Value {
     Bool(bool),
     Str(String),
     List(Vec<Value>),
+    Module(String),
+    Func { module: String, name: String },
     None,
 }
 
@@ -22,6 +24,8 @@ impl std::fmt::Display for Value {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();
                 write!(f, "[{}]", parts.join(", "))
             }
+            Value::Module(m) => write!(f, "<module {m}>"),
+            Value::Func { name, .. } => write!(f, "<fn {name}>"),
             Value::None => write!(f, "none"),
         }
     }
@@ -73,11 +77,26 @@ impl std::error::Error for RuntimeError {}
 const LOOP_LIMIT: u64 = 10_000_000;
 const CALL_LIMIT: usize = 500;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Function {
     params: Vec<String>,
     body: Vec<Stmt>,
 }
+
+#[derive(Debug, Clone, Default)]
+struct Module {
+    vars: HashMap<String, Value>,
+    funcs: HashMap<String, Function>,
+    dir: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Frame {
+    vars: HashMap<String, Value>,
+    module: String,
+}
+
+const MAIN_MODULE: &str = "__main__";
 
 #[derive(Debug, Clone)]
 enum Flow {
@@ -88,19 +107,29 @@ enum Flow {
 
 #[derive(Default)]
 pub struct Interpreter {
-    scopes: Vec<HashMap<String, Value>>,
-    functions: HashMap<String, Function>,
+    frames: Vec<Frame>,
+    modules: HashMap<String, Module>,
+    loading: Vec<String>,
+    current: String,
     pub output: Vec<String>,
     call_depth: usize,
 }
 
 impl Interpreter {
     pub fn new() -> Self {
+        Self::with_base(&std::env::current_dir().unwrap_or(".".into()))
+    }
+
+    pub fn with_base(base: &std::path::Path) -> Self {
+        let mut modules = HashMap::new();
+        modules.insert(
+            MAIN_MODULE.to_string(),
+            Module { dir: base.to_path_buf(), ..Default::default() },
+        );
         Self {
-            scopes: vec![HashMap::new()],
-            functions: HashMap::new(),
-            output: Vec::new(),
-            call_depth: 0,
+            modules,
+            current: MAIN_MODULE.to_string(),
+            ..Default::default()
         }
     }
 
@@ -204,10 +233,28 @@ impl Interpreter {
             }
             Stmt::For { var, iter, body, .. } => self.exec_for(var, iter, body),
             Stmt::Fn { name, params, body, .. } => {
-                self.functions.insert(
-                    name.clone(),
-                    Function { params: params.clone(), body: body.clone() },
-                );
+                let cur = self.current_module();
+                if let Some(m) = self.modules.get_mut(&cur) {
+                    m.funcs.insert(
+                        name.clone(),
+                        Function { params: params.clone(), body: body.clone() },
+                    );
+                }
+                Ok(None)
+            }
+            Stmt::Import { module, alias, span } => {
+                self.load_module(module, span.line, span.col)?;
+                let bind = alias.clone().unwrap_or_else(|| module.clone());
+                self.assign(&bind, Value::Module(module.clone()));
+                Ok(None)
+            }
+            Stmt::FromImport { module, names, span } => {
+                self.load_module(module, span.line, span.col)?;
+                for (name, alias) in names {
+                    let v = self.module_member(module, name, span.line, span.col)?;
+                    let bind = alias.clone().unwrap_or_else(|| name.clone());
+                    self.assign(&bind, v);
+                }
                 Ok(None)
             }
             Stmt::Return { value, .. } => {
@@ -315,19 +362,135 @@ impl Interpreter {
         }
     }
 
+    fn current_module(&self) -> String {
+        self.frames
+            .last()
+            .map(|f| f.module.clone())
+            .unwrap_or_else(|| self.current.clone())
+    }
+
     fn assign(&mut self, name: &str, v: Value) {
-        if let Some(top) = self.scopes.last_mut() {
-            top.insert(name.to_string(), v);
+        if let Some(top) = self.frames.last_mut() {
+            top.vars.insert(name.to_string(), v);
+        } else if let Some(m) = self.modules.get_mut(&self.current.clone()) {
+            m.vars.insert(name.to_string(), v);
         }
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(v) = scope.get(name) {
+        // Own call frame first, then the defining module's globals.
+        // No dynamic fallback into caller frames (v0 scoping rule).
+        if let Some(top) = self.frames.last() {
+            if let Some(v) = top.vars.get(name) {
                 return Some(v.clone());
             }
+            if let Some(m) = self.modules.get(&top.module) {
+                if let Some(v) = m.vars.get(name) {
+                    return Some(v.clone());
+                }
+            }
+            return None;
         }
-        None
+        self.modules
+            .get(&self.current)
+            .and_then(|m| m.vars.get(name))
+            .cloned()
+    }
+
+    fn module_member(
+        &self,
+        module: &str,
+        name: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, RuntimeError> {
+        let m = self.modules.get(module).ok_or(RuntimeError {
+            message: format!("unknown module '{module}'"),
+            line,
+            col,
+        })?;
+        if let Some(v) = m.vars.get(name) {
+            return Ok(v.clone());
+        }
+        if m.funcs.contains_key(name) {
+            return Ok(Value::Func { module: module.to_string(), name: name.to_string() });
+        }
+        Err(RuntimeError {
+            message: format!("module '{module}' has no member '{name}'"),
+            line,
+            col,
+        })
+    }
+
+    fn resolve_module(&self, importer: &str, name: &str) -> Option<std::path::PathBuf> {
+        let file = format!("{name}.nx");
+        let mut dirs = Vec::new();
+        if let Some(m) = self.modules.get(importer) {
+            dirs.push(m.dir.clone());
+        }
+        if let Ok(nx_path) = std::env::var("NX_PATH") {
+            dirs.extend(std::env::split_paths(&nx_path));
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            dirs.push(cwd);
+        }
+        dirs.into_iter()
+            .map(|d| d.join(&file))
+            .find(|p| p.is_file())
+    }
+
+    fn load_module(&mut self, name: &str, line: usize, col: usize) -> Result<(), RuntimeError> {
+        if self.loading.contains(&name.to_string()) {
+            return Err(RuntimeError {
+                message: format!("circular import of '{name}'"),
+                line,
+                col,
+            });
+        }
+        if self.modules.contains_key(name) {
+            return Ok(());
+        }
+        let importer = self.current_module();
+        let path = self.resolve_module(&importer, name).ok_or(RuntimeError {
+            message: format!("cannot find module '{name}.nx'"),
+            line,
+            col,
+        })?;
+        let source = std::fs::read_to_string(&path).map_err(|e| RuntimeError {
+            message: format!("cannot read module '{name}': {e}"),
+            line,
+            col,
+        })?;
+        let tokens = nx_lexer::lex(&source).map_err(|e| RuntimeError {
+            message: format!("in module '{name}': {e}"),
+            line,
+            col,
+        })?;
+        let prog = nx_parser::parse(tokens).map_err(|e| RuntimeError {
+            message: format!("in module '{name}': {e}"),
+            line,
+            col,
+        })?;
+        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(".".into());
+        self.modules.insert(name.to_string(), Module { dir, ..Default::default() });
+        self.loading.push(name.to_string());
+        // Top-level module code runs with no call frames so its bindings
+        // land in the module table, not in some caller's locals.
+        let saved_frames = std::mem::take(&mut self.frames);
+        let saved_current = std::mem::replace(&mut self.current, name.to_string());
+        let ret = self.exec_block(&prog.stmts);
+        self.current = saved_current;
+        self.frames = saved_frames;
+        self.loading.pop();
+        match ret {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err(RuntimeError {
+                message: format!("module '{name}' cannot break/continue/return at top level"),
+                line,
+                col,
+            }),
+            Err(e) => Err(e),
+        }
     }
 
     fn expect_bool(v: Value, span: nx_ast::Span) -> Result<bool, RuntimeError> {
@@ -354,7 +517,14 @@ impl Interpreter {
                 }
                 Ok(Value::List(vs))
             }
-            Expr::Var(name, span) => self.lookup(name).ok_or(RuntimeError {
+            Expr::Var(name, span) => self.lookup(name).or_else(|| {
+                // Bare function names double as first-class references.
+                let cur = self.current_module();
+                self.modules
+                    .get(&cur)
+                    .filter(|m| m.funcs.contains_key(name))
+                    .map(|_| Value::Func { module: cur, name: name.clone() })
+            }).ok_or(RuntimeError {
                 message: format!("undefined variable '{name}'"),
                 line: span.line,
                 col: span.col,
@@ -409,7 +579,46 @@ impl Interpreter {
                 let r = self.eval_expr(right)?;
                 self.apply_binop(l, *op, r, span.line, span.col)
             }
-            Expr::Call { func, args, span } => self.call_func(func, args, span.line, span.col),
+            Expr::Attr { base, attr, span } => {
+                let b = self.eval_expr(base)?;
+                match b {
+                    Value::Module(m) => self.module_member(&m, attr, span.line, span.col),
+                    _ => Err(RuntimeError {
+                        message: "only modules support attribute access".to_string(),
+                        line: span.line,
+                        col: span.col,
+                    }),
+                }
+            }
+            Expr::Call { callee, args, span } => {
+                // Builtins stay global: len(...), push(...).
+                if let Expr::Var(name, _) = callee.as_ref() {
+                    if name == "len" || name == "push" {
+                        return self.call_builtin(name, args, span.line, span.col);
+                    }
+                    // Plain `foo(...)`: function defined in the current module.
+                    let cur = self.current_module();
+                    if self
+                        .modules
+                        .get(&cur)
+                        .map(|m| m.funcs.contains_key(name))
+                        .unwrap_or(false)
+                    {
+                        return self.call_func(&cur, name, args, span.line, span.col);
+                    }
+                }
+                let target = self.eval_expr(callee)?;
+                match target {
+                    Value::Func { module, name } => {
+                        self.call_func(&module, &name, args, span.line, span.col)
+                    }
+                    _ => Err(RuntimeError {
+                        message: "not callable".to_string(),
+                        line: span.line,
+                        col: span.col,
+                    }),
+                }
+            }
         }
     }
 
@@ -447,7 +656,7 @@ impl Interpreter {
         }
     }
 
-    fn call_func(
+    fn call_builtin(
         &mut self,
         func: &str,
         args: &[Expr],
@@ -515,12 +724,31 @@ impl Interpreter {
             self.assign(&name, Value::List(lst));
             return Ok(Value::None);
         }
-
-        let f = self.functions.get(func).cloned().ok_or(RuntimeError {
+        Err(RuntimeError {
             message: format!("unknown function '{func}'"),
             line,
             col,
-        })?;
+        })
+    }
+
+    fn call_func(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Expr],
+        line: usize,
+        col: usize,
+    ) -> Result<Value, RuntimeError> {
+        let f = self
+            .modules
+            .get(module)
+            .and_then(|m| m.funcs.get(func))
+            .cloned()
+            .ok_or(RuntimeError {
+                message: format!("unknown function '{func}'"),
+                line,
+                col,
+            })?;
         if args.len() != f.params.len() {
             return Err(RuntimeError {
                 message: format!(
@@ -544,12 +772,12 @@ impl Interpreter {
             vals.push(self.eval_expr(a)?);
         }
         self.call_depth += 1;
-        self.scopes.push(HashMap::new());
+        self.frames.push(Frame { module: module.to_string(), ..Default::default() });
         for (p, v) in f.params.iter().zip(vals) {
             self.assign(p, v);
         }
         let ret = self.exec_block(&f.body)?;
-        self.scopes.pop();
+        self.frames.pop();
         self.call_depth -= 1;
         match ret {
             None | Some(Flow::Continue) | Some(Flow::Break) => Ok(Value::None),
@@ -667,13 +895,24 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::List(x), Value::List(y)) => x == y,
+        (Value::Module(x), Value::Module(y)) => x == y,
+        (Value::Func { module: m1, name: n1 }, Value::Func { module: m2, name: n2 }) => {
+            m1 == m2 && n1 == n2
+        }
         (Value::None, Value::None) => true,
         _ => false,
     }
 }
 
 pub fn run(prog: &Program) -> Result<Vec<String>, RuntimeError> {
-    let mut interp = Interpreter::new();
+    run_with_base(prog, &std::env::current_dir().unwrap_or(".".into()))
+}
+
+pub fn run_with_base(
+    prog: &Program,
+    base: &std::path::Path,
+) -> Result<Vec<String>, RuntimeError> {
+    let mut interp = Interpreter::with_base(base);
     interp.run(prog)?;
     Ok(interp.output)
 }
@@ -839,5 +1078,64 @@ mod tests {
     fn list_index_len_push() {
         let out = run_src("a = [1, 2, 3]\nprint(a[0], a[-1], len(a))\npush(a, 4)\nprint(a, len(a))").unwrap();
         assert_eq!(out, vec!["1 3 3", "[1, 2, 3, 4] 4"]);
+    }
+
+    fn mod_dir(tag: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nxmod-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, src) in files {
+            std::fs::write(dir.join(name), src).unwrap();
+        }
+        dir
+    }
+
+    fn run_entry(dir: &std::path::Path, entry: &str) -> Result<Vec<String>, RuntimeError> {
+        let src = std::fs::read_to_string(dir.join(entry)).unwrap();
+        let prog = nx_parser::parse_source(&src).unwrap_or_else(|e| panic!("{e}"));
+        run_with_base(&prog, dir)
+    }
+
+    #[test]
+    fn import_attr_and_from() {
+        let dir = mod_dir(
+            "basic",
+            &[
+                ("utils.nx", "VERSION = \"1.0\"\nfn double(n):\n    return n * 2\n"),
+                (
+                    "main.nx",
+                    "import utils\nfrom utils import double as d\nprint(utils.VERSION)\nprint(utils.double(21))\nprint(d(4))\n",
+                ),
+            ],
+        );
+        let out = run_entry(&dir, "main.nx").unwrap();
+        assert_eq!(out, vec!["1.0", "42", "8"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn import_missing_errors() {
+        let dir = mod_dir("missing", &[("main.nx", "import nope\n")]);
+        assert!(run_entry(&dir, "main.nx").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn import_circular_errors() {
+        let dir = mod_dir(
+            "circ",
+            &[
+                ("a.nx", "import b\n"),
+                ("b.nx", "import a\n"),
+                ("main.nx", "import a\n"),
+            ],
+        );
+        assert!(run_entry(&dir, "main.nx").is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

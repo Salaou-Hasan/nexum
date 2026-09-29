@@ -92,6 +92,7 @@ fn run_file(path: &str) -> ExitCode {
         Ok(s) => s,
         Err(c) => return c,
     };
+    let path = path.to_string();
     // Run the interpreter on a thread with a large stack so deep (but
     // bounded) Nexum recursion hits our CALL_LIMIT error instead of
     // overflowing the small default Windows main-thread stack.
@@ -101,7 +102,11 @@ fn run_file(path: &str) -> ExitCode {
         .spawn(move || -> Result<Vec<String>, String> {
             let tokens = nx_lexer::lex(&source).map_err(|e| e.to_string())?;
             let prog = nx_parser::parse(tokens).map_err(|e| e.to_string())?;
-            nx_interp::run(&prog).map_err(|e| e.to_string())
+            let base = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or(".".into());
+            nx_interp::run_with_base(&prog, &base).map_err(|e| e.to_string())
         });
     let child = match child {
         Ok(c) => c,

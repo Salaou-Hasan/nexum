@@ -44,6 +44,8 @@ pub enum Stmt {
     },
     Break { span: Span },
     Continue { span: Span },
+    Import { module: String, alias: Option<String>, span: Span },
+    FromImport { module: String, names: Vec<(String, Option<String>)>, span: Span },
     Expr(Expr),
 }
 
@@ -55,6 +57,11 @@ pub enum Expr {
     Str(String, Span),
     List(Vec<Expr>, Span),
     Var(String, Span),
+    Attr {
+        base: Box<Expr>,
+        attr: String,
+        span: Span,
+    },
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
@@ -72,7 +79,7 @@ pub enum Expr {
         span: Span,
     },
     Call {
-        func: String,
+        callee: Box<Expr>,
         args: Vec<Expr>,
         span: Span,
     },
@@ -143,6 +150,7 @@ impl Expr {
             Expr::Str(_, s) => *s,
             Expr::List(_, s) => *s,
             Expr::Var(_, s) => *s,
+            Expr::Attr { span, .. } => *span,
             Expr::Index { span, .. } => *span,
             Expr::Unary { span, .. } => *span,
             Expr::Binary { span, .. } => *span,

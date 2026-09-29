@@ -100,6 +100,8 @@ impl Parser {
             TokenKind::For => self.parse_for(),
             TokenKind::Fn => self.parse_fn(),
             TokenKind::Return => self.parse_return(),
+            TokenKind::Import => self.parse_import(),
+            TokenKind::From => self.parse_from_import(),
             TokenKind::Break => {
                 let t = self.next();
                 Ok(Stmt::Break { span: Span { line: t.line, col: t.col } })
@@ -203,6 +205,43 @@ impl Parser {
                 Ok(Stmt::Return { value: Some(v), span })
             }
         }
+    }
+
+    fn parse_import(&mut self) -> Result<Stmt, ParseError> {
+        let kw = self.next(); // import
+        let span = Span { line: kw.line, col: kw.col };
+        let module = self.expect(TokenKind::Ident, "module name")?.lexeme;
+        let alias = if *self.peek_kind() == TokenKind::As {
+            self.next();
+            Some(self.expect(TokenKind::Ident, "alias")?.lexeme)
+        } else {
+            None
+        };
+        Ok(Stmt::Import { module, alias, span })
+    }
+
+    fn parse_from_import(&mut self) -> Result<Stmt, ParseError> {
+        let kw = self.next(); // from
+        let span = Span { line: kw.line, col: kw.col };
+        let module = self.expect(TokenKind::Ident, "module name")?.lexeme;
+        self.expect(TokenKind::Import, "'import'")?;
+        let mut names = Vec::new();
+        loop {
+            let name = self.expect(TokenKind::Ident, "name")?.lexeme;
+            let alias = if *self.peek_kind() == TokenKind::As {
+                self.next();
+                Some(self.expect(TokenKind::Ident, "alias")?.lexeme)
+            } else {
+                None
+            };
+            names.push((name, alias));
+            if *self.peek_kind() == TokenKind::Comma {
+                self.next();
+                continue;
+            }
+            break;
+        }
+        Ok(Stmt::FromImport { module, names, span })
     }
 
     fn parse_simple_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -375,14 +414,41 @@ impl Parser {
         let mut e = self.parse_primary()?;
         loop {
             if *self.peek_kind() == TokenKind::LBracket {
-                let lb = self.next();
+                self.next();
                 self.skip_newlines();
                 let index = self.parse_expr()?;
                 self.skip_newlines();
                 self.expect(TokenKind::RBracket, "']'")?;
                 let span = e.span();
-                let _ = lb;
                 e = Expr::Index { base: Box::new(e), index: Box::new(index), span };
+            } else if *self.peek_kind() == TokenKind::Dot {
+                self.next();
+                let attr = self.expect(TokenKind::Ident, "attribute name")?;
+                let span = e.span();
+                e = Expr::Attr {
+                    base: Box::new(e),
+                    attr: attr.lexeme,
+                    span,
+                };
+            } else if *self.peek_kind() == TokenKind::LParen {
+                self.next(); // (
+                let span = e.span();
+                let mut args = Vec::new();
+                self.skip_newlines();
+                if *self.peek_kind() != TokenKind::RParen {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        self.skip_newlines();
+                        if *self.peek_kind() == TokenKind::Comma {
+                            self.next();
+                            self.skip_newlines();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RParen, "')'")?;
+                e = Expr::Call { callee: Box::new(e), args, span };
             } else {
                 break;
             }
@@ -425,28 +491,7 @@ impl Parser {
             }
             TokenKind::Ident => {
                 self.next();
-                let span = Span { line: t.line, col: t.col };
-                if *self.peek_kind() == TokenKind::LParen {
-                    self.next();
-                    let mut args = Vec::new();
-                    self.skip_newlines();
-                    if *self.peek_kind() != TokenKind::RParen {
-                        loop {
-                            args.push(self.parse_expr()?);
-                            self.skip_newlines();
-                            if *self.peek_kind() == TokenKind::Comma {
-                                self.next();
-                                self.skip_newlines();
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    self.expect(TokenKind::RParen, "')'")?;
-                    Ok(Expr::Call { func: t.lexeme, args, span })
-                } else {
-                    Ok(Expr::Var(t.lexeme, span))
-                }
+                Ok(Expr::Var(t.lexeme, Span { line: t.line, col: t.col }))
             }
             TokenKind::LParen => {
                 self.next();
@@ -545,7 +590,11 @@ mod tests {
     #[test]
     fn generic_call() {
         let p = prog("foo(1, 2)");
-        assert!(matches!(&p.stmts[0], Stmt::Expr(Expr::Call { func, .. }) if func == "foo"));
+        assert!(matches!(
+            &p.stmts[0],
+            Stmt::Expr(Expr::Call { callee, .. })
+            if matches!(callee.as_ref(), Expr::Var(f, _) if f == "foo")
+        ));
     }
 
     #[test]
@@ -591,6 +640,20 @@ mod tests {
     fn for_each() {
         let p = prog("for i in nums:\n    print(i)");
         assert!(matches!(p.stmts[0], Stmt::For { .. }));
+    }
+
+    #[test]
+    fn import_forms() {
+        let p = prog("import utils\nimport utils as u\nfrom utils import foo, bar as b");
+        assert_eq!(p.stmts.len(), 3);
+        assert!(matches!(p.stmts[0], Stmt::Import { .. }));
+        assert!(matches!(p.stmts[2], Stmt::FromImport { .. }));
+    }
+
+    #[test]
+    fn attr_call() {
+        let p = prog("print(utils.foo(1))");
+        assert_eq!(p.stmts.len(), 1);
     }
 
     #[test]

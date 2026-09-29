@@ -1,5 +1,21 @@
 # Nexum VS Code extension (local, unpackaged)
 
+## File icons: coexisting with your theme
+
+VS Code allows exactly **one** active file icon theme, so no extension can
+inject just its own icon into another theme. Pick one:
+
+### A. Nexum Icons theme (blue N on `.nx`)
+Preferences → File Icon Theme → **Nexum Icons**. Other files fall back to
+VS Code defaults while this theme is active.
+
+### B. Keep your current theme (recommended)
+Map `.nx` to an icon your theme already has, in VS Code settings:
+
+- **vscode-icons**: `"vsicons.associations.files": [{ "icon": "py", "extensions": ["nx"] }]`
+- **Material Icon Theme**: `"material-icon-theme.files.associations": { "*.nx": "python" }`
+- **Minimal/Seti (built-in)**: no custom mappings supported — use option A.
+
 ## Install (pick one)
 
 ### A. Copy into extensions (simplest)

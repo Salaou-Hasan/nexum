@@ -21,6 +21,7 @@ name = "nx-interp"
 version = "0.0.6"
 dependencies = [
  "nx-ast",
+ "nx-lexer",
  "nx-parser",
 ]
 

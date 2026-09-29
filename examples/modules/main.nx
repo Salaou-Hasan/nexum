@@ -1,0 +1,10 @@
+import utils
+from utils import double, greet as hello
+
+print(utils.VERSION)
+print(utils.double(21))
+print(double(4))
+print(hello("Ada"))
+
+for i in 0..3:
+    print(utils.double(i))

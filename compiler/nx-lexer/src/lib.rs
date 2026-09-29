@@ -36,6 +36,9 @@ pub enum TokenKind {
     Return,
     Break,
     Continue,
+    Import,
+    From,
+    As,
     True,
     False,
     And,
@@ -44,6 +47,7 @@ pub enum TokenKind {
     Newline,
     Indent,
     Dedent,
+    Dot,
     DotDot,
     Eof,
 }
@@ -60,6 +64,9 @@ fn keyword_kind(lexeme: &str) -> Option<TokenKind> {
         "return" => Some(TokenKind::Return),
         "break" => Some(TokenKind::Break),
         "continue" => Some(TokenKind::Continue),
+        "import" => Some(TokenKind::Import),
+        "from" => Some(TokenKind::From),
+        "as" => Some(TokenKind::As),
         "true" => Some(TokenKind::True),
         "false" => Some(TokenKind::False),
         "and" => Some(TokenKind::And),
@@ -346,11 +353,8 @@ impl Lexer {
                         self.advance();
                         tokens.push(Token { kind: TokenKind::DotDot, lexeme: "..".to_string(), line, col });
                     } else {
-                        return Err(LexError {
-                            message: "unexpected character '.'".to_string(),
-                            line,
-                            col,
-                        });
+                        self.advance();
+                        tokens.push(Token { kind: TokenKind::Dot, lexeme: ".".to_string(), line, col });
                     }
                 }
                 Some('=') => {
