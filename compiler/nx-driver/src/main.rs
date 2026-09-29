@@ -344,6 +344,14 @@ fn find_code() -> Option<std::path::PathBuf> {
 
 const NX_SVG: &str = include_str!("../../../editors/vscode-nexum/icons/file_type_nx.svg");
 
+fn vscode_extensions_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok().map(std::path::PathBuf::from)?;
+    #[cfg(not(windows))]
+    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from)?;
+    Some(home.join(".vscode/extensions"))
+}
+
 fn vscode_settings_path() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
     let base = std::env::var("APPDATA").ok().map(std::path::PathBuf::from)?;
@@ -408,6 +416,180 @@ fn json_insert_key(text: &str, key: &str, value: &str) -> (String, bool) {
     out.push('}');
     out.push_str(&text[close + 1..]);
     (out, true)
+}
+
+/// Set `inner` to `value_json` inside the top-level object `top`.
+/// Creates the object if missing. Handles JSONC comments. Returns (text, changed).
+fn json_object_set(text: &str, top: &str, inner: &str, value_json: &str) -> (String, bool) {
+    let key = format!("\"{top}\"");
+    let kpos = match text.find(&key) {
+        Some(p) => p,
+        None => {
+            let (t, _) = json_insert_key(text, top, &format!("{{\"{inner}\": {value_json}}}"));
+            return (t, true);
+        }
+    };
+    // Find object start after the key.
+    let bytes = text.as_bytes();
+    let mut i = kpos + key.len();
+    let n = bytes.len();
+    // skip whitespace/comments/colon
+    let mut colon = false;
+    let mut obj_start = None;
+    while i < n {
+        let c = bytes[i] as char;
+        if c == ':' && !colon {
+            colon = true;
+            i += 1;
+            continue;
+        }
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c == '/' && i + 1 < n && bytes[i + 1] as char == '/' {
+            while i < n && bytes[i] as char != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '{' && colon {
+            obj_start = Some(i);
+            break;
+        }
+        break;
+    }
+    let obj_start = match obj_start {
+        Some(p) => p,
+        None => return (text.to_string(), false),
+    };
+    let obj_end = match match_brace(text, obj_start) {
+        Some(p) => p,
+        None => return (text.to_string(), false),
+    };
+    let inner_key = format!("\"{inner}\"");
+    let body = &text[obj_start..=obj_end];
+    if let Some(rel) = body.find(&inner_key) {
+        // Replace existing value.
+        let abs = obj_start + rel + inner_key.len();
+        let mut j = abs;
+        while j < n && (bytes[j] as char).is_whitespace() {
+            j += 1;
+        }
+        if j >= n || bytes[j] as char != ':' {
+            return (text.to_string(), false);
+        }
+        j += 1;
+        while j < n && (bytes[j] as char).is_whitespace() {
+            j += 1;
+        }
+        let vend = match value_end(text, j) {
+            Some(p) => p,
+            None => return (text.to_string(), false),
+        };
+        if text[j..vend].trim() == value_json {
+            return (text.to_string(), false);
+        }
+        let mut out = String::new();
+        out.push_str(&text[..j]);
+        out.push_str(value_json);
+        out.push_str(&text[vend..]);
+        return (out, true);
+    }
+    // Insert new entry before the closing brace.
+    let mut out = String::new();
+    out.push_str(text[..obj_end].trim_end());
+    if !text[obj_start + 1..obj_end].trim().is_empty()
+        && !text[..obj_end].trim_end().ends_with(',')
+    {
+        out.push(',');
+    }
+    out.push_str(&format!("\n        \"{inner}\": {value_json}"));
+    out.push_str(&text[obj_end..]);
+    (out, true)
+}
+
+/// Find the matching close brace/bracket from an opener, JSONC-aware.
+fn match_brace(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    let (mut depth, opener, closer) = (0i32, bytes[open] as char, match bytes[open] as char {
+        '{' => '}',
+        '[' => ']',
+        _ => return None,
+    });
+    let _ = opener;
+    let mut i = open;
+    let mut in_str = false;
+    let mut esc = false;
+    while i < n {
+        let c = bytes[i] as char;
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+        } else if c == '"' {
+            in_str = true;
+        } else if c == '/' && i + 1 < n && bytes[i + 1] as char == '/' {
+            while i < n && bytes[i] as char != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && i + 1 < n && bytes[i + 1] as char == '*' {
+            i += 2;
+            while i + 1 < n && !(bytes[i] as char == '*' && bytes[i + 1] as char == '/') {
+                i += 1;
+            }
+            i += 1;
+        } else if c == '{' || c == '[' {
+            depth += 1;
+        } else if c == '}' || c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        let _ = closer;
+        i += 1;
+    }
+    None
+}
+
+/// End (exclusive) of a JSON value starting at `start`.
+fn value_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let n = bytes.len();
+    if start >= n {
+        return None;
+    }
+    match bytes[start] as char {
+        '"' => {
+            let mut i = start + 1;
+            while i < n {
+                let c = bytes[i] as char;
+                if c == '\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == '"' {
+                    return Some(i + 1);
+                }
+                i += 1;
+            }
+            None
+        }
+        '{' | '[' => match_brace(text, start).map(|p| p + 1),
+        _ => {
+            let mut i = start;
+            while i < n && !matches!(bytes[i] as char, ',' | '}' | ']') {
+                i += 1;
+            }
+            Some(i)
+        }
+    }
 }
 
 fn setup_cmd(rest: &[String]) -> ExitCode {
@@ -499,16 +681,35 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
             }
         }
     } else if theme.contains("material-icon") {
+        // Material Icon Theme supports custom SVGs referenced by path
+        // (relative to the theme's dist folder, no .svg suffix).
+        // Restriction: the folder must live inside .vscode/extensions.
+        let ext_dir = match vscode_extensions_dir() {
+            Some(d) => d,
+            None => {
+                eprintln!("nx setup: cannot locate VS Code extensions dir");
+                return ExitCode::from(1);
+            }
+        };
+        let icons = ext_dir.join("icons");
+        if let Err(e) = std::fs::create_dir_all(&icons)
+            .and_then(|_| std::fs::write(icons.join("nx.svg"), NX_SVG))
+        {
+            eprintln!("nx setup: cannot write icon: {e}");
+            return ExitCode::from(1);
+        }
+        const WANT: &str = "\"../../icons/nx\"";
         if !apply {
-            println!("nx setup: would add to {}", settings.display());
-            println!("  \"material-icon-theme.files.associations\": {{ \"*.nx\": \"python\" }}");
+            println!("nx setup: icon written to {}", icons.join("nx.svg").display());
+            println!("nx setup: would set \"material-icon-theme.files.associations\": {{ \"*.nx\": {WANT} }}");
             println!("nx setup: re-run with --apply to write it (a .bak backup is kept)");
             return ExitCode::SUCCESS;
         }
-        let (t2, _) = json_insert_key(
+        let (t2, _) = json_object_set(
             &text,
             "material-icon-theme.files.associations",
-            r#"{"*.nx": "python"}"#,
+            "*.nx",
+            WANT,
         );
         if t2 == text {
             log("nx setup: already configured");
@@ -518,7 +719,7 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
         let _ = std::fs::copy(&settings, &bak);
         match std::fs::write(&settings, t2) {
             Ok(_) => {
-                log("nx setup: updated, reload VS Code window");
+                log("nx setup: updated with the original N icon, reload VS Code window");
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -599,5 +800,21 @@ mod tests {
     fn ps_quote_escapes() {
         assert_eq!(super::ps_quote("update"), "'update'");
         assert_eq!(super::ps_quote("a'b"), "'a''b'");
+    }
+
+    #[test]
+    fn json_object_set_inserts_and_replaces() {
+        let (t, c) = super::json_object_set("{\n    \"a\": 1\n}", "material-icon-theme.files.associations", "*.nx", "\"../../icons/nx\"");
+        assert!(c);
+        assert!(t.contains("\"*.nx\": \"../../icons/nx\""));
+        // Idempotent.
+        let (t2, c2) = super::json_object_set(&t, "material-icon-theme.files.associations", "*.nx", "\"../../icons/nx\"");
+        assert!(!c2);
+        assert_eq!(t, t2);
+        // Replace python mapping with the custom icon.
+        let (t3, c3) = super::json_object_set("{\"material-icon-theme.files.associations\": {\"*.nx\": \"python\"}}", "material-icon-theme.files.associations", "*.nx", "\"../../icons/nx\"");
+        assert!(c3);
+        assert!(t3.contains("\"*.nx\": \"../../icons/nx\""));
+        assert!(!t3.contains("python"));
     }
 }
