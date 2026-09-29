@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.0.5
+- `nx update` self-elevates via UAC on Windows (no more Access denied)
+
 ## v0.0.4
 - VS Code: Nexum file icon theme (blue N on `.nx` files)
 - Extension publisher `HasanSalaou`
