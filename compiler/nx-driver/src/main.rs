@@ -1,11 +1,20 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>".to_string()
+    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx --version\n       nx --license".to_string()
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--version" {
+        println!("nx {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
+    if args.len() == 2 && args[1] == "--license" {
+        // MIT text embedded at compile time, so the .exe carries it.
+        print!("{}", include_str!("../../../LICENSE"));
+        return ExitCode::SUCCESS;
+    }
     if args.len() == 3 && args[1] == "--lex" {
         return lex_file(&args[2]);
     }
