@@ -1,0 +1,14 @@
+[package]
+name = "nx-driver"
+version = "0.0.1"
+edition = "2021"
+
+[[bin]]
+name = "nx"
+path = "src/main.rs"
+
+[dependencies]
+nx-lexer = { path = "../nx-lexer" }
+nx-ast = { path = "../nx-ast" }
+nx-parser = { path = "../nx-parser" }
+nx-interp = { path = "../nx-interp" }

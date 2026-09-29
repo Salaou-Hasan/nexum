@@ -1,0 +1,12 @@
+[package]
+name = "nx-interp"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "nx_interp"
+path = "src/lib.rs"
+
+[dependencies]
+nx-ast = { path = "../nx-ast" }
+nx-parser = { path = "../nx-parser" }

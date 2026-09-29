@@ -1,0 +1,24 @@
+{
+    // Nexum language mode (editors/vscode-nexum). Falls back to Python
+    // highlighting if the extension isn't installed yet.
+    "files.associations": {
+        "*.nx": "nexum"
+    },
+    "[nexum]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4,
+        "editor.detectIndentation": false,
+        "editor.autoIndent": "full",
+        "editor.trimAutoWhitespace": true
+    },
+    "[python]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4,
+        "editor.detectIndentation": false,
+        "editor.autoIndent": "full"
+    },
+    "editor.insertSpaces": true,
+    "editor.tabSize": 4,
+    "editor.detectIndentation": false,
+    "editor.autoIndent": "full"
+}

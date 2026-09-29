@@ -1,0 +1,14 @@
+nums = ["oberge", "olive", "people"]
+push(nums, "King")
+print(nums, len(nums))
+
+found = false
+
+for i in nums:
+    if i == "people":
+        found = true
+        break
+if found:
+    print("Word found !")
+else:
+    print("the specific word is missing")

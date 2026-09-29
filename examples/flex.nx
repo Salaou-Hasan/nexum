@@ -1,0 +1,7 @@
+y = "Hasan"
+x = "Hasanat"
+print(y, x)
+print("Hello, world!")
+x = 10.8 + 20
+y = x * 2
+print(y)

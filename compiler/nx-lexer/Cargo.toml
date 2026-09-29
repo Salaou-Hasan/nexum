@@ -1,0 +1,8 @@
+[package]
+name = "nx-lexer"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "nx_lexer"
+path = "src/lib.rs"

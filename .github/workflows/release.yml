@@ -1,0 +1,98 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-nx:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bits: 64
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            bits: 32
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bits: 64
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            bits: 32
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            bits: 64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bits: 64-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked -p nx-driver --target ${{ matrix.target }}
+      - name: package
+        shell: bash
+        run: |
+          STAGE="dist/nx-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp "target/${{ matrix.target }}/release/nx.exe" "$STAGE/"
+            cp README.md LICENSE "$STAGE/"
+            (cd dist && 7z a "nx-${{ github.ref_name }}-${{ matrix.target }}.zip" "nx-${{ github.ref_name }}-${{ matrix.target }}")
+          else
+            cp "target/${{ matrix.target }}/release/nx" "$STAGE/"
+            cp README.md LICENSE "$STAGE/"
+            (cd dist && tar czf "nx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" "nx-${{ github.ref_name }}-${{ matrix.target }}")
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nx-${{ matrix.target }}
+          path: dist/nx-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  build-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g @vscode/vsce
+      - run: vsce package --out dist/nexum-${{ github.ref_name }}.vsix
+        working-directory: editors/vscode-nexum
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: editors/vscode-nexum/dist/*.vsix
+
+  publish-release:
+    needs: [build-nx, build-extension]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  publish-marketplace:
+    needs: [publish-release]
+    runs-on: ubuntu-latest
+    if: ${{ secrets.VSCE_PAT != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g @vscode/vsce
+      - run: vsce publish --pat ${{ secrets.VSCE_PAT }}
+        working-directory: editors/vscode-nexum

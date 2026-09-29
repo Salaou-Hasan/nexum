@@ -1,0 +1,31 @@
+{
+    "name": "vscode-nexum",
+    "displayName": "Nexum",
+    "description": "Nexum (.nx) language support: highlighting, indentation, brackets",
+    "version": "0.0.1",
+    "publisher": "nexum",
+    "license": "MIT",
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "nexum",
+                "aliases": ["Nexum", "nx"],
+                "extensions": [".nx"],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "nexum",
+                "scopeName": "source.nexum",
+                "path": "./syntaxes/nexum.tmLanguage.json"
+            }
+        ]
+    }
+}

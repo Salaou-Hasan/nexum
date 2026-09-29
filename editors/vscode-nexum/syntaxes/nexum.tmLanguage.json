@@ -1,0 +1,71 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Nexum",
+    "scopeName": "source.nexum",
+    "fileTypes": ["nx"],
+    "patterns": [
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#keyword" },
+        { "include": "#function-call" },
+        { "include": "#operator" }
+    ],
+    "repository": {
+        "comment": {
+            "name": "comment.line.number-sign.nexum",
+            "match": "#.*$"
+        },
+        "string": {
+            "name": "string.quoted.double.nexum",
+            "begin": "\"",
+            "end": "\"",
+            "patterns": [
+                {
+                    "name": "constant.character.escape.nexum",
+                    "match": "\\\\[nrt\"\\\\]"
+                }
+            ]
+        },
+        "number": {
+            "patterns": [
+                {
+                    "name": "constant.numeric.float.nexum",
+                    "match": "\\b\\d+\\.\\d+\\b"
+                },
+                {
+                    "name": "constant.numeric.integer.nexum",
+                    "match": "\\b\\d+\\b"
+                }
+            ]
+        },
+        "keyword": {
+            "patterns": [
+                {
+                    "name": "keyword.control.nexum",
+                    "match": "\\b(if|elif|else|while|for|in|fn|return|break|continue)\\b"
+                },
+                {
+                    "name": "keyword.operator.nexum",
+                    "match": "\\b(and|or|not)\\b"
+                },
+                {
+                    "name": "constant.language.nexum",
+                    "match": "\\b(true|false)\\b"
+                }
+            ]
+        },
+        "function-call": {
+            "patterns": [
+                {
+                    "name": "entity.name.function.nexum",
+                    "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(?=\\s*\\()"
+                }
+            ]
+        },
+        "operator": {
+            "name": "keyword.operator.nexum",
+            "match": "(==|!=|<=|>=|\\.\\.|\\+=|-=|\\*=|/=|[+\\-*/=<>!,:\\[\\]()])"
+        }
+    }
+}

@@ -1,0 +1,8 @@
+for i in 0..5+1:
+      print(i)
+
+fn add(a, b):
+    return a + b
+
+print(add(20, 22))
+print(true and true, not false)
