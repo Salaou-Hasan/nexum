@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.0.4
+- VS Code: Nexum file icon theme (blue N on `.nx` files)
+- Extension publisher `HasanSalaou`
+
 ## v0.0.3
 - Windows MSI installer (PATH + bundled VS Code extension)
 - `nx update` also updates the VS Code extension
