@@ -68,9 +68,19 @@
                   Impersonate="yes"
                   Return="ignore" />
 
+    <!-- Add the .nx icon mapping to the user's current icon theme. -->
+    <CustomAction Id="SetupIcons"
+                  Directory="INSTALLDIR"
+                  ExeCommand='nx.exe setup --apply --quiet'
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="ignore" />
+
     <InstallExecuteSequence>
       <Custom Action="InstallVsCodeExt"
               After="InstallFinalize">(&amp;VsCodeExt=3) AND (NOT Installed)</Custom>
+      <Custom Action="SetupIcons"
+              After="InstallVsCodeExt">(NOT Installed) OR (NOT UPGRADINGPRODUCTCODE)</Custom>
     </InstallExecuteSequence>
 
     <UIRef Id="WixUI_FeatureTree" />

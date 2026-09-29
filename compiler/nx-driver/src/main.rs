@@ -1,7 +1,8 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx --version\n       nx --license\n       nx update [--version <ver>]".to_string()
+    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx --version\n       nx --license\n       nx setup [--apply]
+       nx update [--version <ver>]".to_string()
 }
 
 const UPDATE_REPO: &str = "Salaou-Hasan/nexum";
@@ -19,6 +20,9 @@ fn main() -> ExitCode {
     }
     if args.len() >= 2 && args[1] == "update" {
         return update_cmd(&args[2..]);
+    }
+    if args.len() >= 2 && args[1] == "setup" {
+        return setup_cmd(&args[2..]);
     }
     if args.len() == 3 && args[1] == "--lex" {
         return lex_file(&args[2]);
@@ -336,6 +340,197 @@ fn find_code() -> Option<std::path::PathBuf> {
             Ok(o) if o.status.success()
         )
     })
+}
+
+const NX_SVG: &str = include_str!("../../../editors/vscode-nexum/icons/file_type_nx.svg");
+
+fn vscode_settings_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var("APPDATA").ok().map(std::path::PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h).join("Library/Application Support")
+    })?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h).join(".config")
+    })?;
+    Some(base.join("Code/User/settings.json"))
+}
+
+fn nx_data_icons() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var("APPDATA").ok().map(std::path::PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    let base = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h).join("Library/Application Support/Nexum")
+    })?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h).join(".local/share/Nexum")
+    })?;
+    #[cfg(windows)]
+    return Some(base.join("Nexum/icons"));
+    #[cfg(not(windows))]
+    return Some(base.join("icons"));
+}
+
+fn settings_theme(text: &str) -> Option<String> {
+    text.split("\"workbench.iconTheme\"")
+        .nth(1)?
+        .split(':')
+        .nth(1)?
+        .split('"')
+        .nth(1)
+        .map(|s| s.to_string())
+}
+
+/// Insert `"key": value` before the root closing brace. Returns (text, changed).
+fn json_insert_key(text: &str, key: &str, value: &str) -> (String, bool) {
+    if text.contains(&format!("\"{key}\"")) {
+        return (text.to_string(), false);
+    }
+    let close = match text.rfind('}') {
+        Some(i) => i,
+        None => return (text.to_string(), false),
+    };
+    let before: String = text[..close].chars().rev().take_while(|c| c.is_whitespace()).collect();
+    let trimmed = text[..close].trim_end();
+    // Empty object -> no comma; existing trailing comma -> don't double it.
+    let need_comma = !trimmed.ends_with('{') && !trimmed.ends_with(',');
+    let mut out = String::with_capacity(text.len() + key.len() + value.len() + 8);
+    out.push_str(trimmed);
+    if need_comma {
+        out.push(',');
+    }
+    out.push_str(&format!("\n    \"{key}\": {value}"));
+    out.push_str(&before);
+    out.push('}');
+    out.push_str(&text[close + 1..]);
+    (out, true)
+}
+
+fn setup_cmd(rest: &[String]) -> ExitCode {
+    let apply = rest.iter().any(|a| a == "--apply");
+    let quiet = rest.iter().any(|a| a == "--quiet");
+    let log = |msg: &str| {
+        if !quiet {
+            println!("{msg}");
+        }
+    };
+
+    let settings = match vscode_settings_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("nx setup: cannot locate VS Code settings dir on this platform");
+            return ExitCode::from(1);
+        }
+    };
+    let text = match std::fs::read_to_string(&settings) {
+        Ok(t) => t,
+        Err(_) => {
+            log("nx setup: no VS Code settings.json found (is VS Code installed?)");
+            log("nx setup: open VS Code once, then re-run: nx setup --apply");
+            return ExitCode::SUCCESS;
+        }
+    };
+    let theme = settings_theme(&text).unwrap_or_default();
+    log(&format!("nx setup: icon theme is '{}'", if theme.is_empty() { "(default)" } else { &theme }));
+
+    if theme.contains("vsicons") {
+        // vscode-icons: point it at our N icon, add the .nx mapping.
+        let icons = match nx_data_icons() {
+            Some(d) => d,
+            None => {
+                eprintln!("nx setup: cannot locate app data dir");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&icons)
+            .and_then(|_| std::fs::write(icons.join("file_type_nx.svg"), NX_SVG))
+        {
+            eprintln!("nx setup: cannot write icon pack: {e}");
+            return ExitCode::from(1);
+        }
+        let folder = icons.to_string_lossy().replace('\\', "\\\\");
+        let assoc = r#"[{"icon": "nx", "extensions": ["nx"], "format": "svg"}]"#;
+        if !apply {
+            println!("nx setup: would add to {}", settings.display());
+            println!("  \"vsicons.customIconFolderPath\": \"{folder}\"");
+            println!("  \"vsicons.associations.files\": {assoc}");
+            println!("nx setup: re-run with --apply to write it (a .bak backup is kept)");
+            return ExitCode::SUCCESS;
+        }
+        let (t2, _) = json_insert_key(&text, "vsicons.customIconFolderPath", &format!("\"{folder}\""));
+        // Merge the nx entry into the associations array when present.
+        let mut t3 = t2.clone();
+        if t3.contains("\"vsicons.associations.files\"") {
+            if !t3.contains("\"nx\"") {
+                let entry = r#"{"icon": "nx", "extensions": ["nx"], "format": "svg"}"#;
+                let key_pos = t3.find("\"vsicons.associations.files\"").unwrap();
+                let open = t3[key_pos..].find('[').map(|b| key_pos + b).unwrap();
+                let rest = &t3[open + 1..];
+                let is_empty = rest.trim_start().starts_with(']');
+                if is_empty {
+                    t3.insert_str(open + 1, entry);
+                } else {
+                    t3.insert_str(open + 1, &format!("{entry},"));
+                }
+            }
+        } else {
+            let (t, _) = json_insert_key(&t3, "vsicons.associations.files", assoc);
+            t3 = t;
+        }
+        if t3 == text {
+            log("nx setup: already configured");
+            return ExitCode::SUCCESS;
+        }
+        let bak = settings.with_extension("json.bak");
+        let _ = std::fs::copy(&settings, &bak);
+        match std::fs::write(&settings, t3) {
+            Ok(_) => {
+                log(&format!("nx setup: updated {} (backup at {})", settings.display(), bak.display()));
+                log("nx setup: reload VS Code window to see the N icon");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nx setup: cannot write settings: {e}");
+                ExitCode::from(1)
+            }
+        }
+    } else if theme.contains("material-icon") {
+        if !apply {
+            println!("nx setup: would add to {}", settings.display());
+            println!("  \"material-icon-theme.files.associations\": {{ \"*.nx\": \"python\" }}");
+            println!("nx setup: re-run with --apply to write it (a .bak backup is kept)");
+            return ExitCode::SUCCESS;
+        }
+        let (t2, _) = json_insert_key(
+            &text,
+            "material-icon-theme.files.associations",
+            r#"{"*.nx": "python"}"#,
+        );
+        if t2 == text {
+            log("nx setup: already configured");
+            return ExitCode::SUCCESS;
+        }
+        let bak = settings.with_extension("json.bak");
+        let _ = std::fs::copy(&settings, &bak);
+        match std::fs::write(&settings, t2) {
+            Ok(_) => {
+                log("nx setup: updated, reload VS Code window");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("nx setup: cannot write settings: {e}");
+                ExitCode::from(1)
+            }
+        }
+    } else {
+        log("nx setup: theme has no per-file additions; select the 'Nexum Icons' file icon theme");
+        log("nx setup: Preferences -> File Icon Theme -> Nexum Icons (ships in the vsix)");
+        ExitCode::SUCCESS
+    }
 }
 
 fn update_extension(tag: &str) {
