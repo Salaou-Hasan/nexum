@@ -2,7 +2,7 @@
     "name": "vscode-nexum",
     "displayName": "Nexum",
     "description": "Nexum (.nx) language support: highlighting, indentation, brackets",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "publisher": "nexum",
     "license": "MIT",
     "repository": {
