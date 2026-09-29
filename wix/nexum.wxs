@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nexum (nx) Windows installer. Built in CI with WiX 3.14:
+       candle nexum.wxs -dVersion=0.0.3 -dArch=x64 -dSourceDir=... -dVsix=...
+       light nexum.wixobj -out nexum-0.0.3-x64.msi
+     Major upgrades: same UpgradeCode, new Product Id (*), version bump. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Nexum"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="Nexum"
+           UpgradeCode="ED7076A5-F907-4415-9813-8777552255AB">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="Nexum (nx) programming language"
+             Manufacturer="Nexum" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Nexum is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="Main" Title="Nexum compiler (nx)" Level="1" Absent="disallow">
+      <ComponentRef Id="CmpNxExe" />
+      <ComponentRef Id="CmpLicense" />
+    </Feature>
+    <Feature Id="VsCodeExt" Title="VS Code extension" Description="Installs the Nexum VS Code extension via the code CLI." Level="1">
+      <ComponentRef Id="CmpVscodeExt" />
+    </Feature>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLDIR" Name="Nexum">
+          <Component Id="CmpNxExe" Guid="A879FA80-BE02-4F1A-8208-FC8AE6A3327A">
+            <File Id="NxExe" Source="$(var.SourceDir)\nx.exe" KeyPath="yes" />
+            <!-- Prepend install dir to system PATH -->
+            <Environment Id="NxPath"
+                         Name="PATH"
+                         Value="[INSTALLDIR]"
+                         Permanent="no"
+                         Part="first"
+                         Action="set"
+                         System="yes" />
+          </Component>
+          <Component Id="CmpLicense" Guid="04AB0DD4-2BD8-4510-9491-7B7914C10EC5">
+            <File Id="License" Source="..\LICENSE" KeyPath="yes" />
+          </Component>
+          <Component Id="CmpVscodeExt" Guid="83565E53-74EA-4BD4-9989-473F8FBBB46E">
+            <File Id="VscodeVsIx" Source="$(var.Vsix)" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <!-- Install the VS Code extension as the installing user (per-user
+         profile) right after files land. Skipped silently when the
+         `code` CLI is missing or the feature was deselected. -->
+    <CustomAction Id="InstallVsCodeExt"
+                  Directory="INSTALLDIR"
+                  ExeCommand='cmd.exe /c "where code &gt;nul 2&gt;nul &amp;&amp; code --install-extension &quot;[INSTALLDIR]nexum.vsix&quot; --force"'
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="InstallVsCodeExt"
+              After="InstallFinalize">(&amp;VsCodeExt=3) AND (NOT Installed)</Custom>
+    </InstallExecuteSequence>
+
+    <UIRef Id="WixUI_FeatureTree" />
+  </Product>
+</Wix>

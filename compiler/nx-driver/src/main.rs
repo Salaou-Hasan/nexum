@@ -149,6 +149,17 @@ fn download_url(tag: &str) -> String {
     )
 }
 
+fn vsix_name(tag: &str) -> String {
+    format!("nexum-{tag}.vsix")
+}
+
+fn vsix_url(tag: &str) -> String {
+    format!(
+        "https://github.com/{UPDATE_REPO}/releases/download/{tag}/{}",
+        vsix_name(tag)
+    )
+}
+
 fn latest_tag() -> Result<String, String> {
     // No HTTP deps: use the system curl (present on Win10+, macOS, most Linux).
     let out = std::process::Command::new("curl")
@@ -243,8 +254,42 @@ fn update_cmd(rest: &[String]) -> ExitCode {
         let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
     }
     println!("nx: updated to {tag} (previous kept at {})", backup.display());
+    update_extension(&tag);
     println!("nx: restart your terminal to use it");
     ExitCode::SUCCESS
+}
+
+fn update_extension(tag: &str) {
+    let url = vsix_url(tag);
+    let tmp = std::env::temp_dir().join(vsix_name(tag));
+    println!("nx: downloading {url}");
+    let dl = std::process::Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(&tmp)
+        .arg(&url)
+        .status();
+    if !matches!(dl, Ok(s) if s.success()) {
+        eprintln!("nx update: extension download failed, skipping");
+        return;
+    }
+    // `code` CLI may be absent (VS Code not installed / not on PATH).
+    let probe = std::process::Command::new("code")
+        .arg("--version")
+        .output();
+    if !matches!(probe, Ok(o) if o.status.success()) {
+        eprintln!("nx update: `code` CLI not found, extension not updated");
+        eprintln!("nx update: install it manually: code --install-extension {}", tmp.display());
+        return;
+    }
+    match std::process::Command::new("code")
+        .args(["--install-extension"])
+        .arg(&tmp)
+        .arg("--force")
+        .status()
+    {
+        Ok(s) if s.success() => println!("nx: extension updated to {tag}"),
+        _ => eprintln!("nx update: `code --install-extension` failed"),
+    }
 }
 
 #[cfg(test)]
@@ -266,5 +311,11 @@ mod tests {
     fn url_shape() {
         let u = super::download_url("v0.0.2");
         assert!(u.contains("Salaou-Hasan/nexum/releases/download/v0.0.2/nx-v0.0.2-"));
+    }
+
+    #[test]
+    fn vsix_url_shape() {
+        let u = super::vsix_url("v0.0.2");
+        assert!(u.ends_with("releases/download/v0.0.2/nexum-v0.0.2.vsix"));
     }
 }

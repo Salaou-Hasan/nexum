@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.0.3
+- Windows MSI installer (PATH + bundled VS Code extension)
+- `nx update` also updates the VS Code extension
+
 ## v0.0.2
 - `nx update` self-updater (`nx update --version <ver>` to pin)
 - `nx --version` / `nx --license` (MIT embedded in exe)

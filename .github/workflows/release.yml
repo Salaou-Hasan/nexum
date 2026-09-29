@@ -69,8 +69,38 @@ jobs:
           name: vscode-extension
           path: editors/vscode-nexum/dist/*.vsix
 
-  publish-release:
+  build-msi:
     needs: [build-nx, build-extension]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: install WiX 3.14
+        run: choco install wixtoolset --version 3.14.1 -y --no-progress
+      - name: build MSIs (x64 + x86)
+        shell: bash
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          WIX="C:\Program Files (x86)\WiX Toolset v3.14\bin"
+          mkdir -p stage64 stage86 obj
+          cp "dist/nx-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc.exe" stage64/nx.exe
+          cp "dist/nexum-${GITHUB_REF_NAME}.vsix" stage64/nexum.vsix
+          cp "dist/nx-${GITHUB_REF_NAME}-i686-pc-windows-msvc.exe" stage86/nx.exe
+          cp "dist/nexum-${GITHUB_REF_NAME}.vsix" stage86/nexum.vsix
+          "$WIX/candle.exe" wix/nexum.wxs -arch x64 -dVersion="$VER" -dSourceDir=stage64 -out obj/nexum64.wixobj
+          "$WIX/light.exe" obj/nexum64.wixobj -ext WixUIExtension -out "dist/nexum-${GITHUB_REF_NAME}-x64.msi"
+          "$WIX/candle.exe" wix/nexum.wxs -arch x86 -dVersion="$VER" -dSourceDir=stage86 -out obj/nexum86.wixobj
+          "$WIX/light.exe" obj/nexum86.wixobj -ext WixUIExtension -out "dist/nexum-${GITHUB_REF_NAME}-x86.msi"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: dist/*.msi
+
+  publish-release:
+    needs: [build-nx, build-extension, build-msi]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
