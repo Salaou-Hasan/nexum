@@ -5,6 +5,7 @@
     "version": "0.0.2",
     "publisher": "nexum",
     "license": "MIT",
+    "icon": "icon.png",
     "repository": {
         "type": "git",
         "url": "https://github.com/Salaou-Hasan/nexum.git"
