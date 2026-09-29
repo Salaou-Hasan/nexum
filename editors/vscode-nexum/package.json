@@ -32,6 +32,13 @@
                 "scopeName": "source.nexum",
                 "path": "./syntaxes/nexum.tmLanguage.json"
             }
+        ],
+        "iconThemes": [
+            {
+                "id": "nexum-icons",
+                "label": "Nexum Icons",
+                "path": "./fileicons/nexum-icons.json"
+            }
         ]
     }
 }

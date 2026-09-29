@@ -1,0 +1,14 @@
+{
+    "iconDefinitions": {
+        "_f_nexum": {
+            "iconPath": "../icon.png"
+        }
+    },
+    "fileExtensions": {
+        "nx": "_f_nexum"
+    },
+    "fileNames": {},
+    "languageIds": {
+        "nexum": "_f_nexum"
+    }
+}

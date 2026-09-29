@@ -20,5 +20,7 @@
     "editor.insertSpaces": true,
     "editor.tabSize": 4,
     "editor.detectIndentation": false,
-    "editor.autoIndent": "full"
+    "editor.autoIndent": "full",
+    // Use the bundled Nexum file icons for .nx in this workspace.
+    "workbench.iconTheme": "nexum-icons"
 }
