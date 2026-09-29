@@ -43,21 +43,16 @@ jobs:
       - name: package
         shell: bash
         run: |
-          STAGE="dist/nx-${{ github.ref_name }}-${{ matrix.target }}"
-          mkdir -p "$STAGE"
+          mkdir -p dist
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp "target/${{ matrix.target }}/release/nx.exe" "$STAGE/"
-            cp README.md LICENSE "$STAGE/"
-            (cd dist && 7z a "nx-${{ github.ref_name }}-${{ matrix.target }}.zip" "nx-${{ github.ref_name }}-${{ matrix.target }}")
+            cp "target/${{ matrix.target }}/release/nx.exe" "dist/nx-${{ github.ref_name }}-${{ matrix.target }}.exe"
           else
-            cp "target/${{ matrix.target }}/release/nx" "$STAGE/"
-            cp README.md LICENSE "$STAGE/"
-            (cd dist && tar czf "nx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" "nx-${{ github.ref_name }}-${{ matrix.target }}")
+            cp "target/${{ matrix.target }}/release/nx" "dist/nx-${{ github.ref_name }}-${{ matrix.target }}"
           fi
       - uses: actions/upload-artifact@v4
         with:
           name: nx-${{ matrix.target }}
-          path: dist/nx-${{ github.ref_name }}-${{ matrix.target }}.*
+          path: dist/nx-${{ github.ref_name }}-${{ matrix.target }}*
 
   build-extension:
     runs-on: ubuntu-latest
