@@ -27,7 +27,11 @@
     </Feature>
 
     <Directory Id="TARGETDIR" Name="SourceDir">
+      <?if $(var.Platform) = x64 ?>
+      <Directory Id="ProgramFiles64Folder">
+      <?else ?>
       <Directory Id="ProgramFilesFolder">
+      <?endif ?>
         <Directory Id="INSTALLDIR" Name="Nexum">
           <Component Id="CmpNxExe" Guid="A879FA80-BE02-4F1A-8208-FC8AE6A3327A">
             <File Id="NxExe" Source="$(var.SourceDir)\nx.exe" KeyPath="yes" />
@@ -47,7 +51,11 @@
             <File Id="VscodeVsIx" Source="$(var.SourceDir)\nexum.vsix" KeyPath="yes" />
           </Component>
         </Directory>
+      <?if $(var.Platform) = x64 ?>
       </Directory>
+      <?else ?>
+      </Directory>
+      <?endif ?>
     </Directory>
 
     <!-- Install the VS Code extension as the installing user (per-user
