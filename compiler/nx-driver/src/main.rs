@@ -240,6 +240,15 @@ fn update_cmd(rest: &[String]) -> ExitCode {
     let backup = exe.with_extension(format!("{}.bak", env!("CARGO_PKG_VERSION")));
     let _ = std::fs::remove_file(&backup);
     if let Err(e) = std::fs::rename(&exe, &backup) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            #[cfg(windows)]
+            {
+                eprintln!("nx update: administrator rights needed, requesting elevation...");
+                return relaunch_elevated(rest);
+            }
+            #[cfg(unix)]
+            eprintln!("nx update: permission denied, re-run with sudo: sudo nx update");
+        }
         eprintln!("nx update: cannot replace {}: {e}", exe.display());
         return ExitCode::from(1);
     }
@@ -257,6 +266,43 @@ fn update_cmd(rest: &[String]) -> ExitCode {
     update_extension(&tag);
     println!("nx: restart your terminal to use it");
     ExitCode::SUCCESS
+}
+
+#[cfg(windows)]
+fn ps_quote(a: &str) -> String {
+    format!("'{}'", a.replace('\'', "''"))
+}
+
+#[cfg(windows)]
+fn relaunch_elevated(rest: &[String]) -> ExitCode {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("nx update: cannot locate current exe: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // Re-run the same update command elevated via UAC prompt.
+    let mut args = vec![ps_quote("update")];
+    args.extend(rest.iter().map(|a| ps_quote(a)));
+    let script = format!(
+        "Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -Wait",
+        exe.display().to_string().replace('\'', "''"),
+        args.join(",")
+    );
+    match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("nx: elevated update finished");
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("nx update: elevation failed or was declined");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn update_extension(tag: &str) {
@@ -317,5 +363,12 @@ mod tests {
     fn vsix_url_shape() {
         let u = super::vsix_url("v0.0.2");
         assert!(u.ends_with("releases/download/v0.0.2/nexum-v0.0.2.vsix"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ps_quote_escapes() {
+        assert_eq!(super::ps_quote("update"), "'update'");
+        assert_eq!(super::ps_quote("a'b"), "'a''b'");
     }
 }
