@@ -78,8 +78,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: install WiX 3.14
-        run: choco install wixtoolset --version 3.14.1 -y --no-progress
+      - name: install WiX 3.x
+        # No version pin: runners pre-install newer 3.14 builds and a pin fails.
+        run: choco install wixtoolset -y --no-progress
       - name: build MSIs (x64 + x86)
         shell: bash
         run: |
