@@ -36,6 +36,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: install 32-bit C libs (linux i686)
+        if: matrix.target == 'i686-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
       - run: cargo build --release --locked -p nx-driver --target ${{ matrix.target }}
       - name: package
         shell: bash
@@ -64,7 +67,7 @@ jobs:
         with:
           node-version: 20
       - run: npm install -g @vscode/vsce
-      - run: vsce package --out dist/nexum-${{ github.ref_name }}.vsix
+      - run: mkdir -p dist && vsce package --out dist/nexum-${{ github.ref_name }}.vsix
         working-directory: editors/vscode-nexum
       - uses: actions/upload-artifact@v4
         with:
