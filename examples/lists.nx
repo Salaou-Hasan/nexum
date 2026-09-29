@@ -8,6 +8,7 @@ for i in nums:
     if i == "people":
         found = true
         break
+        
 if found:
     print("Word found !")
 else:

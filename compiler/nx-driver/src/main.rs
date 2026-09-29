@@ -305,6 +305,34 @@ fn relaunch_elevated(rest: &[String]) -> ExitCode {
     }
 }
 
+fn find_code() -> Option<std::path::PathBuf> {
+    // 1. Whatever is on PATH.
+    if matches!(
+        std::process::Command::new("code").arg("--version").output(),
+        Ok(o) if o.status.success()
+    ) {
+        return Some("code".into());
+    }
+    // 2. Well-known install locations (per-user and per-machine).
+    // Elevated shells often lack the per-user PATH entry, so probe directly.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(format!("{local}\\Programs\\Microsoft VS Code\\bin\\code.cmd").into());
+    }
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        candidates.push(format!("{pf}\\Microsoft VS Code\\bin\\code.cmd").into());
+    }
+    if let Ok(pfx) = std::env::var("ProgramFiles(x86)") {
+        candidates.push(format!("{pfx}\\Microsoft VS Code\\bin\\code.cmd").into());
+    }
+    candidates.into_iter().find(|p| {
+        matches!(
+            std::process::Command::new(p).arg("--version").output(),
+            Ok(o) if o.status.success()
+        )
+    })
+}
+
 fn update_extension(tag: &str) {
     let url = vsix_url(tag);
     let tmp = std::env::temp_dir().join(vsix_name(tag));
@@ -318,16 +346,17 @@ fn update_extension(tag: &str) {
         eprintln!("nx update: extension download failed, skipping");
         return;
     }
-    // `code` CLI may be absent (VS Code not installed / not on PATH).
-    let probe = std::process::Command::new("code")
-        .arg("--version")
-        .output();
-    if !matches!(probe, Ok(o) if o.status.success()) {
-        eprintln!("nx update: `code` CLI not found, extension not updated");
-        eprintln!("nx update: install it manually: code --install-extension {}", tmp.display());
-        return;
-    }
-    match std::process::Command::new("code")
+    // `code` CLI may be absent from PATH (VS Code not installed, or an
+    // elevated shell missing the per-user entry) — probe known spots.
+    let code = match find_code() {
+        Some(c) => c,
+        None => {
+            eprintln!("nx update: `code` CLI not found, extension not updated");
+            eprintln!("nx update: install it manually: code --install-extension {}", tmp.display());
+            return;
+        }
+    };
+    match std::process::Command::new(&code)
         .args(["--install-extension"])
         .arg(&tmp)
         .arg("--force")
