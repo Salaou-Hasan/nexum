@@ -87,12 +87,14 @@ jobs:
   publish-marketplace:
     needs: [publish-release]
     runs-on: ubuntu-latest
-    if: ${{ secrets.VSCE_PAT != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: npm install -g @vscode/vsce
-      - run: vsce publish --pat ${{ secrets.VSCE_PAT }}
+      # secrets context is not allowed in job-level `if`, only step-level.
+      - name: publish to marketplace
+        if: ${{ secrets.VSCE_PAT != '' }}
+        run: vsce publish --pat ${{ secrets.VSCE_PAT }}
         working-directory: editors/vscode-nexum
