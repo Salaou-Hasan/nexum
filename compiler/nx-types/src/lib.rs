@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use nx_ast::{BinOp, Expr, Program, Span, Stmt, UnaryOp};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int,
     Float,
@@ -38,6 +38,12 @@ impl std::fmt::Display for Ty {
             Ty::None => write!(f, "None"),
             Ty::Unknown => write!(f, "?"),
         }
+    }
+}
+
+impl Default for Ty {
+    fn default() -> Self {
+        Ty::Unknown
     }
 }
 
@@ -70,6 +76,23 @@ struct ModInfo {
     funcs: HashMap<String, (Vec<Ty>, Ty)>,
 }
 
+/// Static shape of one function, as the optimizer sees it. Codegen uses
+/// `locals` to pick a machine representation per name; anything not listed
+/// (or not a scalar) stays boxed in the dynamic value representation.
+#[derive(Debug, Clone, Default)]
+pub struct FnInfo {
+    pub locals: HashMap<String, Ty>,
+    pub params: Vec<String>,
+    pub ret: Ty,
+}
+
+impl Ty {
+    /// Scalars the backend can hold in a bare register (i64/double/i1).
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, Ty::Int | Ty::Float | Ty::Bool)
+    }
+}
+
 struct Checker {
     vars: HashMap<String, Ty>,
     funcs: HashMap<String, (Vec<Ty>, Ty)>,
@@ -80,6 +103,14 @@ struct Checker {
     in_function: bool,
     returns: Vec<Ty>,
     loop_depth: usize,
+    /// Parameters of the function being checked. Their types start Unknown
+    /// and are narrowed from how the body uses them, which is what lets
+    /// codegen keep them out of the box.
+    param_names: Vec<String>,
+    /// Per-function inferred shapes, harvested for the optimizer.
+    inferred: HashMap<(String, String), FnInfo>,
+    /// Module the checker is currently inside, for inference keys.
+    module_name: String,
     /// Inside `parallel:` tasks: names bound in the enclosing function
     /// (writing them would be a cross-thread lost update).
     parallel_outer: Option<HashSet<String>>,
@@ -104,6 +135,26 @@ impl Checker {
                 let old = old.clone();
                 self.err(span, format!("variable '{name}' is {old}, cannot rebind to {ty}"));
             }
+        }
+    }
+
+    /// Narrow a parameter from the way the body uses it. NX has no
+    /// overloading and no generics, so a use site fixes the type: `n - 1`
+    /// proves Int, `n < 1.5` proves Float, `not n` proves Bool. Non-params
+    /// and already-known types are left alone (locals are monomorphic).
+    fn expect_param(&mut self, e: &Expr, ty: Ty) {
+        let Expr::Var(name, _) = e else { return };
+        if !self.param_names.iter().any(|p| p == name) {
+            return;
+        }
+        match self.vars.get(name) {
+            Some(Ty::Unknown) => {
+                self.vars.insert(name.clone(), ty);
+            }
+            Some(old) if *old == ty => {}
+            // Conflicting uses: leave the first answer and let the
+            // expression-level check report the mismatch.
+            _ => {}
         }
     }
 
@@ -157,12 +208,14 @@ impl Checker {
                 if !matches!(t, Ty::Bool | Ty::Unknown) {
                     self.err(cond.span(), format!("condition must be Bool, found {t}"));
                 }
+                self.expect_param(cond, Ty::Bool);
                 self.check_block(then_body);
                 for (ec, eb) in elifs {
                     let t = self.check_expr(ec);
                     if !matches!(t, Ty::Bool | Ty::Unknown) {
                         self.err(ec.span(), format!("condition must be Bool, found {t}"));
                     }
+                    self.expect_param(ec, Ty::Bool);
                     self.check_block(eb);
                 }
                 if let Some(b) = else_body {
@@ -174,6 +227,7 @@ impl Checker {
                 if !matches!(t, Ty::Bool | Ty::Unknown) {
                     self.err(cond.span(), format!("condition must be Bool, found {t}"));
                 }
+                self.expect_param(cond, Ty::Bool);
                 self.loop_depth += 1;
                 self.check_block(body);
                 self.loop_depth -= 1;
@@ -189,6 +243,8 @@ impl Checker {
                         if !matches!(e, Ty::Int | Ty::Unknown) {
                             self.err(end.span(), format!("range end must be Int, found {e}"));
                         }
+                        self.expect_param(start, Ty::Int);
+                        self.expect_param(end, Ty::Int);
                         Ty::Int
                     }
                     nx_ast::ForIter::Each(e) => match self.check_expr(e) {
@@ -229,10 +285,12 @@ impl Checker {
                 let saved_in_fn = self.in_function;
                 let saved_returns = std::mem::take(&mut self.returns);
                 let saved_outer = self.fn_outer.take();
+                let saved_params = std::mem::take(&mut self.param_names);
                 self.in_function = true;
                 for p in params {
                     self.vars.insert(p.clone(), Ty::Unknown);
                 }
+                self.param_names = params.clone();
                 // Outer scope for parallel tasks: params + all assigned names.
                 let mut outer: HashSet<String> = params.iter().cloned().collect();
                 collect_assigned(body, &mut outer);
@@ -252,13 +310,23 @@ impl Checker {
                         self.err(*span, format!("inconsistent return types: {r} vs {t}"));
                     }
                 }
+                // The optimizer needs each function's own scope, captured
+                // before the enclosing scope is restored.
+                let fn_locals = self.vars.clone();
+                let param_tys: Vec<Ty> =
+                    params.iter().map(|p| fn_locals.get(p).cloned().unwrap_or(Ty::Unknown)).collect();
                 self.vars = saved_vars;
                 self.in_function = saved_in_fn;
                 self.returns = saved_returns;
                 self.fn_outer = saved_outer;
+                self.param_names = saved_params;
+                self.inferred.insert(
+                    (self.module_name.clone(), name.clone()),
+                    FnInfo { locals: fn_locals, params: params.clone(), ret: ret.clone() },
+                );
                 self.funcs.insert(
                     name.clone(),
-                    (vec![Ty::Unknown; params.len()], ret),
+                    (param_tys, ret),
                 );
             }
             Stmt::Return { value, span } => {
@@ -380,11 +448,17 @@ impl Checker {
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_funcs = std::mem::take(&mut self.funcs);
         let saved_base = std::mem::replace(&mut self.base, dir);
+        let saved_module = std::mem::replace(&mut self.module_name, name.to_string());
         self.loading.push(name.to_string());
         self.check_block(&prog.stmts);
         self.loading.pop();
         let info = ModInfo { vars: std::mem::replace(&mut self.vars, saved_vars), funcs: std::mem::replace(&mut self.funcs, saved_funcs) };
+        self.inferred.insert(
+            (name.to_string(), "<top>".to_string()),
+            FnInfo { locals: info.vars.clone(), params: Vec::new(), ret: Ty::None },
+        );
         self.base = saved_base;
+        self.module_name = saved_module;
         self.modules.insert(name.to_string(), info);
         true
     }
@@ -449,6 +523,7 @@ impl Checker {
                 if !matches!(ix, Ty::Int | Ty::Unknown) {
                     self.err(*span, format!("index must be Int, found {ix}"));
                 }
+                self.expect_param(index, Ty::Int);
                 match b {
                     Ty::List(t) => *t,
                     Ty::Str => Ty::Str,
@@ -483,6 +558,8 @@ impl Checker {
                                 self.err(*span, format!("'{0}' operand of '{1}' must be Bool, found {t}", side, op.as_str()));
                             }
                         }
+                        self.expect_param(left, Ty::Bool);
+                        self.expect_param(right, Ty::Bool);
                         Ty::Bool
                     }
                     BinOp::Eq | BinOp::NotEq => {
@@ -490,6 +567,14 @@ impl Checker {
                             || (is_numeric(&l) && is_numeric(&r)))
                         {
                             self.err(*span, format!("cannot compare {l} and {r}"));
+                        }
+                        // A numeric comparison against a known scalar pins
+                        // the other side to the same scalar type.
+                        if is_numeric(&l) && l != Ty::Unknown {
+                            self.expect_param(right, l.clone());
+                        }
+                        if is_numeric(&r) && r != Ty::Unknown {
+                            self.expect_param(left, r.clone());
                         }
                         Ty::Bool
                     }
@@ -500,9 +585,41 @@ impl Checker {
                         {
                             self.err(*span, format!("cannot order {l} and {r}"));
                         }
+                        if is_numeric(&l) && l != Ty::Unknown {
+                            self.expect_param(right, l.clone());
+                        }
+                        if is_numeric(&r) && r != Ty::Unknown {
+                            self.expect_param(left, r.clone());
+                        }
+                        if l == Ty::Str || r == Ty::Str {
+                            self.expect_param(left, Ty::Str);
+                            self.expect_param(right, Ty::Str);
+                        }
                         Ty::Bool
                     }
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                        // Mixed Int/Float arithmetic promotes to Float, so
+                        // the Int side is the one that pins a parameter.
+                        match op {
+                            BinOp::Add if l == Ty::Str || r == Ty::Str => {
+                                self.expect_param(left, Ty::Str);
+                                self.expect_param(right, Ty::Str);
+                            }
+                            _ => {
+                                if l == Ty::Int {
+                                    self.expect_param(right, Ty::Int);
+                                }
+                                if r == Ty::Int {
+                                    self.expect_param(left, Ty::Int);
+                                }
+                                if l == Ty::Float {
+                                    self.expect_param(right, Ty::Float);
+                                }
+                                if r == Ty::Float {
+                                    self.expect_param(left, Ty::Float);
+                                }
+                            }
+                        }
                         match arith_result(&l, *op, &r) {
                             Some(t) => t,
                             None => {
@@ -561,6 +678,9 @@ impl Checker {
                             if !compatible(p, &at) {
                                 self.err(a.span(), format!("argument must be {p}, found {at}"));
                             }
+                            if p != &Ty::Unknown {
+                                self.expect_param(a, p.clone());
+                            }
                         }
                         *ret
                     }
@@ -612,6 +732,7 @@ pub fn check_source(source: &str, base: &std::path::Path) -> Result<(), Vec<Chec
 pub fn check_program(prog: &Program, base: &std::path::Path) -> Result<(), Vec<CheckError>> {
     let mut c = Checker {
         base: base.to_path_buf(),
+        module_name: "__main__".to_string(),
         ..Default::default()
     };
     // Checker needs Default for HashMaps/Vecs/bool/usize/String.
@@ -621,6 +742,33 @@ pub fn check_program(prog: &Program, base: &std::path::Path) -> Result<(), Vec<C
     } else {
         Err(c.errors)
     }
+}
+
+/// Inferred static shapes for every function in the program, keyed by
+/// `(module, function)`. Module-level code is reported under `<top>`.
+/// Returns the same errors `check_program` would, so callers can use this
+/// in place of a separate check pass.
+pub fn infer_program(
+    prog: &Program,
+    base: &std::path::Path,
+) -> Result<HashMap<(String, String), FnInfo>, Vec<CheckError>> {
+    let mut c = Checker {
+        base: base.to_path_buf(),
+        module_name: "__main__".to_string(),
+        ..Default::default()
+    };
+    c.check_block(&prog.stmts);
+    if !c.errors.is_empty() {
+        return Err(c.errors);
+    }
+    let mut out = std::mem::take(&mut c.inferred);
+    // Top-level code shares one flat scope across the module.
+    out.insert(("__main__".to_string(), "<top>".to_string()), FnInfo {
+        locals: c.vars.clone(),
+        params: Vec::new(),
+        ret: Ty::None,
+    });
+    Ok(out)
 }
 
 // Default impls for the checker state.
@@ -636,6 +784,9 @@ impl Default for Checker {
             in_function: false,
             returns: Vec::new(),
             loop_depth: 0,
+            param_names: Vec::new(),
+            inferred: HashMap::new(),
+            module_name: String::new(),
             parallel_outer: None,
             task_bound: HashSet::new(),
             fn_outer: None,
@@ -761,5 +912,55 @@ mod tests {
     fn list_indexing() {
         ok("a = [1, 2]\nprint(a[0])\n");
         assert!(!err("a = 1\nprint(a[0])\n").is_empty());
+    }
+
+    fn infer(src: &str) -> HashMap<(String, String), FnInfo> {
+        let tokens = nx_lexer::lex(src).unwrap();
+        let prog = nx_parser::parse(tokens).unwrap();
+        infer_program(&prog, std::path::Path::new(".")).unwrap()
+    }
+
+    #[test]
+    fn param_int_from_arithmetic() {
+        let m = infer("fn fib(n):\n    if n <= 1:\n        return n\n    else:\n        return fib(n - 1) + fib(n - 2)\n");
+        assert_eq!(m[&("__main__".into(), "fib".into())].locals["n"], Ty::Int);
+    }
+
+    #[test]
+    fn param_float_from_float_literal() {
+        let m = infer("fn half(x):\n    return x / 2.0\n");
+        assert_eq!(m[&("__main__".into(), "half".into())].locals["x"], Ty::Float);
+    }
+
+    #[test]
+    fn param_bool_from_condition() {
+        let m = infer("fn neg(b):\n    if b:\n        return 1\n    else:\n        return 0\n");
+        assert_eq!(m[&("__main__".into(), "neg".into())].locals["b"], Ty::Bool);
+    }
+
+    #[test]
+    fn param_int_from_index() {
+        let m = infer("fn at(xs, i):\n    return xs[i]\n");
+        assert_eq!(m[&("__main__".into(), "at".into())].locals["i"], Ty::Int);
+    }
+
+    #[test]
+    fn unused_param_stays_unknown() {
+        let m = infer("fn id(x):\n    return 1\n");
+        assert_eq!(m[&("__main__".into(), "id".into())].locals["x"], Ty::Unknown);
+    }
+
+    #[test]
+    fn inferred_param_rejects_wrong_argument() {
+        // x is proven Int by `x - 1`, so passing a string is an error.
+        assert!(!err("fn f(x):\n    return x - 1\nprint(f(\"a\"))\n").is_empty());
+    }
+
+    #[test]
+    fn top_level_scope_is_reported() {
+        let m = infer("a = 1\nb = \"s\"\n");
+        let top = &m[&("__main__".into(), "<top>".into())];
+        assert_eq!(top.locals["a"], Ty::Int);
+        assert_eq!(top.locals["b"], Ty::Str);
     }
 }
