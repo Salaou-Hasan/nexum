@@ -39,11 +39,17 @@ jobs:
         run: |
           out="proberun"
           if [ "${RUNNER_OS}" = "Windows" ]; then out="proberun.exe"; fi
+          norm() { tr -d '\r' < "$1"; }
           for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx; do
             cargo run -q -p nx-driver -- "$f" > want.txt
             cargo run -q -p nx-driver -- build "$f" -o "$out"
             "./$out" > got.txt
-            diff want.txt got.txt || (echo "MISMATCH $f"; exit 1)
+            if ! diff <(norm want.txt) <(norm got.txt); then
+              echo "MISMATCH $f"
+              echo "--- want bytes:"; od -c want.txt | head -20
+              echo "--- got bytes:"; od -c got.txt | head -20
+              exit 1
+            fi
           done
       - name: asan check (linux, leaks off by design)
         if: runner.os == 'Linux'
