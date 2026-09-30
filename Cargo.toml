@@ -1,3 +1,3 @@
 [workspace]
-members = ["compiler/nx-lexer", "compiler/nx-ast", "compiler/nx-parser", "compiler/nx-types", "compiler/nx-interp", "compiler/nx-codegen", "compiler/nx-driver"]
+members = ["compiler/nx-lexer", "compiler/nx-ast", "compiler/nx-parser", "compiler/nx-types", "compiler/nx-interp", "compiler/nx-mem", "compiler/nx-codegen", "compiler/nx-driver"]
 resolver = "2"

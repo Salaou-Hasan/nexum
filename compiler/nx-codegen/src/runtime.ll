@@ -221,6 +221,46 @@ entry:
 }
 
 ; --- printing ---
+define void @nx_free_val(%NxVal %v) {
+entry:
+  %t = extractvalue %NxVal %v, 0
+  switch i64 %t, label %done [
+    i64 4, label %str
+    i64 5, label %list
+  ]
+str:
+  %p = extractvalue %NxVal %v, 1
+  %pp = inttoptr i64 %p to ptr
+  call void @free(ptr %pp)
+  ret void
+list:
+  %hp = extractvalue %NxVal %v, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  %lp = getelementptr %NxList, ptr %h, i64 0, i32 1
+  %len = load i64, ptr %lp
+  br label %lcond
+lcond:
+  %i = phi i64 [0, %list], [%i2, %lbody]
+  %fin = icmp eq i64 %i, %len
+  br i1 %fin, label %lout, label %lbody
+lbody:
+  %ep = getelementptr %NxVal, ptr %data, i64 %i
+  %e = load %NxVal, ptr %ep
+  call void @nx_free_val(%NxVal %e)
+  %i2 = add i64 %i, 1
+  br label %lcond
+lout:
+  call void @free(ptr %data)
+  call void @free(ptr %h)
+  ret void
+done:
+  ret void
+}
+
+declare void @free(ptr)
+
 define void @nx_print_val(%NxVal %v) {
 entry:
   %tag = extractvalue %NxVal %v, 0

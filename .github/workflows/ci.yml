@@ -45,3 +45,15 @@ jobs:
             "./$out" > got.txt
             diff want.txt got.txt || (echo "MISMATCH $f"; exit 1)
           done
+      - name: asan check (linux, leaks off by design)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx; do
+            NX_CFLAGS="-fsanitize=address -g" cargo run -q -p nx-driver -- build "$f" -o asanrun
+            ./asanrun > got.txt
+            cargo run -q -p nx-driver -- "$f" > want.txt
+            diff want.txt got.txt || (echo "MISMATCH $f"; exit 1)
+          done

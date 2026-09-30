@@ -52,6 +52,28 @@ fn mangle_done(module: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::compile_entry;
+
+    fn free_calls(ir: &str) -> usize {
+        // The prelude defines nx_free_val with one self-recursive call.
+        ir.matches("call void @nx_free_val").count() - 1
+    }
+
+    #[test]
+    fn unique_temp_gets_freed() {
+        let ir = compile_entry(
+            "fn f(n):\n    t = n * 2\n    print(t)\nprint(f(21))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        assert!(free_calls(&ir) >= 1, "Unique local t must be freed");
+    }
+
+    #[test]
+    fn shared_global_not_freed() {
+        let ir = compile_entry("x = [1]\nprint(x)\n", std::path::Path::new(".")).unwrap();
+        assert_eq!(free_calls(&ir), 0, "globals must not be freed");
+    }
     /// Every `private constant [N x i8] c"..."` in the prelude must have a
     /// matching N (LLVM rejects mismatches; hand-counting is unreliable).
     #[test]
@@ -95,7 +117,8 @@ pub fn compile_entry(source: &str, base: &std::path::Path) -> Result<String, Cod
         base: base.to_path_buf(),
     };
     loader.load_main(source)?;
-    let mut g = Gen::new();
+    let plan = nx_mem::plan(&loader.programs, "__main__");
+    let mut g = Gen::new(plan);
     g.emit_prelude();
     for (module, prog) in loader.ordered() {
         g.declare_module_fns(module, prog);
@@ -230,6 +253,7 @@ struct Gen {
     pre: String,
     top: String,
     out: String,
+    plan: nx_mem::Plan,
     tmp: u64,
     label: u64,
     strc: u64,
@@ -239,17 +263,19 @@ struct Gen {
     locals: HashMap<String, String>,
     globals: HashSet<String>,
     cur_module: String,
+    cur_fn: String,
     in_init: bool,
     term: Option<Term>,
     loops: Vec<(String, String)>,
 }
 
 impl Gen {
-    fn new() -> Self {
+    fn new(plan: nx_mem::Plan) -> Self {
         Self {
             pre: String::new(),
             top: String::new(),
             out: String::new(),
+            plan,
             tmp: 0,
             label: 0,
             strc: 0,
@@ -259,6 +285,7 @@ impl Gen {
             locals: HashMap::new(),
             globals: HashSet::new(),
             cur_module: String::new(),
+            cur_fn: String::new(),
             in_init: false,
             term: None,
             loops: Vec::new(),
@@ -403,20 +430,44 @@ impl Gen {
         }
         let saved = self.cur_module.clone();
         self.cur_module = module.to_string();
+        self.cur_fn = name.to_string();
         for s in body {
             self.emit_stmt(s)?;
             if self.term.is_some() {
                 break;
             }
         }
-        self.cur_module = saved;
         if self.term.is_none() {
+            // NOTE: free_scope needs the function's module/name context.
+            self.free_scope();
             self.w("  ret %NxVal zeroinitializer");
         }
+        self.cur_module = saved;
+        self.cur_fn = String::new();
         self.w("}");
         self.locals.clear();
         self.term = None;
         Ok(())
+    }
+
+    fn is_unique(&self, name: &str) -> bool {
+        self.locals.contains_key(name)
+            && self.plan.alloc_of(&self.cur_module, &self.cur_fn, name) == nx_mem::Alloc::Unique
+    }
+
+    /// Free every Unique local currently in scope.
+    fn free_scope(&mut self) {
+        let mut names: Vec<String> = self.locals.keys().cloned().collect();
+        names.sort();
+        for n in names {
+            if self.plan.alloc_of(&self.cur_module, &self.cur_fn, &n) == nx_mem::Alloc::Unique {
+                if let Some(slot) = self.locals.get(&n).cloned() {
+                    let v = self.reg();
+                    self.w(&format!("  {v} = load %NxVal, ptr {slot}"));
+                    self.w(&format!("  call void @nx_free_val(%NxVal {v})"));
+                }
+            }
+        }
     }
 
     /// Module-global variable, declared on first use.
@@ -498,6 +549,9 @@ impl Gen {
                 };
                 let r = self.reg();
                 self.w(&format!("  {r} = call %NxVal @{helper}(%NxVal {cur}, %NxVal {rhs})"));
+                if !self.in_init && self.is_unique(name) {
+                    self.w(&format!("  call void @nx_free_val(%NxVal {cur})"));
+                }
                 self.w(&format!("  store %NxVal {r}, ptr {ptr}"));
                 Ok(())
             }
@@ -565,11 +619,20 @@ impl Gen {
             Stmt::For { var, iter, body, span } => self.emit_for(var, iter, body, *span),
             Stmt::Fn { .. } => Ok(()),
             Stmt::Return { value, .. } => {
-                match value {
+                // Free Unique locals on every exit path.
+                let freed = match value {
                     Some(e) => {
                         let v = self.emit_expr(e)?;
-                        self.w(&format!("  ret %NxVal {v}"));
+                        self.free_scope();
+                        v
                     }
+                    None => {
+                        self.free_scope();
+                        String::new()
+                    }
+                };
+                match value {
+                    Some(_) => self.w(&format!("  ret %NxVal {freed}")),
                     None => self.w("  ret %NxVal zeroinitializer"),
                 }
                 self.term = Some(Term::Ret);
@@ -635,10 +698,17 @@ impl Gen {
             return Ok(());
         }
         if let Some(slot) = self.locals.get(name).cloned() {
+            // Rebinding a Unique local: release the old buffers first.
+            if self.is_unique(name) {
+                let old = self.reg();
+                self.w(&format!("  {old} = load %NxVal, ptr {slot}"));
+                self.w(&format!("  call void @nx_free_val(%NxVal {old})"));
+            }
             self.w(&format!("  store %NxVal {reg}, ptr {slot}"));
         } else {
             let slot = self.reg();
             self.w(&format!("  {slot} = alloca %NxVal"));
+            self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
             self.w(&format!("  store %NxVal {reg}, ptr {slot}"));
             self.locals.insert(name.to_string(), slot);
         }
@@ -654,6 +724,7 @@ impl Gen {
         }
         let slot = self.reg();
         self.w(&format!("  {slot} = alloca %NxVal"));
+        self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
         self.w(&format!("  store %NxVal {reg}, ptr {slot}"));
         self.locals.insert(name.to_string(), slot);
     }

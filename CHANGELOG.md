@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.0
+- Memory planner (`nx-mem`): Unique locals freed at scope exit, Shared arena
+- `NX_CFLAGS` passthrough; ASan differential in CI (Linux)
+
 ## v0.0.8
 - LLVM backend: `nx build` native exes, `nx build --run`
 - Interpreter and binaries verified byte-identical in CI

@@ -190,6 +190,12 @@ fn build_cmd(rest: &[String]) -> ExitCode {
     if cfg!(unix) {
         cmd.arg("-lm");
     }
+    // Extra flags, e.g. NX_CFLAGS="-fsanitize=address -g" for CI.
+    if let Ok(extra) = std::env::var("NX_CFLAGS") {
+        for a in extra.split_whitespace() {
+            cmd.arg(a);
+        }
+    }
     match cmd.status() {
         Ok(s) if s.success() => {
             println!("nx: built {out}");

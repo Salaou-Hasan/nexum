@@ -1,13 +1,13 @@
 [package]
-name = "nx-parser"
+name = "nx-mem"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
 [lib]
-name = "nx_parser"
+name = "nx_mem"
 path = "src/lib.rs"
 
 [dependencies]
-nx-lexer = { path = "../nx-lexer" }
 nx-ast = { path = "../nx-ast" }
+nx-parser = { path = "../nx-parser" }
