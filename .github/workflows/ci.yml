@@ -37,10 +37,11 @@ jobs:
       - name: interp vs native must match
         shell: bash
         run: |
-          out="proberun"
-          if [ "${RUNNER_OS}" = "Windows" ]; then out="proberun.exe"; fi
           norm() { tr -d '\r' < "$1"; }
           for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx; do
+            safe="$(echo "$f" | tr '/.' '__')"
+            out="probe-$safe"
+            if [ "${RUNNER_OS}" = "Windows" ]; then out="probe-$safe.exe"; fi
             cargo run -q -p nx-driver -- "$f" > want.txt
             cargo run -q -p nx-driver -- build "$f" -o "$out"
             "./$out" > got.txt
@@ -58,8 +59,9 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx; do
-            NX_CFLAGS="-fsanitize=address -g" cargo run -q -p nx-driver -- build "$f" -o asanrun
-            ./asanrun > got.txt
+            safe="$(echo "$f" | tr '/.' '__')"
+            NX_CFLAGS="-fsanitize=address -g" cargo run -q -p nx-driver -- build "$f" -o "asan-$safe"
+            ./asan-$safe > got.txt
             cargo run -q -p nx-driver -- "$f" > want.txt
             diff want.txt got.txt || (echo "MISMATCH $f"; exit 1)
           done
