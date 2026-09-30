@@ -1,0 +1,30 @@
+#  Float math in a tight loop: the workload the unboxing pass targets.
+#  Cradle-style Mandelbrot, iterated over a grid of points.
+
+fn mandel(cx, cy, maxiter):
+    zr = 0.0
+    zi = 0.0
+    i = 0
+    while i < maxiter:
+        zr2 = zr * zr
+        zi2 = zi * zi
+        if zr2 + zi2 > 4.0:
+            return i
+        zi = 2.0 * zr * zi + cy
+        zr = zr2 - zi2 + cx
+        i = i + 1
+    return maxiter
+
+total = 0
+y = -1.2
+rows = 0
+while y < 1.2:
+    x = -1.5
+    while x < 1.5:
+        total = total + mandel(x, y, 200)
+        x = x + 0.01
+    y = y + 0.01
+    rows = rows + 1
+
+print(total)
+print(rows)

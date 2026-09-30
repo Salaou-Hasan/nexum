@@ -1,0 +1,51 @@
+# Dense matrix multiply, the standard float benchmark. NX stores a matrix
+# as one flat row-major list, so the inner loop is a strided walk over a
+# single list: no function calls, just arithmetic and list reads.
+#
+# Sizes are small enough that the result is exactly representable in f64,
+# so Rust's output must match digit for digit.
+#
+# Note: NX has no indexed assignment (`a[i] = v`), so every list here is
+# built with push and consumed read-only. Rust builds the same vectors
+# with indexing, which is a real difference in expressiveness that this
+# benchmark is shaped around rather than measuring.
+
+# NX has no % operator: this is x - (x / m) * m, exact for these values.
+fn mod(x, m):
+    return x - (x / m) * m
+
+n = 120
+
+a = []
+b = []
+i = 0
+while i < n * n:
+    push(a, mod(i * 7919, 1000) * 0.5 - 250.0)
+    push(b, mod(i * 6271, 997) * 0.25 - 124.0)
+    i = i + 1
+
+c = []
+i = 0
+while i < n:
+    j = 0
+    while j < n:
+        s = 0.0
+        k = 0
+        while k < n:
+            s = s + a[i * n + k] * b[k * n + j]
+            k = k + 1
+        push(c, s)
+        j = j + 1
+    i = i + 1
+
+# Print a checksum rather than the whole matrix: enough to catch any
+# divergence, small enough to diff.
+check = 0.0
+i = 0
+while i < n * n:
+    check = check + c[i] * (1.0 + mod(i, 7))
+    i = i + 1
+
+print(check)
+print(c[0])
+print(c[n * n - 1])

@@ -1,0 +1,32 @@
+# List traversal: build a list with push, then walk it accumulating.
+# This is the workload where NX is weakest, because list elements are
+# boxed values behind a pointer, and Rust's Vec<i64> is a flat allocation.
+# Included precisely so the comparison is not only flattering.
+
+# NX has no % operator: this is x - (x / m) * m, exact for these values.
+fn mod(x, m):
+    return x - (x / m) * m
+
+n = 400000
+xs = []
+i = 0
+while i < n:
+    push(xs, mod(i * 31, 1000))
+    i = i + 1
+
+total = 0
+i = 0
+while i < n:
+    total = total + xs[i]
+    i = i + 1
+
+# Second pass to show indexed reads are not free in NX.
+rev = 0
+i = n - 1
+while i >= 0:
+    rev = rev + xs[i] * 2
+    i = i - 1
+
+print(total)
+print(rev)
+print(len(xs))

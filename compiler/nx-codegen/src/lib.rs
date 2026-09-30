@@ -126,6 +126,67 @@ mod tests {
         }
     }
 
+    /// Every `alloca` must sit in the entry block. One emitted inside a
+    /// loop body is a fresh allocation per iteration that is only released
+    /// when the function returns, so a call inside a long loop walks off
+    /// the end of the stack -- a 35,000-iteration loop died with a stack
+    /// overflow before this was hoisted.
+    /// Every function body in the IR, paired with its name.
+    fn functions(ir: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut name = String::new();
+        let mut body = String::new();
+        for line in ir.lines() {
+            if let Some(rest) = line.strip_prefix("define ") {
+                if !name.is_empty() {
+                    out.push((std::mem::take(&mut name), std::mem::take(&mut body)));
+                }
+                name = rest
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .rsplit('@')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+            } else if !name.is_empty() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        if !name.is_empty() {
+            out.push((name, body));
+        }
+        out
+    }
+
+    #[test]
+    fn allocas_are_hoisted_to_the_entry_block() {
+        let ir = compile_entry(
+            "fn f(x):\n    return x * 2\nxs = [1, 2]\nt = 0\nfor x in xs:\n    t = t + f(x)\nwhile t < 10:\n    t = t + f(t)\nprint(t, [1, 2, 3], xs[0])\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        // Anything past the first block label is no longer the entry block.
+        for (name, body) in functions(&ir) {
+            let mut past_entry = false;
+            for line in body.lines() {
+                let t = line.trim();
+                if t.ends_with(':') {
+                    if t == "entry:" {
+                        continue;
+                    }
+                    past_entry = true;
+                    continue;
+                }
+                assert!(
+                    !(past_entry && t.contains("alloca")),
+                    "{name}: alloca outside the entry block: {t}\n{body}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn parallel_outlines_at_top_level() {
         let ir = compile_entry(
@@ -765,6 +826,19 @@ struct Gen {
     in_init: bool,
     term: Option<Term>,
     loops: Vec<(String, String)>,
+    /// Open entry-block frames, one per function currently being emitted.
+    /// Allocas are collected here and spliced in at the end, because an
+    /// alloca inside a loop body allocates fresh stack every iteration and
+    /// is only released when the function returns.
+    alloc_frames: Vec<AllocFrame>,
+}
+
+/// Where a function's allocas have to be spliced back in: the byte offset
+/// just past its `entry:` label, and which buffer it is being written to.
+struct AllocFrame {
+    to_top: bool,
+    at: usize,
+    items: Vec<(String, String)>,
 }
 
 impl Gen {
@@ -798,6 +872,7 @@ impl Gen {
             in_init: false,
             term: None,
             loops: Vec::new(),
+            alloc_frames: Vec::new(),
         }
     }
 
@@ -832,6 +907,57 @@ impl Gen {
         }
     }
 
+    // --- entry-block allocation -------------------------------------
+    //
+    // Every temporary needs stack space, and the obvious place to put an
+    // `alloca` is wherever the value is first needed. That is wrong inside
+    // a loop: LLVM gives the allocation a fresh address per iteration and
+    // only releases it when the enclosing function returns, so a call
+    // inside a long loop walks off the end of the stack. A program with a
+    // function call in a 35,000-iteration loop died with a stack overflow.
+    //
+    // Hoisting all allocas to the entry block fixes that and is also what
+    // mem2reg needs to promote them to registers at all.
+
+    /// Open an allocas frame at the current position, which must be just
+    /// after the function's `entry:` label.
+    fn begin_allocs(&mut self) {
+        let at = if self.to_top { self.top.len() } else { self.out.len() };
+        self.alloc_frames.push(AllocFrame { to_top: self.to_top, at, items: Vec::new() });
+    }
+
+    /// Splice the collected allocas in and close the frame.
+    fn end_allocs(&mut self) {
+        let f = match self.alloc_frames.pop() {
+            Some(f) => f,
+            None => return,
+        };
+        if f.items.is_empty() {
+            return;
+        }
+        let mut text = String::new();
+        for (reg, ty) in &f.items {
+            text.push_str(&format!("  {reg} = alloca {ty}\n"));
+        }
+        if f.to_top {
+            self.top.insert_str(f.at, &text);
+        } else {
+            self.out.insert_str(f.at, &text);
+        }
+    }
+
+    /// Reserve stack space of `ty`, hoisted to the current entry block.
+    fn alloca(&mut self, ty: &str) -> String {
+        let r = self.reg();
+        match self.alloc_frames.last_mut() {
+            Some(f) => f.items.push((r.clone(), ty.to_string())),
+            // No open frame means top-level emission, which cannot happen
+            // for a value; fall back to writing it in place.
+            None => self.w(&format!("  {r} = alloca {ty}")),
+        }
+        r
+    }
+
     // --- unboxing -----------------------------------------------------
 
     /// Static type of `name` in the function being emitted, if known.
@@ -857,20 +983,21 @@ impl Gen {
     /// Declare a local slot for `name` and record its representation.
     /// `hint` is the static type to unbox into, if any.
     fn new_slot(&mut self, name: &str, hint: Option<Ty>) -> String {
-        let slot = self.reg();
         match hint.as_ref().and_then(ll_scalar) {
             Some(ll) => {
-                self.w(&format!("  {slot} = alloca {ll}"));
+                let slot = self.alloca(ll);
                 self.rep.insert(name.to_string(), hint.unwrap());
+                self.locals.insert(name.to_string(), slot.clone());
+                slot
             }
             None => {
-                self.w(&format!("  {slot} = alloca %NxVal"));
+                let slot = self.alloca("%NxVal");
                 self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
                 self.rep.remove(name);
+                self.locals.insert(name.to_string(), slot.clone());
+                slot
             }
         }
-        self.locals.insert(name.to_string(), slot.clone());
-        slot
     }
 
     /// Load a local as a value of its slot type.
@@ -1140,6 +1267,7 @@ impl Gen {
         let init = mangle_init(module);
         self.w(&format!("define void @{init}() {{"));
         self.w("entry:");
+        self.begin_allocs();
         let flag = self.reg();
         let run = self.lab("initrun");
         let skip = self.lab("initskip");
@@ -1164,6 +1292,7 @@ impl Gen {
         self.w(&format!("{skip}:"));
         self.w("  ret void");
         self.w("}");
+        self.end_allocs();
         self.in_init = false;
         self.term = None;
         Ok(())
@@ -1190,12 +1319,12 @@ impl Gen {
         self.term = None;
         self.w(&format!("define %NxVal @{fname}(%NxVal* %args, i64 %nargs) {{"));
         self.w("entry:");
+        self.begin_allocs();
         // Memo prologue for purity-proven functions: hit returns cached.
         let fnid = self.memo.get(&(module.to_string(), name.to_string())).copied();
         if let Some(id) = fnid {
-            let slot = self.reg();
+            let slot = self.alloca("%NxVal");
             let hit = self.reg();
-            self.w(&format!("  {slot} = alloca %NxVal"));
             self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
             self.w(&format!("  {hit} = call i1 @nx_memo_get(i64 {id}, ptr %args, i64 %nargs, ptr {slot})"));
             let go = self.lab("mhit");
@@ -1261,6 +1390,7 @@ impl Gen {
         self.cur_module = saved;
         self.cur_fn = saved_fn;
         self.w("}");
+        self.end_allocs();
         self.locals.clear();
         self.rep.clear();
         self.term = None;
@@ -1426,8 +1556,7 @@ impl Gen {
                     self.w("  call void @nx_print(ptr null, i64 0)");
                     return Ok(());
                 }
-                let arr = self.reg();
-                self.w(&format!("  {arr} = alloca [{n} x %NxVal]"));
+                let arr = self.alloca(&format!("[{n} x %NxVal]"));
                 for (i, e) in values.iter().enumerate() {
                     let v = self.emit_expr(e)?;
                     let b = self.unbox(&v);
@@ -1714,8 +1843,7 @@ impl Gen {
                 let step = self.reg();
                 self.w(&format!("  {up} = icmp sle i64 {a}, {b}"));
                 self.w(&format!("  {step} = select i1 {up}, i64 1, i64 -1"));
-                let slot = self.reg();
-                self.w(&format!("  {slot} = alloca i64"));
+                let slot = self.alloca("i64");
                 self.w(&format!("  store i64 {a}, ptr {slot}"));
                 let condl = self.lab("fcond");
                 let bodyl = self.lab("fbody");
@@ -1776,8 +1904,7 @@ impl Gen {
                 let n = self.reg();
                 self.w(&format!("  {len} = call %NxVal @nx_len(%NxVal {vb})"));
                 self.w(&format!("  {n} = extractvalue %NxVal {len}, 1"));
-                let islot = self.reg();
-                self.w(&format!("  {islot} = alloca i64"));
+                let islot = self.alloca("i64");
                 self.w(&format!("  store i64 0, ptr {islot}"));
                 let condl = self.lab("econd");
                 let bodyl = self.lab("ebody");
@@ -1872,9 +1999,8 @@ impl Gen {
             Expr::List(items, _) => {
                 let n = items.len() as i64;
                 let l = self.reg();
-                let p = self.reg();
                 self.w(&format!("  {l} = call %NxVal @nx_new_list(i64 {n})"));
-                self.w(&format!("  {p} = alloca %NxVal"));
+                let p = self.alloca("%NxVal");
                 self.w(&format!("  store %NxVal {l}, ptr {p}"));
                 let mut elem = Ty::Unknown;
                 for it in items {
@@ -2307,8 +2433,7 @@ impl Gen {
     ) -> Result<NV, CodegenError> {
         let fname = mangle_fn(module, name);
         let n = args.len();
-        let arr = self.reg();
-        self.w(&format!("  {arr} = alloca [{n} x %NxVal]"));
+        let arr = self.alloca(&format!("[{n} x %NxVal]"));
         for (i, a) in args.iter().enumerate() {
             let v = self.emit_expr(a)?;
             // The ABI is boxed: every argument re-boxes here.
@@ -2412,11 +2537,11 @@ impl Gen {
             self.to_top = true;
             self.w(&format!("define ptr @{fname}(ptr %_) {{"));
             self.w("entry:");
+            self.begin_allocs();
             // Rehydrate snapshot reads as task locals.
             for (k, name) in reads.iter().enumerate() {
-                let slot = self.reg();
                 let v = self.reg();
-                self.w(&format!("  {slot} = alloca %NxVal"));
+                let slot = self.alloca("%NxVal");
                 self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
                 self.w(&format!("  {v} = load %NxVal, ptr @{}", snap_globals[k]));
                 self.w(&format!("  store %NxVal {v}, ptr {slot}"));
@@ -2428,6 +2553,7 @@ impl Gen {
             }
             self.w("  ret ptr null");
             self.w("}");
+            self.end_allocs();
             self.to_top = false;
             fnames.push(fname);
         }
@@ -2455,10 +2581,8 @@ impl Gen {
 
         // The pool block lives in the caller's frame, so it outlives every
         // worker: they are all joined before this function returns.
-        let pool = self.reg();
-        self.w(&format!("  {pool} = alloca %NxPool"));
-        let arr = self.reg();
-        self.w(&format!("  {arr} = alloca [{n} x ptr]"));
+        let pool = self.alloca("%NxPool");
+        let arr = self.alloca(&format!("[{n} x ptr]"));
         for (i, fname) in fnames.iter().enumerate() {
             let slot = self.reg();
             self.w(&format!("  {slot} = getelementptr [{n} x ptr], ptr {arr}, i64 0, i64 {i}"));

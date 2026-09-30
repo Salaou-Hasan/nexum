@@ -322,6 +322,9 @@ done:
 
 define void @nx_print_val(%NxVal %v) {
 entry:
+  ; Scratch for the float branch, hoisted here so it is allocated once
+  ; rather than per switch arm.
+  %buf = alloca [64 x i8]
   %tag = extractvalue %NxVal %v, 0
   switch i64 %tag, label %dflt [
     i64 0, label %none
@@ -342,7 +345,6 @@ int:
 float:
   %fb = extractvalue %NxVal %v, 1
   %fv = bitcast i64 %fb to double
-  %buf = alloca [64 x i8]
   %bp = getelementptr [64 x i8], ptr %buf, i64 0, i64 0
   call i64 @nx_fmt_float(double %fv, ptr %bp)
   ret void
@@ -933,6 +935,8 @@ bad:
 
 define void @nx_panic_idx(i64 %i, i64 %n) {
 entry:
+  ; Hoisted into the entry block. An alloca inside a branch would be a
+  ; fresh allocation on every path that reaches it.
   %buf = alloca [64 x i8]
   %bp = getelementptr [64 x i8], ptr %buf, i64 0, i64 0
   call i32 (ptr, i64, ptr, ...) @snprintf(ptr %bp, i64 64, ptr @.msg.oob, i64 %i, i64 %n)
