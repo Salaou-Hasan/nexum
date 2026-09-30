@@ -206,9 +206,34 @@ fn build_cmd(rest: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Skip clang when the exe is newer than every input (entry + imports)
-/// and newer than nx itself.
+/// Env settings that change the emitted IR. Recorded next to the exe so a
+/// flag flip (e.g. NX_NOMEMO=1) forces a rebuild instead of silently reusing
+/// a stale binary.
+fn build_stamp() -> String {
+    format!(
+        "nomemo={} cflags={}",
+        std::env::var("NX_NOMEMO").unwrap_or_default(),
+        std::env::var("NX_CFLAGS").unwrap_or_default()
+    )
+}
+
+fn stamp_path(out: &str) -> std::path::PathBuf {
+    let mut p = std::path::PathBuf::from(out);
+    let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    p.set_file_name(format!("{name}.nxstamp"));
+    p
+}
+
+fn write_stamp(out: &str) {
+    let _ = std::fs::write(stamp_path(out), build_stamp());
+}
+
+/// Skip clang when the exe is newer than every input (entry + imports),
+/// newer than nx itself, and was built with the same env flags.
 fn up_to_date(file: &str, out: &str) -> bool {
+    if std::fs::read_to_string(stamp_path(out)).ok().as_deref() != Some(build_stamp().as_str()) {
+        return false;
+    }
     let exe_meta = match std::fs::metadata(out) {
         Ok(m) => m,
         Err(_) => return false,
@@ -281,6 +306,7 @@ fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
     }
     match cmd.status() {
         Ok(s) if s.success() => {
+            write_stamp(out);
             println!("nx: built {out}");
             Ok(())
         }

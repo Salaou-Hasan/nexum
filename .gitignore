@@ -3,4 +3,5 @@ dist/
 *.vsix
 .vscode-test/
 *.exe
+*.nxstamp
 

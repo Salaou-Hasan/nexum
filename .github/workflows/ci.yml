@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           norm() { tr -d '\r' < "$1"; }
-          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx; do
+          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx; do
             safe="$(echo "$f" | tr '/.' '__')"
             out="probe-$safe"
             if [ "${RUNNER_OS}" = "Windows" ]; then out="probe-$safe.exe"; fi
@@ -58,7 +58,7 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
-          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx; do
+          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx; do
             safe="$(echo "$f" | tr '/.' '__')"
             NX_CFLAGS="-fsanitize=address -g" cargo run -q -p nx-driver -- build "$f" -o "asan-$safe"
             ./asan-$safe > got.txt

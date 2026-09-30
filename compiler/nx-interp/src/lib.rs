@@ -76,6 +76,40 @@ impl std::error::Error for RuntimeError {}
 
 const LOOP_LIMIT: u64 = 10_000_000;
 const CALL_LIMIT: usize = 500;
+/// Memo cache bound (entries across all functions; cleared when full).
+const MEMO_CAP: usize = 4096;
+
+/// Hashable scalar subset for memo keys. Only immutable scalars qualify;
+/// lists (mutable) never enter the cache.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Scalar {
+    I(i64),
+    F(u64),
+    B(bool),
+    S(String),
+}
+
+fn scalar_of(v: &Value) -> Option<Scalar> {
+    match v {
+        Value::Int(i) => Some(Scalar::I(*i)),
+        Value::Float(x) => Some(Scalar::F(x.to_bits())),
+        Value::Bool(b) => Some(Scalar::B(*b)),
+        Value::Str(s) => Some(Scalar::S(s.clone())),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MemoKey {
+    module: String,
+    name: String,
+    args: Vec<Scalar>,
+}
+
+#[derive(Debug, Default)]
+struct Memo {
+    map: HashMap<MemoKey, Value>,
+}
 
 #[derive(Debug, Clone, Default)]
 struct Function {
@@ -122,6 +156,12 @@ pub struct Interpreter {
     /// Task spawned at top level (no enclosing frame): assigns behave
     /// like module-level assigns so results survive the join.
     task_top: bool,
+    /// Functions proven memoizable (pure, closed over no shared state).
+    memo_ok: HashSet<(String, String)>,
+    /// Functions already classified (avoid re-analyzing per call).
+    memo_seen: HashSet<(String, String)>,
+    /// Shared memo cache (across parallel tasks). None when NX_NOMEMO=1.
+    memo: Option<std::sync::Arc<std::sync::Mutex<Memo>>>,
 }
 
 impl Interpreter {
@@ -588,20 +628,39 @@ impl Interpreter {
                 continue;
             }
             let mut results = Vec::new();
+            let mut spawn_err: Option<RuntimeError> = None;
             std::thread::scope(|s| {
                 let mut handles = Vec::new();
                 for &i in &batch {
                     let mut worker = self.spawn_worker(&snapshot, &outer, &cur);
                     let stmt = tasks[i].clone();
-                    handles.push(s.spawn(move || {
-                        let r = worker.exec_stmt(&stmt);
-                        (worker, r)
-                    }));
+                    // Same roomy stack as the main run thread: deep
+                    // (memoized) recursion must not overflow workers.
+                    match std::thread::Builder::new()
+                        .name("nx-task".to_string())
+                        .stack_size(64 * 1024 * 1024)
+                        .spawn_scoped(s, move || {
+                            let r = worker.exec_stmt(&stmt);
+                            (worker, r)
+                        }) {
+                        Ok(h) => handles.push(h),
+                        Err(_) => {
+                            spawn_err = Some(RuntimeError {
+                                message: "cannot spawn parallel task".to_string(),
+                                line: span.line,
+                                col: span.col,
+                            });
+                            return;
+                        }
+                    }
                 }
                 for h in handles {
                     results.push(h.join());
                 }
             });
+            if let Some(e) = spawn_err {
+                return Err(e);
+            }
             for r in results {
                 let (worker, r) = r.map_err(|_| RuntimeError {
                     message: "parallel task crashed".to_string(),
@@ -649,6 +708,9 @@ impl Interpreter {
             touched: HashSet::new(),
             outer: Some(outer.clone()),
             task_top: self.frames.is_empty(),
+            memo_ok: self.memo_ok.clone(),
+            memo_seen: self.memo_seen.clone(),
+            memo: self.memo.clone(),
         }
     }
 
@@ -943,6 +1005,17 @@ impl Interpreter {
         for a in args {
             vals.push(self.eval_expr(a)?);
         }
+        // Memoized fast path: proven-pure functions of scalar args.
+        let key = self.memo_key(module, func, &vals);
+        if let Some(k) = &key {
+            if let Some(memo) = &self.memo {
+                if let Ok(guard) = memo.lock() {
+                    if let Some(v) = guard.map.get(k) {
+                        return Ok(v.clone());
+                    }
+                }
+            }
+        }
         self.call_depth += 1;
         self.frames.push(Frame { module: module.to_string(), ..Default::default() });
         for (p, v) in f.params.iter().zip(vals) {
@@ -954,10 +1027,51 @@ impl Interpreter {
         let ret = self.exec_block(&f.body)?;
         self.frames.pop();
         self.call_depth -= 1;
-        match ret {
+        let out = match ret {
             None | Some(Flow::Continue) | Some(Flow::Break) => Ok(Value::None),
             Some(Flow::Return(v)) => Ok(v),
+        };
+        // Populate the cache on the way out.
+        if let (Some(k), Ok(v)) = (key, &out) {
+            if let Some(memo) = &self.memo {
+                if let Ok(mut guard) = memo.lock() {
+                    if guard.map.len() >= MEMO_CAP {
+                        guard.map.clear();
+                    }
+                    guard.map.insert(k, v.clone());
+                }
+            }
         }
+        out
+    }
+
+    /// Classify once per function; memoizable = pure + closed.
+    fn memo_key(&mut self, module: &str, func: &str, vals: &[Value]) -> Option<MemoKey> {
+        if std::env::var("NX_NOMEMO").is_ok() {
+            return None;
+        }
+        let id = (module.to_string(), func.to_string());
+        if !self.memo_seen.contains(&id) {
+            self.memo_seen.insert(id.clone());
+            if let Ok(ir) = nx_ir::analyze_map(self.programs.clone()) {
+                if let Some(f) = ir.funcs.get(&id) {
+                    if nx_ir::memoizable(&f.summary) {
+                        self.memo_ok.insert(id.clone());
+                    }
+                }
+            }
+            if self.memo.is_none() {
+                self.memo = Some(std::sync::Arc::new(std::sync::Mutex::new(Memo::default())));
+            }
+        }
+        if !self.memo_ok.contains(&id) {
+            return None;
+        }
+        let mut args = Vec::with_capacity(vals.len());
+        for v in vals {
+            args.push(scalar_of(v)?);
+        }
+        Some(MemoKey { module: module.to_string(), name: func.to_string(), args })
     }
 
     fn apply_binop(
@@ -1267,6 +1381,20 @@ mod tests {
     fn fn_recursion() {
         let out = run_src("fn fact(n):\n    if n <= 1:\n        return 1\n    else:\n        return n * fact(n - 1)\nprint(fact(5))").unwrap();
         assert_eq!(out, vec!["120"]);
+    }
+
+    #[test]
+    fn memo_fib() {
+        // Naive fib(30) would take ~1.6M calls; memoization makes it 31.
+        let out = run_src("fn fib(n):\n    if n <= 1:\n        return n\n    else:\n        return fib(n - 1) + fib(n - 2)\nprint(fib(30))").unwrap();
+        assert_eq!(out, vec!["832040"]);
+    }
+
+    #[test]
+    fn memo_skips_mutable_args() {
+        // List args never enter the cache: mutation stays visible.
+        let out = run_src("fn first(a):\n    return a[0]\nl = [1]\nprint(first(l))\npush(l, 2)\nl2 = [1, 9]\nprint(first(l2))").unwrap();
+        assert_eq!(out, vec!["1", "1"]);
     }
 
     #[test]

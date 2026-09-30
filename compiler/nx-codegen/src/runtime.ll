@@ -888,3 +888,305 @@ entry:
   %r = call %NxVal @nx_bool(i1 %z)
   ret %NxVal %r
 }
+
+; --- memoization: purity-proven function cache (fixed 4096 slots) ---
+; Key: (fnid, args). Only scalar args (Int/Float/Bool/Str) participate;
+; anything else misses. Eviction clears the table when full. Locking is
+; a cmpxchg spinlock so the IR stays platform-neutral (pthreads-free).
+%NxMemoSlot = type { i64, i64, [8 x %NxVal], %NxVal, i1 }
+
+@nx_memo_table = global [4096 x %NxMemoSlot] zeroinitializer
+@nx_memo_count = global i64 0
+@nx_memo_lock = global i64 0
+
+define void @nx_spin_lock() {
+entry:
+  br label %spin
+spin:
+  %r = cmpxchg ptr @nx_memo_lock, i64 0, i64 1 acquire monotonic
+  %ok = extractvalue { i64, i1 } %r, 1
+  br i1 %ok, label %held, label %spin
+held:
+  ret void
+}
+
+define void @nx_spin_unlock() {
+entry:
+  store atomic i64 0, ptr @nx_memo_lock release, align 8
+  ret void
+}
+
+; All args scalar (tags 1..4) and at most 8 of them?
+define i1 @nx_memo_args_ok(ptr %args, i64 %nargs) {
+entry:
+  %many = icmp sgt i64 %nargs, 8
+  br i1 %many, label %no, label %loop
+loop:
+  %i = phi i64 [0, %entry], [%i2, %next]
+  %done = icmp eq i64 %i, %nargs
+  br i1 %done, label %yes, label %chk
+chk:
+  %ep = getelementptr %NxVal, ptr %args, i64 %i
+  %e = load %NxVal, ptr %ep
+  %t = extractvalue %NxVal %e, 0
+  %lo = icmp sge i64 %t, 1
+  %hi = icmp sle i64 %t, 4
+  %ok = and i1 %lo, %hi
+  br i1 %ok, label %next, label %no
+next:
+  %i2 = add i64 %i, 1
+  br label %loop
+yes:
+  ret i1 true
+no:
+  ret i1 false
+}
+
+define i64 @nx_memo_mixstr(i64 %h, i64 %ptr, i64 %len) {
+entry:
+  %h1 = xor i64 %h, %len
+  %h2 = mul i64 %h1, 1099511628211
+  %big = icmp sge i64 %len, 8
+  br i1 %big, label %wide, label %bytes
+wide:
+  %pp = inttoptr i64 %ptr to ptr
+  %w1 = load i64, ptr %pp
+  %h3 = xor i64 %h2, %w1
+  %h4 = mul i64 %h3, 1099511628211
+  %last = sub i64 %len, 8
+  %lp = getelementptr i8, ptr %pp, i64 %last
+  %w2 = load i64, ptr %lp
+  %h5 = xor i64 %h4, %w2
+  %h6 = mul i64 %h5, 1099511628211
+  ret i64 %h6
+bytes:
+  br label %bloop
+bloop:
+  %i = phi i64 [0, %bytes], [%i2, %bread]
+  %hh = phi i64 [%h2, %bytes], [%hh2, %bread]
+  %fin = icmp eq i64 %i, %len
+  br i1 %fin, label %bout, label %bread
+bread:
+  %pp2 = inttoptr i64 %ptr to ptr
+  %cp = getelementptr i8, ptr %pp2, i64 %i
+  %c = load i8, ptr %cp
+  %ce = zext i8 %c to i64
+  %hx = xor i64 %hh, %ce
+  %hh2 = mul i64 %hx, 1099511628211
+  %i2 = add i64 %i, 1
+  br label %bloop
+bout:
+  ret i64 %hh
+}
+
+define i64 @nx_memo_hash(i64 %fnid, ptr %args, i64 %nargs) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%i2, %nextv]
+  %h = phi i64 [14695981039346656037, %entry], [%h3, %nextv]
+  %done = icmp eq i64 %i, %nargs
+  br i1 %done, label %out, label %mix
+mix:
+  %ep = getelementptr %NxVal, ptr %args, i64 %i
+  %e = load %NxVal, ptr %ep
+  %t = extractvalue %NxVal %e, 0
+  %a = extractvalue %NxVal %e, 1
+  %b = extractvalue %NxVal %e, 2
+  %h0 = xor i64 %h, %t
+  %h1 = mul i64 %h0, 1099511628211
+  %h2 = xor i64 %h1, %a
+  %hm = mul i64 %h2, 1099511628211
+  %isstr = icmp eq i64 %t, 4
+  br i1 %isstr, label %str, label %plain
+str:
+  %hs = call i64 @nx_memo_mixstr(i64 %hm, i64 %a, i64 %b)
+  br label %nextv
+plain:
+  %hp = xor i64 %hm, %b
+  %h3p = mul i64 %hp, 1099511628211
+  br label %nextv
+nextv:
+  %h3 = phi i64 [%hs, %str], [%h3p, %plain]
+  %i2 = add i64 %i, 1
+  br label %loop
+out:
+  %hf = xor i64 %h, %fnid
+  %hmf = mul i64 %hf, 1099511628211
+  %hn = xor i64 %hmf, %nargs
+  %hnm = mul i64 %hn, 1099511628211
+  ret i64 %hnm
+}
+
+define i1 @nx_memo_keyeq(ptr %slot, i64 %fnid, ptr %args, i64 %nargs) {
+entry:
+  %fp = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 0
+  %f = load i64, ptr %fp
+  %fe = icmp eq i64 %f, %fnid
+  br i1 %fe, label %c1, label %no
+c1:
+  %np = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 1
+  %n = load i64, ptr %np
+  %ne = icmp eq i64 %n, %nargs
+  br i1 %ne, label %loop, label %no
+loop:
+  %i = phi i64 [0, %c1], [%i2, %next]
+  %done = icmp eq i64 %i, %nargs
+  br i1 %done, label %yes, label %cmp
+cmp:
+  %kp = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 2, i64 %i
+  %k = load %NxVal, ptr %kp
+  %ep = getelementptr %NxVal, ptr %args, i64 %i
+  %e = load %NxVal, ptr %ep
+  %kt = extractvalue %NxVal %k, 0
+  %et = extractvalue %NxVal %e, 0
+  %te = icmp eq i64 %kt, %et
+  br i1 %te, label %c2, label %no
+c2:
+  %isstr = icmp eq i64 %kt, 4
+  br i1 %isstr, label %str, label %c3
+str:
+  %eq = call i1 @nx_streq(%NxVal %k, %NxVal %e)
+  br i1 %eq, label %next, label %no
+c3:
+  %ka = extractvalue %NxVal %k, 1
+  %ea = extractvalue %NxVal %e, 1
+  %ae = icmp eq i64 %ka, %ea
+  br i1 %ae, label %c4, label %no
+c4:
+  %kb = extractvalue %NxVal %k, 2
+  %eb = extractvalue %NxVal %e, 2
+  %be = icmp eq i64 %kb, %eb
+  br i1 %be, label %next, label %no
+next:
+  %i2 = add i64 %i, 1
+  br label %loop
+yes:
+  ret i1 true
+no:
+  ret i1 false
+}
+
+define i1 @nx_memo_get(i64 %fnid, ptr %args, i64 %nargs, ptr %out) {
+entry:
+  %ok = call i1 @nx_memo_args_ok(ptr %args, i64 %nargs)
+  br i1 %ok, label %lock, label %miss
+lock:
+  call void @nx_spin_lock()
+  %h = call i64 @nx_memo_hash(i64 %fnid, ptr %args, i64 %nargs)
+  %idx0 = urem i64 %h, 4096
+  br label %probe
+probe:
+  %idx = phi i64 [%idx0, %lock], [%idx2, %next]
+  %n = phi i64 [0, %lock], [%n2, %next]
+  %full = icmp eq i64 %n, 4096
+  br i1 %full, label %missrel, label %chk
+chk:
+  %slot = getelementptr [4096 x %NxMemoSlot], ptr @nx_memo_table, i64 0, i64 %idx
+  %up = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 4
+  %used = load i1, ptr %up
+  br i1 %used, label %cmp, label %missrel
+cmp:
+  %eq = call i1 @nx_memo_keyeq(ptr %slot, i64 %fnid, ptr %args, i64 %nargs)
+  br i1 %eq, label %hit, label %next
+next:
+  %t = add i64 %idx, 1
+  %idx2 = urem i64 %t, 4096
+  %n2 = add i64 %n, 1
+  br label %probe
+hit:
+  %vp = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 3
+  %v = load %NxVal, ptr %vp
+  store %NxVal %v, ptr %out
+  call void @nx_spin_unlock()
+  ret i1 true
+missrel:
+  call void @nx_spin_unlock()
+  br label %miss
+miss:
+  ret i1 false
+}
+
+define void @nx_memo_clear() {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%i2, %clr]
+  %done = icmp eq i64 %i, 4096
+  br i1 %done, label %out, label %clr
+clr:
+  %slot = getelementptr [4096 x %NxMemoSlot], ptr @nx_memo_table, i64 0, i64 %i
+  %up = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 4
+  store i1 false, ptr %up
+  %i2 = add i64 %i, 1
+  br label %loop
+out:
+  store i64 0, ptr @nx_memo_count
+  ret void
+}
+
+define void @nx_memo_put(i64 %fnid, ptr %args, i64 %nargs, %NxVal %val) {
+entry:
+  %ok = call i1 @nx_memo_args_ok(ptr %args, i64 %nargs)
+  br i1 %ok, label %lock, label %out
+lock:
+  call void @nx_spin_lock()
+  %cnt = load i64, ptr @nx_memo_count
+  %full = icmp sge i64 %cnt, 4096
+  br i1 %full, label %clr, label %go
+clr:
+  call void @nx_memo_clear()
+  br label %go
+go:
+  %h = call i64 @nx_memo_hash(i64 %fnid, ptr %args, i64 %nargs)
+  %idx0 = urem i64 %h, 4096
+  br label %probe
+probe:
+  %idx = phi i64 [%idx0, %go], [%idx2, %next]
+  %n = phi i64 [0, %go], [%n2, %next]
+  %spin = icmp eq i64 %n, 4096
+  br i1 %spin, label %rel, label %chk
+chk:
+  %slot = getelementptr [4096 x %NxMemoSlot], ptr @nx_memo_table, i64 0, i64 %idx
+  %up = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 4
+  %used = load i1, ptr %up
+  br i1 %used, label %cmp, label %ins
+cmp:
+  %eq = call i1 @nx_memo_keyeq(ptr %slot, i64 %fnid, ptr %args, i64 %nargs)
+  br i1 %eq, label %rel, label %next
+next:
+  %t = add i64 %idx, 1
+  %idx2 = urem i64 %t, 4096
+  %n2 = add i64 %n, 1
+  br label %probe
+ins:
+  %fp = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 0
+  store i64 %fnid, ptr %fp
+  %np = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 1
+  store i64 %nargs, ptr %np
+  br label %copy
+copy:
+  %ci = phi i64 [0, %ins], [%ci2, %ccopy]
+  %cdone = icmp eq i64 %ci, %nargs
+  br i1 %cdone, label %store, label %ccopy
+ccopy:
+  %kp = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 2, i64 %ci
+  %ep = getelementptr %NxVal, ptr %args, i64 %ci
+  %e = load %NxVal, ptr %ep
+  store %NxVal %e, ptr %kp
+  %ci2 = add i64 %ci, 1
+  br label %copy
+store:
+  %vp = getelementptr %NxMemoSlot, ptr %slot, i64 0, i32 3
+  store %NxVal %val, ptr %vp
+  store i1 true, ptr %up
+  %c2 = load i64, ptr @nx_memo_count
+  %c3 = add i64 %c2, 1
+  store i64 %c3, ptr @nx_memo_count
+  br label %rel
+rel:
+  call void @nx_spin_unlock()
+  br label %out
+out:
+  ret void
+}

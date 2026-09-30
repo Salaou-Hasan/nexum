@@ -78,6 +78,33 @@ mod tests {
         assert_top_level_defines(&ir);
     }
 
+    fn memo_gets(ir: &str) -> usize {
+        // The prelude *defines* nx_memo_get once; count actual calls.
+        ir.matches("call i1 @nx_memo_get").count()
+    }
+
+    #[test]
+    fn memo_prologue_for_pure_fn() {
+        let ir = compile_entry(
+            "fn fib(n):\n    if n <= 1:\n        return n\n    else:\n        return fib(n - 1) + fib(n - 2)\nprint(fib(10))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        assert!(memo_gets(&ir) >= 1, "pure fib must consult the cache");
+        assert!(ir.contains("call void @nx_memo_put"), "pure fib must populate the cache");
+        assert_top_level_defines(&ir);
+    }
+
+    #[test]
+    fn no_memo_for_printing_fn() {
+        let ir = compile_entry(
+            "fn f(n):\n    print(n)\n    return n\nprint(f(1))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(memo_gets(&ir), 0, "printing fn must not be memoized");
+    }
+
     fn free_calls(ir: &str) -> usize {
         // The prelude defines nx_free_val with one self-recursive call.
         ir.matches("call void @nx_free_val").count() - 1
@@ -142,8 +169,21 @@ pub fn compile_entry(source: &str, base: &std::path::Path) -> Result<String, Cod
     };
     loader.load_main(source)?;
     let plan = nx_mem::plan(&loader.programs, "__main__");
+    // Memo table ids for purity-proven functions (opt out: NX_NOMEMO=1).
+    let mut memo: HashMap<(String, String), i64> = HashMap::new();
+    if std::env::var("NX_NOMEMO").is_err() {
+        if let Ok(ir) = nx_ir::analyze_map(loader.programs.clone()) {
+            let mut keys: Vec<_> = ir.funcs.keys().cloned().collect();
+            keys.sort();
+            for (i, k) in keys.into_iter().enumerate() {
+                if nx_ir::memoizable(&ir.funcs[&k].summary) {
+                    memo.insert(k, i as i64);
+                }
+            }
+        }
+    }
     let order = loader.order.clone();
-    let mut g = Gen::new(plan, loader.programs);
+    let mut g = Gen::new(plan, loader.programs, memo);
     g.emit_prelude();
     for module in &order {
         let prog = g.programs.get(module).cloned().unwrap();
@@ -312,6 +352,7 @@ struct Gen {
     out: String,
     plan: nx_mem::Plan,
     programs: HashMap<String, Program>,
+    memo: HashMap<(String, String), i64>,
     tmp: u64,
     label: u64,
     strc: u64,
@@ -331,13 +372,18 @@ struct Gen {
 }
 
 impl Gen {
-    fn new(plan: nx_mem::Plan, programs: HashMap<String, Program>) -> Self {
+    fn new(
+        plan: nx_mem::Plan,
+        programs: HashMap<String, Program>,
+        memo: HashMap<(String, String), i64>,
+    ) -> Self {
         Self {
             pre: String::new(),
             top: String::new(),
             out: String::new(),
             plan,
             programs,
+            memo,
             tmp: 0,
             label: 0,
             strc: 0,
@@ -486,6 +532,23 @@ impl Gen {
         self.term = None;
         self.w(&format!("define %NxVal @{fname}(%NxVal* %args, i64 %nargs) {{"));
         self.w("entry:");
+        // Memo prologue for purity-proven functions: hit returns cached.
+        let fnid = self.memo.get(&(module.to_string(), name.to_string())).copied();
+        if let Some(id) = fnid {
+            let slot = self.reg();
+            let hit = self.reg();
+            self.w(&format!("  {slot} = alloca %NxVal"));
+            self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
+            self.w(&format!("  {hit} = call i1 @nx_memo_get(i64 {id}, ptr %args, i64 %nargs, ptr {slot})"));
+            let go = self.lab("mhit");
+            let miss = self.lab("mmiss");
+            self.w(&format!("  br i1 {hit}, label %{go}, label %{miss}"));
+            self.w(&format!("{go}:"));
+            let cv = self.reg();
+            self.w(&format!("  {cv} = load %NxVal, ptr {slot}"));
+            self.w(&format!("  ret %NxVal {cv}"));
+            self.w(&format!("{miss}:"));
+        }
         for (i, p) in params.iter().enumerate() {
             let slot = self.reg();
             let ep = self.reg();
@@ -506,9 +569,9 @@ impl Gen {
             }
         }
         if self.term.is_none() {
-            // NOTE: free_scope needs the function's module/name context.
+            // NOTE: free_scope/memo need the function's module/name context.
             self.free_scope();
-            self.w("  ret %NxVal zeroinitializer");
+            self.emit_ret(None);
         }
         self.cur_module = saved;
         self.cur_fn = String::new();
@@ -518,6 +581,19 @@ impl Gen {
         Ok(())
     }
 
+    /// Emit `ret` for a value, storing it in the memo cache first when
+    /// the current function is memoized.
+    fn emit_ret(&mut self, reg: Option<&str>) {
+        if let Some(id) = self.memo.get(&(self.cur_module.clone(), self.cur_fn.clone())).copied() {
+            if let Some(v) = reg {
+                self.w(&format!("  call void @nx_memo_put(i64 {id}, ptr %args, i64 %nargs, %NxVal {v})"));
+            }
+        }
+        match reg {
+            Some(v) => self.w(&format!("  ret %NxVal {v}")),
+            None => self.w("  ret %NxVal zeroinitializer"),
+        }
+    }
     fn is_unique(&self, name: &str) -> bool {
         self.locals.contains_key(name)
             && self.plan.alloc_of(&self.cur_module, &self.cur_fn, name) == nx_mem::Alloc::Unique
@@ -687,21 +763,17 @@ impl Gen {
             Stmt::For { var, iter, body, span } => self.emit_for(var, iter, body, *span),
             Stmt::Fn { .. } => Ok(()),
             Stmt::Return { value, .. } => {
-                // Free Unique locals on every exit path.
-                let freed = match value {
+                // Free Unique locals on every exit path, then memoize.
+                match value {
                     Some(e) => {
                         let v = self.emit_expr(e)?;
                         self.free_scope();
-                        v
+                        self.emit_ret(Some(&v));
                     }
                     None => {
                         self.free_scope();
-                        String::new()
+                        self.emit_ret(None);
                     }
-                };
-                match value {
-                    Some(_) => self.w(&format!("  ret %NxVal {freed}")),
-                    None => self.w("  ret %NxVal zeroinitializer"),
                 }
                 self.term = Some(Term::Ret);
                 Ok(())

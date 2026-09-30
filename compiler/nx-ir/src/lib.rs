@@ -489,6 +489,16 @@ pub fn conflicts(a: &Summary, b: &Summary) -> bool {
     false
 }
 
+/// Memoizable: provably independent of mutable state — no shared
+/// reads or writes, no printing, no heap traffic, no opaque calls.
+/// Results depend only on arguments, so caching them preserves semantics.
+pub fn memoizable(sum: &Summary) -> bool {
+    sum.reads.is_empty()
+        && sum.writes.is_empty()
+        && !sum.prints
+        && !sum.heap
+        && !sum.opaque
+}
 /// Greedy in-order batching: each task joins the earliest batch it does
 /// not conflict with. Deterministic; preserves program order.
 pub fn partition(sums: &[Summary]) -> Vec<Vec<usize>> {
