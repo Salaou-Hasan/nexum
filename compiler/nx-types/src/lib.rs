@@ -110,6 +110,9 @@ struct Checker {
     /// Parameters seen in arithmetic, so an unresolved one can default
     /// to Int instead of staying dynamic.
     numeric_params: Vec<String>,
+    /// `local = param` plain copies found in the current body, resolved
+    /// once the pass knows a type for either end.
+    copies: Vec<(String, String)>,
     /// Per-function inferred shapes, harvested for the optimizer.
     inferred: HashMap<(String, String), FnInfo>,
     /// Module the checker is currently inside, for inference keys.
@@ -182,6 +185,17 @@ impl Checker {
         }
     }
 
+    /// Record `local = param`, a plain copy that makes both the same
+    /// type. Neither side learns anything on its own, so the pair is
+    /// resolved after the body by copying whichever end got typed.
+    fn mark_copy(&mut self, local: &str, value: &Expr) {
+        if let Expr::Var(p, _) = value {
+            if self.param_names.iter().any(|x| x == p) {
+                self.copies.push((local.to_string(), p.clone()));
+            }
+        }
+    }
+
     fn check_block(&mut self, stmts: &[Stmt]) {
         for s in stmts {
             self.check_stmt(s);
@@ -192,6 +206,7 @@ impl Checker {
         match stmt {
             Stmt::Assign { name, value, span } => {
                 let t = self.check_expr(value);
+                self.mark_copy(name, value);
                 if let Some(outer) = &self.parallel_outer {
                     if outer.contains(name) && !self.task_bound.contains(name) {
                         self.err(*span, format!("cannot assign to outer local '{name}' inside parallel (use a module global)"));
@@ -310,37 +325,103 @@ impl Checker {
                 let saved_returns = std::mem::take(&mut self.returns);
                 let saved_outer = self.fn_outer.take();
                 let saved_params = std::mem::take(&mut self.param_names);
-                self.numeric_params.clear();
                 self.in_function = true;
-                for p in params {
-                    self.vars.insert(p.clone(), Ty::Unknown);
-                }
                 self.param_names = params.clone();
                 // Outer scope for parallel tasks: params + all assigned names.
                 let mut outer: HashSet<String> = params.iter().cloned().collect();
                 collect_assigned(body, &mut outer);
                 self.fn_outer = Some(outer);
-                self.check_block(body);
-                let rets = std::mem::take(&mut self.returns);
-                let mut ret = Ty::None;
-                for t in &rets {
-                    if ret == Ty::None {
-                        ret = t.clone();
-                    } else if compatible(&ret, t) {
-                        if ret == Ty::Unknown {
-                            ret = t.clone();
-                        }
-                    } else {
-                        let r = ret.clone();
-                        self.err(*span, format!("inconsistent return types: {r} vs {t}"));
+                // Two passes. A parameter's type comes from how the body
+                // uses it, so pass one discovers the types and pass two
+                // checks the body with them already known. Without the
+                // second pass everything derived from a parameter would
+                // come out unresolved: `t = n * 2` is only Int if `n` is.
+                let mut rets: Vec<Ty>;
+                let mut ret: Ty;
+                // What we have learned about each parameter so far, fed
+                // back in on the next pass. Seeding the types is what makes
+                // the second pass useful: with `n` already Int, `t = n * 2`
+                // types `t` instead of widening it to unresolved.
+                let mut known: HashMap<String, Ty> = HashMap::new();
+                let mut passes = 0;
+                loop {
+                    self.numeric_params.clear();
+                    self.copies.clear();
+                    self.vars.clear();
+                    self.returns.clear();
+                    for p in params {
+                        self.vars
+                            .insert(p.clone(), known.get(p).cloned().unwrap_or(Ty::Unknown));
                     }
-                }
-                // The optimizer needs each function's own scope, captured
-                // before the enclosing scope is restored. A numeric
-                // parameter nothing else pinned defaults to Int.
-                for p in std::mem::take(&mut self.numeric_params) {
-                    if self.vars.get(&p) == Some(&Ty::Unknown) {
-                        self.vars.insert(p, Ty::Int);
+                    let entry_vars = self.vars.clone();
+                    // Only the final pass's diagnostics are reported: an
+                    // earlier pass sees types that later passes refine, so
+                    // its complaints can be spurious. They are still
+                    // carried here and dropped by the truncate at the top
+                    // of the next iteration.
+                    let nerr = self.errors.len();
+                    self.check_block(body);
+                    let pass_errors: Vec<CheckError> = self.errors.drain(nerr..).collect();
+                    // A numeric parameter nothing else pinned defaults to Int,
+                    // the same way a numeric local is fixed by its first
+                    // binding.
+                    for p in std::mem::take(&mut self.numeric_params) {
+                        if self.vars.get(&p) == Some(&Ty::Unknown) {
+                            self.vars.insert(p, Ty::Int);
+                        }
+                    }
+                    // A plain copy makes both ends the same type; take it
+                    // from whichever end this pass managed to type.
+                    for (local, p) in std::mem::take(&mut self.copies) {
+                        let from_local = self.vars.get(&local).cloned();
+                        let from_param = self.vars.get(&p).cloned();
+                        // Take the type from whichever end is known, or
+                        // accept it when both already agree. Anything else
+                        // (both unresolved, or a real disagreement) stays
+                        // unresolved and is reported by define.
+                        let resolved = match (from_local, from_param) {
+                            (Some(Ty::Unknown), Some(t)) => Some(t),
+                            (Some(t), Some(Ty::Unknown)) => Some(t),
+                            (Some(l), Some(p)) if l == p => Some(l),
+                            _ => None,
+                        };
+                        if let Some(t) = resolved {
+                            self.vars.insert(local, t.clone());
+                            self.vars.insert(p, t);
+                        }
+                    }
+                    let snapshot = self.vars.clone();
+                    for p in params {
+                        if let Some(t) = snapshot.get(p) {
+                            if *t != Ty::Unknown {
+                                known.insert(p.clone(), t.clone());
+                            }
+                        }
+                    }
+                    rets = std::mem::take(&mut self.returns);
+                    ret = Ty::None;
+                    for t in &rets {
+                        if ret == Ty::None {
+                            ret = t.clone();
+                        } else if compatible(&ret, t) {
+                            if ret == Ty::Unknown {
+                                ret = t.clone();
+                            }
+                        } else {
+                            let r = ret.clone();
+                            self.err(*span, format!("inconsistent return types: {r} vs {t}"));
+                        }
+                    }
+                    passes += 1;
+                    // Keep going while a pass still teaches us something.
+                    // Bounded because each pass can only remove Unknowns.
+                    let converged = self.vars == entry_vars || passes >= 4;
+                    if converged {
+                        // Report the last pass, which had the best types.
+                        self.errors.extend(pass_errors);
+                    }
+                    if converged {
+                        break;
                     }
                 }
                 let fn_locals = self.vars.clone();
@@ -810,6 +891,7 @@ impl Default for Checker {
             loop_depth: 0,
             param_names: Vec::new(),
             numeric_params: Vec::new(),
+            copies: Vec::new(),
             inferred: HashMap::new(),
             module_name: String::new(),
             parallel_outer: None,

@@ -60,6 +60,7 @@ version = "0.2.0"
 dependencies = [
  "nx-ast",
  "nx-parser",
+ "nx-types",
 ]
 
 [[package]]

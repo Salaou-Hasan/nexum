@@ -10,4 +10,5 @@ path = "src/lib.rs"
 
 [dependencies]
 nx-ast = { path = "../nx-ast" }
+nx-types = { path = "../nx-types" }
 nx-parser = { path = "../nx-parser" }

@@ -1,0 +1,33 @@
+# Line comments start with a hash and run to the end of the line.
+# They work anywhere whitespace does.
+
+x = 1  # trailing comment after a statement
+y = 2
+
+# A comment on its own line between statements.
+z = x + y  # and one after an expression
+
+# Indentation is tracked on code lines only, so a comment may sit at any
+# column without opening or closing a block:
+if z == 3:
+    # a comment at the body indent
+    w = 10
+        # even deeper, and this must not start a block
+    v = 20
+# back at the top level, still inside nothing
+
+# Quotes and further hashes in a comment are just text:
+q = "text # inside a string is not a comment"
+r = "quote \" and hash # together"  # so are these
+
+# A hash inside a string literal is part of the value, not a comment.
+s = "a#b"
+
+for i in 0..3:
+    # Loops work the same way.
+    print(i)
+
+print(x, y, z, w, v)
+print(q)
+print(r)
+print(s)

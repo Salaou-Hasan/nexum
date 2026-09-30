@@ -1,24 +1,30 @@
 //! Memory planner for Nexum (`nx-mem`).
 //!
-//! Decides per function-local binding whether its buffers are:
-//! - `Unique`: single owner, freed at function exit (all `ret` paths)
-//!   and before reassignment.
+//! Decides per function-local binding how it is stored:
+//! - `Stack`: a scalar, held in a register or a typed stack slot. No
+//!   buffer to own, so no free is ever emitted and nothing can dangle.
+//! - `Unique`: owns heap buffers, single owner, freed at function exit
+//!   (all `ret` paths) and before reassignment.
 //! - `Shared`: escapes (globals, returns, retained params, aliases,
 //!   ambiguous cases) — lives for the process lifetime, as before.
 //!
 //! Soundness rule: doubt means Shared. A wrong Unique would be
-//! use-after-free; a wrong Shared only costs memory.
+//! use-after-free; a wrong Shared only costs memory. `Stack` is only
+//! chosen when the value is provably a scalar, so it can never dangle.
 //!
-//! v0 limits: params are always Shared (caller owns them); for-each loop
-//! vars are Shared (they alias list elements); analysis is per function
-//! with a fixpoint over retains-summaries; no cross-module inference
-//! beyond direct same-module calls (unknown callees retain).
+//! v0 limits: params are Shared unless proven scalar (caller owns the
+//! buffers); for-each loop vars are Shared (they alias list elements);
+//! analysis is per function with a fixpoint over retains-summaries; no
+//! cross-module inference beyond direct same-module calls (unknown
+//! callees retain).
 
 use std::collections::{HashMap, HashSet};
 use nx_ast::{Expr, Program, Stmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alloc {
+    /// Scalar: register or typed stack slot, never freed.
+    Stack,
     Unique,
     Shared,
 }
@@ -42,7 +48,15 @@ impl Plan {
 
 /// Compute the allocation plan for a whole program (all modules).
 /// `entry` is the main module name ("__main__").
-pub fn plan(programs: &HashMap<String, Program>, entry: &str) -> Plan {
+///
+/// `types` supplies the checker's inferred types, which decide which
+/// bindings are scalars and therefore stack-allocated. Pass an empty map
+/// to get the pre-unboxing plan (everything Unique or Shared).
+pub fn plan(
+    programs: &HashMap<String, Program>,
+    entry: &str,
+    types: &HashMap<(String, String), nx_types::FnInfo>,
+) -> Plan {
     let _ = entry;
     // Index all functions, including nested ones.
     let mut fns: HashMap<(String, String), (Vec<String>, Vec<Stmt>)> = HashMap::new();
@@ -157,14 +171,34 @@ pub fn plan(programs: &HashMap<String, Program>, entry: &str) -> Plan {
         }
         let mut assigned: HashSet<String> = HashSet::new();
         assigned_in(body, &mut assigned);
-        for var in assigned {
-            if params.contains(&var) {
-                plan.locals.insert((module.clone(), name.clone(), var), Alloc::Shared);
-            } else if esc_vars.contains(&var) || aliased.contains(&var) {
-                plan.locals.insert((module.clone(), name.clone(), var), Alloc::Shared);
-            } else {
-                plan.locals.insert((module.clone(), name.clone(), var), Alloc::Unique);
+        // Scalars are decided first: a value with no buffers cannot
+        // dangle, so Stack is sound regardless of escape or aliasing.
+        // Aliasing a scalar copies the number, not a pointer, so `b = a`
+        // on two Ints still leaves both in registers.
+        //
+        // The key is (module, function) and `module`/`name` are borrowed
+        // from `fns`, so build the owned key once.
+        let key = (module.clone(), name.clone());
+        let info = types.get(&key);
+        let mut stackable: HashSet<String> = HashSet::new();
+        if let Some(info) = info {
+            for var in &assigned {
+                if info.locals.get(var).map(|t| t.is_scalar()).unwrap_or(false) {
+                    stackable.insert(var.clone());
+                }
             }
+        }
+        for var in assigned {
+            let alloc = if stackable.contains(&var) {
+                Alloc::Stack
+            } else if params.contains(&var) {
+                Alloc::Shared
+            } else if esc_vars.contains(&var) || aliased.contains(&var) {
+                Alloc::Shared
+            } else {
+                Alloc::Unique
+            };
+            plan.locals.insert((module.clone(), name.clone(), var), alloc);
         }
         // for-each loop vars alias list elements: always Shared.
         for s in body {
@@ -431,10 +465,86 @@ mod tests {
     use super::*;
 
     fn plan_src(src: &str) -> Plan {
+        plan_with(src, &HashMap::new())
+    }
+
+    /// Plan with the checker's inferred types, which is what promotes
+    /// scalars to `Stack`.
+    fn plan_with(src: &str, types: &HashMap<(String, String), nx_types::FnInfo>) -> Plan {
         let prog = nx_parser::parse_source(src).unwrap_or_else(|e| panic!("{e}"));
         let mut map = HashMap::new();
         map.insert("__main__".to_string(), prog);
-        plan(&map, "__main__")
+        plan(&map, "__main__", types)
+    }
+
+    fn infer(src: &str) -> HashMap<(String, String), nx_types::FnInfo> {
+        let prog = nx_parser::parse_source(src).unwrap_or_else(|e| panic!("{e}"));
+        nx_types::infer_program(&prog, std::path::Path::new("."))
+            .unwrap_or_else(|es| panic!("{es:?}"))
+    }
+
+    #[test]
+    fn scalar_local_is_stack() {
+        let src = "fn f(n):\n    t = n * 2\n    print(t)\n";
+        let types = infer(src);
+        let p = plan_with(src, &types);
+        assert_eq!(p.alloc_of("__main__", "f", "t"), Alloc::Stack);
+    }
+
+    #[test]
+    fn list_local_is_not_stack() {
+        let src = "fn f():\n    a = [1]\n    print(a)\n";
+        let types = infer(src);
+        let p = plan_with(src, &types);
+        assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Unique);
+    }
+
+    #[test]
+    fn stack_beats_escape() {
+        // Returning a scalar copies the number, so it cannot dangle.
+        let src = "fn f(n):\n    t = n * 2\n    return t + 1\n";
+        let types = infer(src);
+        let p = plan_with(src, &types);
+        assert_eq!(p.alloc_of("__main__", "f", "t"), Alloc::Stack);
+    }
+
+    #[test]
+    fn stack_beats_aliasing() {
+        // `a` and `b` are both Int, and a scalar copy is a number rather
+        // than a second reference to one buffer, so neither dangles.
+        let src = "fn f(n):\n    a = n * 1\n    b = a\n    print(b)\n";
+        let types = infer(src);
+        let p = plan_with(src, &types);
+        assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Stack);
+        assert_eq!(p.alloc_of("__main__", "f", "b"), Alloc::Stack);
+    }
+
+    #[test]
+    fn list_copy_is_not_stack() {
+        // The same shape with a list must still be Shared: the copy shares
+        // a buffer, so freeing it would be a double free.
+        let src = "fn f():\n    a = [1]\n    b = a\n    print(b)\n";
+        let types = infer(src);
+        let p = plan_with(src, &types);
+        assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Shared);
+        assert_eq!(p.alloc_of("__main__", "f", "b"), Alloc::Shared);
+    }
+
+    #[test]
+    fn unknown_typed_local_is_not_stack() {
+        // Without type information nothing may be promoted: doubt is Shared.
+        let src = "fn f(n):\n    t = n * 2\n    print(t)\n";
+        let p = plan_src(src);
+        assert_eq!(p.alloc_of("__main__", "f", "t"), Alloc::Unique);
+    }
+
+    #[test]
+    fn float_and_bool_locals_are_stack() {
+        let src = "fn f(n):\n    a = n / 2.0\n    b = n < 1\n    print(a, b)\n";
+        let types = infer(src);
+        let p = plan_with(src, &types);
+        assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Stack);
+        assert_eq!(p.alloc_of("__main__", "f", "b"), Alloc::Stack);
     }
 
     #[test]

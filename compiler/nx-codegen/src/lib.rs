@@ -329,14 +329,31 @@ mod tests {
         ir.matches("call void @nx_free_val").count() - 1
     }
 
+    /// A Unique local owns heap buffers, so it must be released on every
+    /// exit path. The temp has to be a list, not a scalar: a scalar is
+    /// Stack-allocated and has nothing to free.
     #[test]
     fn unique_temp_gets_freed() {
+        let ir = compile_entry(
+            "fn f(n):\n    t = [1, 2]\n    print(t, n)\nprint(f(21))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        assert!(free_calls(&ir) >= 1, "Unique local t must be freed");
+    }
+
+    /// The scalar counterpart: `t = n * 2` is Stack, so it must not be
+    /// freed at all. Freeing it would mean loading an i64 slot as a box.
+    #[test]
+    fn stack_local_is_not_freed() {
         let ir = compile_entry(
             "fn f(n):\n    t = n * 2\n    print(t)\nprint(f(21))\n",
             std::path::Path::new("."),
         )
         .unwrap();
-        assert!(free_calls(&ir) >= 1, "Unique local t must be freed");
+        assert_eq!(free_calls(&ir), 0, "a Stack local owns no buffer");
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("alloca i64"), "scalar temp should be typed:\n{b}");
     }
 
     #[test]
@@ -419,23 +436,9 @@ fn compile_opts(
         base: base.to_path_buf(),
     };
     loader.load_main(source)?;
-    let plan = nx_mem::plan(&loader.programs, "__main__");
-    // Memo table ids for purity-proven functions (opt out: NX_NOMEMO=1).
-    let mut memo: HashMap<(String, String), i64> = HashMap::new();
-    if std::env::var("NX_NOMEMO").is_err() {
-        if let Ok(ir) = nx_ir::analyze_map(loader.programs.clone()) {
-            let mut keys: Vec<_> = ir.funcs.keys().cloned().collect();
-            keys.sort();
-            for (i, k) in keys.into_iter().enumerate() {
-                if nx_ir::memoizable(&ir.funcs[&k].summary) {
-                    memo.insert(k, i as i64);
-                }
-            }
-        }
-    }
     let order = loader.order.clone();
-    // Inferred types drive unboxing. The driver type-checks first, so a
-    // failure here means an unreachable path: fall back to all-boxed.
+    // Inferred types drive unboxing and the memory plan. The driver
+    // type-checks first, so a failure here means an unreachable path.
     let mut types: HashMap<(String, String), nx_types::FnInfo> = HashMap::new();
     for module in &order {
         if let Some(prog) = loader.programs.get(module) {
@@ -450,6 +453,24 @@ fn compile_opts(
                     line: 0,
                     col: 0,
                 }),
+            }
+        }
+    }
+    // The planner only promotes scalars to Stack when the unboxing pass is
+    // actually on, so NX_NOUNBOX gets the pre-unboxing plan too.
+    let no_types: HashMap<(String, String), nx_types::FnInfo> = HashMap::new();
+    let plan_types = if unbox_on { &types } else { &no_types };
+    let plan = nx_mem::plan(&loader.programs, "__main__", plan_types);
+    // Memo table ids for purity-proven functions (opt out: NX_NOMEMO=1).
+    let mut memo: HashMap<(String, String), i64> = HashMap::new();
+    if std::env::var("NX_NOMEMO").is_err() {
+        if let Ok(ir) = nx_ir::analyze_map(loader.programs.clone()) {
+            let mut keys: Vec<_> = ir.funcs.keys().cloned().collect();
+            keys.sort();
+            for (i, k) in keys.into_iter().enumerate() {
+                if nx_ir::memoizable(&ir.funcs[&k].summary) {
+                    memo.insert(k, i as i64);
+                }
             }
         }
     }

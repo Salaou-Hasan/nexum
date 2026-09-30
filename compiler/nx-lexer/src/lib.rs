@@ -524,6 +524,54 @@ mod tests {
         assert!(toks.iter().any(|t| t.lexeme == "x"));
     }
 
+    /// A comment is trivia, so it must leave no tokens and no indentation
+    /// behind -- not even when it is the only thing on an over-indented
+    /// line, which is a classic way to corrupt a block structure.
+    #[test]
+    fn comment_lines_leave_no_tokens() {
+        // The Newline keeps the token stream well-formed for the parser;
+        // what matters is that no Indent or Dedent escapes the comment.
+        let toks = lex("# only a comment\n").unwrap();
+        assert!(
+            !toks.iter().any(|t| matches!(t.kind, TokenKind::Indent | TokenKind::Dedent)),
+            "comment-only file must not shift indentation: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn over_indented_comment_does_not_open_a_block() {
+        // A 6-space comment inside a 4-space block must not register as
+        // an indent, or every following line looks misaligned.
+        let toks = lex("if true:\n    x = 1\n      # deep\n    y = 2\n").unwrap();
+        let indents = toks.iter().filter(|t| t.kind == TokenKind::Indent).count();
+        assert_eq!(indents, 1, "only the `if` body should indent: {toks:?}");
+        let dedents = toks.iter().filter(|t| t.kind == TokenKind::Dedent).count();
+        assert_eq!(dedents, 1, "one dedent at end of block: {toks:?}");
+    }
+
+    #[test]
+    fn comment_at_eof_without_newline() {
+        let toks = lex("x = 1\n# no newline after").unwrap();
+        assert!(toks.iter().any(|t| t.lexeme == "x"));
+    }
+
+    #[test]
+    fn hash_inside_string_is_not_a_comment() {
+        // The String token keeps its quotes, so match the whole literal.
+        let toks = lex("x = \"a#b\"").unwrap();
+        assert!(
+            toks.iter().any(|t| t.kind == TokenKind::String && t.lexeme == "\"a#b\""),
+            "string contents must survive: {toks:?}"
+        );
+    }
+
+    #[test]
+    fn comment_may_contain_quotes_and_hashes() {
+        let toks = lex("x = 1 # it's a \"test\" ###").unwrap();
+        assert!(toks.iter().any(|t| t.lexeme == "x"));
+        assert_eq!(toks.iter().filter(|t| t.kind == TokenKind::Ident).count(), 1);
+    }
+
     #[test]
     fn unterminated_string_errors() {
         assert!(lex("\"abc").is_err());
