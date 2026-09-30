@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx>\n       nx run <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx check <file.nx>\n       nx dump-ir <file.nx>\n       nx build <file.nx> [-o <out>]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
+    "usage: nx <file.nx> (interpret)\n       nx run <file.nx> (build if needed, run native)\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx> (interpret)\n       nx check <file.nx>\n       nx dump-ir <file.nx>\n       nx build <file.nx> [-o <out>] [--run]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
 }
 
 const UPDATE_REPO: &str = "Salaou-Hasan/nexum";
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
         return run_file(&args[2]);
     }
     if args.len() == 3 && args[1] == "run" {
-        return run_file(&args[2]);
+        return run_native(&args[2]);
     }
     if args.len() == 3 && args[1] == "check" {
         return check_file(&args[2]);
@@ -302,6 +302,26 @@ fn default_exe_name(file: &str) -> String {
         .unwrap_or(".".into());
     let name = if cfg!(windows) { format!("{stem}.exe") } else { stem };
     dir.join(name).to_string_lossy().to_string()
+}
+
+/// `nx run`: build the native exe when stale, then execute it.
+fn run_native(path: &str) -> ExitCode {
+    let out = default_exe_name(path);
+    if up_to_date(path, &out) {
+        println!("nx: up to date ({out})");
+    } else if let Err(c) = build_exe(path, &out) {
+        return c;
+    }
+    match std::process::Command::new(&out).status() {
+        Ok(s) => match s.code() {
+            Some(c) => ExitCode::from(c as u8),
+            None => ExitCode::FAILURE,
+        },
+        Err(e) => {
+            eprintln!("nx: cannot run {out}: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run_file(path: &str) -> ExitCode {
