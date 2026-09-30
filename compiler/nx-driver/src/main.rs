@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx check <file.nx>\n       nx dump-ir <file.nx>\n       nx build <file.nx> [-o <out>]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
+    "usage: nx <file.nx>\n       nx run <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx check <file.nx>\n       nx dump-ir <file.nx>\n       nx build <file.nx> [-o <out>]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
 }
 
 const UPDATE_REPO: &str = "Salaou-Hasan/nexum";
@@ -30,6 +30,9 @@ fn main() -> ExitCode {
         return parse_file(&args[2]);
     }
     if args.len() == 3 && args[1] == "--run" {
+        return run_file(&args[2]);
+    }
+    if args.len() == 3 && args[1] == "run" {
         return run_file(&args[2]);
     }
     if args.len() == 3 && args[1] == "check" {
