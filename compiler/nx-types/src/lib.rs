@@ -107,6 +107,9 @@ struct Checker {
     /// and are narrowed from how the body uses them, which is what lets
     /// codegen keep them out of the box.
     param_names: Vec<String>,
+    /// Parameters seen in arithmetic, so an unresolved one can default
+    /// to Int instead of staying dynamic.
+    numeric_params: Vec<String>,
     /// Per-function inferred shapes, harvested for the optimizer.
     inferred: HashMap<(String, String), FnInfo>,
     /// Module the checker is currently inside, for inference keys.
@@ -130,7 +133,17 @@ impl Checker {
             None => {
                 self.vars.insert(name.to_string(), ty);
             }
-            Some(old) if compatible(old, &ty) => {}
+            Some(old) if compatible(old, &ty) => {
+                // An unresolved value assigned to a known-typed variable
+                // makes the variable itself unresolved. The backend gives
+                // a known scalar a typed slot, so keeping the narrow type
+                // here would let a value of the wrong dynamic type land in
+                // it. Widening to Unknown costs the optimization, not
+                // correctness.
+                if ty == Ty::Unknown && *old != Ty::Unknown {
+                    self.vars.insert(name.to_string(), Ty::Unknown);
+                }
+            }
             Some(old) => {
                 let old = old.clone();
                 self.err(span, format!("variable '{name}' is {old}, cannot rebind to {ty}"));
@@ -155,6 +168,17 @@ impl Checker {
             // Conflicting uses: leave the first answer and let the
             // expression-level check report the mismatch.
             _ => {}
+        }
+    }
+
+    /// Mark a parameter as used in arithmetic. If nothing else pins its
+    /// type it becomes Int, the same way a numeric local is fixed by its
+    /// first binding.
+    fn mark_numeric(&mut self, e: &Expr) {
+        if let Expr::Var(name, _) = e {
+            if self.param_names.iter().any(|p| p == name) {
+                self.numeric_params.push(name.clone());
+            }
         }
     }
 
@@ -286,6 +310,7 @@ impl Checker {
                 let saved_returns = std::mem::take(&mut self.returns);
                 let saved_outer = self.fn_outer.take();
                 let saved_params = std::mem::take(&mut self.param_names);
+                self.numeric_params.clear();
                 self.in_function = true;
                 for p in params {
                     self.vars.insert(p.clone(), Ty::Unknown);
@@ -311,7 +336,13 @@ impl Checker {
                     }
                 }
                 // The optimizer needs each function's own scope, captured
-                // before the enclosing scope is restored.
+                // before the enclosing scope is restored. A numeric
+                // parameter nothing else pinned defaults to Int.
+                for p in std::mem::take(&mut self.numeric_params) {
+                    if self.vars.get(&p) == Some(&Ty::Unknown) {
+                        self.vars.insert(p, Ty::Int);
+                    }
+                }
                 let fn_locals = self.vars.clone();
                 let param_tys: Vec<Ty> =
                     params.iter().map(|p| fn_locals.get(p).cloned().unwrap_or(Ty::Unknown)).collect();
@@ -598,27 +629,20 @@ impl Checker {
                         Ty::Bool
                     }
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                        // Mixed Int/Float arithmetic promotes to Float, so
-                        // the Int side is the one that pins a parameter.
-                        match op {
-                            BinOp::Add if l == Ty::Str || r == Ty::Str => {
-                                self.expect_param(left, Ty::Str);
-                                self.expect_param(right, Ty::Str);
-                            }
-                            _ => {
-                                if l == Ty::Int {
-                                    self.expect_param(right, Ty::Int);
-                                }
-                                if r == Ty::Int {
-                                    self.expect_param(left, Ty::Int);
-                                }
-                                if l == Ty::Float {
-                                    self.expect_param(right, Ty::Float);
-                                }
-                                if r == Ty::Float {
-                                    self.expect_param(left, Ty::Float);
-                                }
-                            }
+                        // Arithmetic does not pin a parameter: Int/Float
+                        // mixing is legal, so `n * 3` and `n * 0.5` are
+                        // both well-typed for n. Mark it numeric instead;
+                        // an unresolved numeric param defaults to Int
+                        // (see the end of function checking), matching how
+                        // a numeric local is fixed by its first binding.
+                        if matches!(op, BinOp::Add)
+                            && (l == Ty::Str || r == Ty::Str)
+                        {
+                            self.expect_param(left, Ty::Str);
+                            self.expect_param(right, Ty::Str);
+                        } else {
+                            self.mark_numeric(left);
+                            self.mark_numeric(right);
                         }
                         match arith_result(&l, *op, &r) {
                             Some(t) => t,
@@ -785,6 +809,7 @@ impl Default for Checker {
             returns: Vec::new(),
             loop_depth: 0,
             param_names: Vec::new(),
+            numeric_params: Vec::new(),
             inferred: HashMap::new(),
             module_name: String::new(),
             parallel_outer: None,
@@ -927,9 +952,25 @@ mod tests {
     }
 
     #[test]
-    fn param_float_from_float_literal() {
+    fn numeric_param_defaults_to_int() {
+        // `x / 2.0` is well-typed for an Int x (the sum widens), so the
+        // param is numeric rather than pinned: it defaults to Int.
         let m = infer("fn half(x):\n    return x / 2.0\n");
-        assert_eq!(m[&("__main__".into(), "half".into())].locals["x"], Ty::Float);
+        assert_eq!(m[&("__main__".into(), "half".into())].locals["x"], Ty::Int);
+    }
+
+    #[test]
+    fn comparison_against_float_pins_param_to_float() {
+        // An ordering comparison has no widening, so the type is forced.
+        let m = infer("fn over(x):\n    if x < 1.5:\n        return 1\n    else:\n        return 0\n");
+        assert_eq!(m[&("__main__".into(), "over".into())].locals["x"], Ty::Float);
+    }
+
+    #[test]
+    fn mixed_arith_param_must_be_int() {
+        // half(1) is fine; half(1.0) is not, because half's param is Int.
+        ok("fn half(x):\n    return x / 2.0\nprint(half(1))\n");
+        assert!(!err("fn half(x):\n    return x / 2.0\nprint(half(1.0))\n").is_empty());
     }
 
     #[test]
@@ -962,5 +1003,22 @@ mod tests {
         let top = &m[&("__main__".into(), "<top>".into())];
         assert_eq!(top.locals["a"], Ty::Int);
         assert_eq!(top.locals["b"], Ty::Str);
+    }
+
+    #[test]
+    fn unknown_assignment_widens_variable() {
+        // t is Int from its first binding, but the loop element is
+        // untyped, so t must widen: the backend gives a known scalar a
+        // typed slot and a narrower type would be unsound.
+        let m = infer("fn f(xs):\n    t = 0\n    for x in xs:\n        t = t + x\n    return t\n");
+        let f = &m[&("__main__".into(), "f".into())];
+        assert_eq!(f.locals["t"], Ty::Unknown);
+    }
+
+    #[test]
+    fn widening_is_sticky() {
+        // Once widened, a later known assignment must not re-narrow.
+        let m = infer("fn f(xs):\n    t = 0\n    for x in xs:\n        t = t + x\n    t = 5\n    return t\n");
+        assert_eq!(m[&("__main__".into(), "f".into())].locals["t"], Ty::Unknown);
     }
 }

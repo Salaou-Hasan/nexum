@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Purity-directed automatic memoization
+- `nx-ir` proves a function Pure; the compiler caches it automatically,
+  with no annotation and no source change. Scalar arguments only, so
+  list mutation stays visible. 4096-entry bounded cache, cmpxchg
+  spinlock in the runtime (no pthreads, so it links on Windows too).
+- Opt out with `NX_NOMEMO=1`. Interpreter `fib(30)`: 80.17s -> 0.09s;
+  native `fib(90)`: 0.19s.
+- Parallel worker threads get a 64 MiB stack: memoized recursion reaches
+  a depth that overflowed the 2 MiB default.
+
+### Unboxing optimizer
+- Values with a statically known scalar type live in bare `i64`/`double`
+  /`i1` registers and stack slots, with raw LLVM arithmetic. Boxing is
+  re-inserted only at dynamic boundaries: call arguments, returns, list
+  elements, module globals, `print`. Function boundaries stay boxed.
+- `nx-types` now infers parameter types from the body. Uses with exactly
+  one answer pin the type (`xs[i]` is `Int`, `if b` is `Bool`,
+  `x < 1.5` is `Float`); a parameter used only in arithmetic is numeric
+  and defaults to `Int`, matching how a numeric local is fixed by its
+  first binding.
+- Fixed a soundness hole the unboxing exposed: an unresolved expression
+  assigned to a known-typed variable now widens that variable to
+  unresolved, instead of silently keeping the narrow type.
+- `nx_eq` on floats now uses IEEE comparison rather than bit equality, so
+  `NaN != NaN` and `0.0 == -0.0` hold and the boxed and unboxed paths
+  agree with the interpreter.
+- Opt out with `NX_NOUNBOX=1`. ~6.3x faster on numeric loops, identical
+  output.
+
+### Tooling
+- `nx build --emit-ir` prints the generated LLVM IR.
+- Build stamp invalidates the cache when `NX_NOMEMO` or `NX_CFLAGS`
+  change, so a flag flip rebuilds instead of reusing a stale binary.
+- CI now checks that unboxed and `NX_NOUNBOX` builds produce identical
+  output.
+
 ## v0.2.0
 - Deterministic `parallel:` blocks (threaded interpreter, pthread codegen)
 - Effects analysis (`nx-ir`, `nx dump-ir`)

@@ -15,6 +15,7 @@ dependencies = [
  "nx-lexer",
  "nx-mem",
  "nx-parser",
+ "nx-types",
 ]
 
 [[package]]

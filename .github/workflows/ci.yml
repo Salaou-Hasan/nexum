@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           norm() { tr -d '\r' < "$1"; }
-          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx; do
+          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx examples/unbox.nx; do
             safe="$(echo "$f" | tr '/.' '__')"
             out="probe-$safe"
             if [ "${RUNNER_OS}" = "Windows" ]; then out="probe-$safe.exe"; fi
@@ -52,13 +52,30 @@ jobs:
               exit 1
             fi
           done
+      - name: unboxed and NX_NOUNBOX builds must agree
+        shell: bash
+        run: |
+          # The unboxing pass must not change observable behavior, only
+          # representation: same program, same output, either way.
+          norm() { tr -d '\r' < "$1"; }
+          for f in examples/unbox.nx examples/funcs.nx examples/control.nx examples/lists.nx; do
+            safe="$(echo "$f" | tr '/.' '__')"
+            cargo run -q -p nx-driver -- build "$f" -o "un-$safe"
+            NX_NOUNBOX=1 cargo run -q -p nx-driver -- build "$f" -o "bx-$safe"
+            "./un-$safe" > un.txt
+            "./bx-$safe" > bx.txt
+            if ! diff <(norm un.txt) <(norm bx.txt); then
+              echo "UNBOX MISMATCH $f"
+              exit 1
+            fi
+          done
       - name: asan check (linux, leaks off by design)
         if: runner.os == 'Linux'
         shell: bash
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
-          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx; do
+          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx examples/unbox.nx; do
             safe="$(echo "$f" | tr '/.' '__')"
             NX_CFLAGS="-fsanitize=address -g" cargo run -q -p nx-driver -- build "$f" -o "asan-$safe"
             ./asan-$safe > got.txt

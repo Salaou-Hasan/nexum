@@ -156,21 +156,23 @@ fn build_cmd(rest: &[String]) -> ExitCode {
     let mut file: Option<String> = None;
     let mut out: Option<String> = None;
     let mut run = false;
+    let mut emit_ir = false;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
             "-o" => {
                 i += 1;
                 if i >= rest.len() {
-                    eprintln!("usage: nx build <file.nx> [-o <out>] [--run]");
+                    eprintln!("usage: nx build <file.nx> [-o <out>] [--run] [--emit-ir]");
                     return ExitCode::from(2);
                 }
                 out = Some(rest[i].clone());
             }
             "--run" => run = true,
+            "--emit-ir" => emit_ir = true,
             f if file.is_none() => file = Some(f.to_string()),
             _ => {
-                eprintln!("usage: nx build <file.nx> [-o <out>] [--run]");
+                eprintln!("usage: nx build <file.nx> [-o <out>] [--run] [--emit-ir]");
                 return ExitCode::from(2);
             }
         }
@@ -179,11 +181,22 @@ fn build_cmd(rest: &[String]) -> ExitCode {
     let file = match file {
         Some(f) => f,
         None => {
-            eprintln!("usage: nx build <file.nx> [-o <out>] [--run]");
+            eprintln!("usage: nx build <file.nx> [-o <out>] [--run] [--emit-ir]");
             return ExitCode::from(2);
         }
     };
     let out = out.unwrap_or_else(|| default_exe_name(&file));
+    if emit_ir {
+        // Print the LLVM IR instead of shelling out to clang: the fastest
+        // way to see what the backend actually decided.
+        return match build_ir(&file) {
+            Ok(ir) => {
+                print!("{ir}");
+                ExitCode::SUCCESS
+            }
+            Err(c) => c,
+        };
+    }
     if up_to_date(&file, &out) {
         println!("nx: up to date ({out})");
     } else if let Err(c) = build_exe(&file, &out) {
@@ -259,11 +272,10 @@ fn up_to_date(file: &str, out: &str) -> bool {
     })
 }
 
-fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
-    let source = match read_source(file) {
-        Ok(s) => s,
-        Err(c) => return Err(c),
-    };
+/// Type-check and generate IR without invoking clang. Shared by
+/// `build_exe` and `build --emit-ir`.
+fn build_ir(file: &str) -> Result<String, ExitCode> {
+    let source = read_source(file)?;
     let base = std::path::Path::new(file)
         .parent()
         .map(|p| p.to_path_buf())
@@ -275,13 +287,17 @@ fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
         }
         return Err(ExitCode::from(1));
     }
-    let ir = match nx_codegen::compile_entry(&source, &base) {
-        Ok(ir) => ir,
+    match nx_codegen::compile_entry(&source, &base) {
+        Ok(ir) => Ok(ir),
         Err(e) => {
             eprintln!("nx: {e}");
-            return Err(ExitCode::from(1));
+            Err(ExitCode::from(1))
         }
-    };
+    }
+}
+
+fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
+    let ir = build_ir(file)?;
     let ll = std::env::temp_dir().join(format!("nxbuild-{}.ll", std::process::id()));
     if let Err(e) = std::fs::write(&ll, ir) {
         eprintln!("nx: cannot write IR: {e}");

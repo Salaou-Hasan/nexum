@@ -1,0 +1,87 @@
+
+fn addi(a, b):
+    return a + b
+
+fn addf(a, b):
+    return a + b * 1.5
+
+fn cmpf(a, b):
+    if a < b:
+        return 1
+    else:
+        return 0
+
+fn eqi(a, b):
+    if a == b:
+        return true
+    else:
+        return false
+
+fn fact(n):
+    if n <= 1:
+        return 1
+    else:
+        return n * fact(n - 1)
+
+fn sumlist(xs):
+    t = 0
+    for x in xs:
+        t = t + x
+    return t
+
+fn bools(a, b):
+    if a and b:
+        return 1
+    if a or b:
+        return 2
+    if not a:
+        return 3
+    return 4
+
+fn early(xs, n):
+    for x in xs:
+        if x > n:
+            return x
+    return 0
+
+fn loop(n):
+    total = 0
+    i = 0
+    while i < n:
+        total = total + i * 3 - 1
+        i = i + 1
+    return total
+
+xs = [1, 2, 3, 4, 5]
+print(addi(3, 4))
+print(addf(3, 4))
+print(cmpf(1.5, 2.5))
+print(cmpf(2.5, 1.5))
+print(eqi(7, 7))
+print(eqi(7, 8))
+print(fact(10))
+print(sumlist(xs))
+print(xs[2])
+print(len(xs))
+print(bools(true, false))
+print(bools(true, true))
+print(bools(false, false))
+print(early(xs, 3))
+print(early(xs, 99))
+push(xs, 6)
+print(len(xs))
+print(xs[5])
+s = "hi"
+print(s)
+t = 2.5
+print(t)
+print(t * 2.0)
+print(7 / 2)
+print(7.0 / 2.0)
+print(-5)
+print(-2.5)
+print(1 < 2)
+print(2.5 > 1.5)
+print(3 != 3)
+print(3 == 3)
+print(loop(1000))

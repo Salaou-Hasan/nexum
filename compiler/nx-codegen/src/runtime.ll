@@ -502,6 +502,31 @@ ok2:
   ret %NxVal %v3
 }
 
+; --- unboxed division: same zero-check panic as the boxed path ---
+define i64 @nx_div_i64(i64 %l, i64 %r) {
+entry:
+  %z = icmp eq i64 %r, 0
+  br i1 %z, label %dz, label %ok
+dz:
+  call void @nx_panic(ptr @.msg.divzero)
+  unreachable
+ok:
+  %s = sdiv i64 %l, %r
+  ret i64 %s
+}
+
+define double @nx_fdiv(double %l, double %r) {
+entry:
+  %z = fcmp oeq double %r, 0.0
+  br i1 %z, label %dz, label %ok
+dz:
+  call void @nx_panic(ptr @.msg.divzero)
+  unreachable
+ok:
+  %s = fdiv double %l, %r
+  ret double %s
+}
+
 define %NxVal @nx_strcat(%NxVal %l, %NxVal %r) {
 entry:
   %lp = extractvalue %NxVal %l, 1
@@ -562,9 +587,13 @@ c1:
   %two = icmp eq i64 %lt, 2
   br i1 %two, label %floats, label %c2
 floats:
+  ; IEEE compare, not bit equality: NaN != NaN and 0.0 == -0.0 must hold
+  ; so that the unboxed and boxed paths agree.
   %fa = extractvalue %NxVal %l, 1
   %fb = extractvalue %NxVal %r, 1
-  %e2 = icmp eq i64 %fa, %fb
+  %d1 = bitcast i64 %fa to double
+  %d2 = bitcast i64 %fb to double
+  %e2 = fcmp oeq double %d1, %d2
   ret i1 %e2
 c2:
   %three = icmp eq i64 %lt, 3

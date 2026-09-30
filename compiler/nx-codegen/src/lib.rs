@@ -1,9 +1,12 @@
 //! LLVM backend for Nexum: typed AST -> LLVM IR text.
 //!
 //! Principle: NX owns semantics (this crate), LLVM owns machine code.
-//! v0 model: every value is a boxed `%NxVal` (helpers in `runtime.ll`),
-//! all functions share one calling convention. Unboxing is a future
-//! optimization, not a correctness rewrite.
+//! Dynamic values are boxed `%NxVal` (helpers in `runtime.ll`) and all
+//! functions share one calling convention, so every boundary -- call
+//! arguments, returns, list elements, module globals -- stays boxed.
+//! Inside a function the unboxing pass keeps a value whose static type is
+//! a known scalar in a bare register (`i64`/`double`/`i1`) and re-boxes
+//! it only where a boundary demands it. Opt out with NX_NOUNBOX=1.
 //!
 //! v0 limits (checked programs only; `nx build` requires `nx check` clean):
 //! - Modules and from-imported names resolve at compile time.
@@ -12,8 +15,56 @@
 
 use std::collections::{HashMap, HashSet};
 use nx_ast::{BinOp, Expr, Program, Span, Stmt, UnaryOp};
+use nx_types::Ty;
 
 const PRELUDE: &str = include_str!("runtime.ll");
+
+/// A compiled value. Two facts, deliberately kept apart:
+/// - `raw` is the *physical* form: Some(t) means `reg` holds a bare scalar
+///   of type t, None means it holds a boxed `%NxVal`.
+/// - `ty` is the *static* type, which is what picks an operator. A boxed
+///   value can still have a known type (a module global, a call result, a
+///   list), and then arithmetic on it can skip the tag dispatch even
+///   though the register itself is a box.
+#[derive(Debug, Clone)]
+struct NV {
+    reg: String,
+    raw: Option<Ty>,
+    ty: Ty,
+}
+
+impl NV {
+    /// A bare scalar already sitting in a register.
+    fn raw(t: Ty, reg: String) -> NV {
+        NV { reg, raw: Some(t.clone()), ty: t }
+    }
+    /// A box whose dynamic type the backend does not know.
+    fn dyn_boxed(reg: String) -> NV {
+        NV { reg, raw: None, ty: Ty::Unknown }
+    }
+    /// A box whose static type is known: usable unboxed where the caller
+    /// needs the payload, but still physically a `%NxVal`.
+    fn boxed_known(reg: String, ty: Ty) -> NV {
+        NV { reg, raw: None, ty }
+    }
+}
+
+/// LLVM type holding a scalar of this NX type, or None if it stays boxed.
+fn ll_scalar(t: &Ty) -> Option<&'static str> {
+    match t {
+        Ty::Int => Some("i64"),
+        Ty::Float => Some("double"),
+        Ty::Bool => Some("i1"),
+        _ => None,
+    }
+}
+
+/// LLVM's exact float literal form: the raw bit pattern, so no decimal
+/// rounding can creep in between the parser and the instruction.
+fn fmt_double(x: f64) -> String {
+    format!("0x{:016X}", x.to_bits())
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodegenError {
@@ -52,7 +103,7 @@ fn mangle_done(module: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compile_entry;
+    use super::{compile_entry, compile_opts, mangle_fn};
 
     /// Structural invariant: `define` may only appear at brace depth 0.
     /// (Catches outlined functions emitted mid-body.)
@@ -76,6 +127,174 @@ mod tests {
         )
         .unwrap();
         assert_top_level_defines(&ir);
+    }
+
+    /// Body of one emitted function, so a test can assert on its code
+    /// without matching the prelude.
+    fn body_of(ir: &str, mangled: &str) -> String {
+        let key = format!("define %NxVal @{mangled}(");
+        let start = ir
+            .find(&key)
+            .unwrap_or_else(|| panic!("no function {mangled} in output"));
+        let rest = &ir[start..];
+        let end = rest[1..].find("\ndefine ").map(|i| i + 1).unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn int_param_stays_unboxed() {
+        let ir = compile_entry(
+            "fn f(n):\n    return n * 3 + 1\nprint(f(2))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("mul i64"), "Int arithmetic must be a raw mul:\n{b}");
+        assert!(b.contains("add i64"), "Int arithmetic must be a raw add:\n{b}");
+        assert!(!b.contains("@nx_mul"), "boxed mul helper must be gone:\n{b}");
+        assert!(!b.contains("@nx_add"), "boxed add helper must be gone:\n{b}");
+    }
+
+    #[test]
+    fn int_local_slot_is_typed() {
+        let ir = compile_entry("fn f(n):\n    t = n + 1\n    return t\nprint(f(2))\n", std::path::Path::new("."))
+            .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("alloca i64"), "Int local must get an i64 slot:\n{b}");
+    }
+
+    #[test]
+    fn comparison_stays_unboxed() {
+        let ir = compile_entry(
+            "fn f(n):\n    if n < 10:\n        return 1\n    else:\n        return 0\nprint(f(2))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("icmp slt i64"), "Int compare must be a raw icmp:\n{b}");
+        assert!(!b.contains("@nx_cmp"), "boxed cmp helper must be gone:\n{b}");
+    }
+
+    #[test]
+    fn float_arith_promotes_int_operand() {
+        // `n / 2.0` leaves n numeric, so it defaults to Int and the
+        // division widens it.
+        let ir = compile_entry(
+            "fn f(n):\n    return n / 2.0\nprint(f(4))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("sitofp i64"), "Int operand must widen to double:\n{b}");
+        assert!(b.contains("@nx_fdiv"), "float division keeps the zero check:\n{b}");
+    }
+
+    #[test]
+    fn int_operand_widens_in_mixed_arith() {
+        // n is proven Int by `n + 1`; the literal 0.5 promotes the sum.
+        let ir = compile_entry(
+            "fn f(n):\n    return n + 0.5\nprint(f(2))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("sitofp i64"), "Int operand must widen to double:\n{b}");
+        assert!(b.contains("fadd double"), "mixed sum must be a float add:\n{b}");
+    }
+
+    #[test]
+    fn untyped_param_stays_boxed() {
+        // `x` is never used, so its type is unknown: no unboxing.
+        let ir = compile_entry("fn f(x):\n    return 1\nprint(f(2))\n", std::path::Path::new("."))
+            .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("alloca %NxVal"), "unknown-typed param stays boxed:\n{b}");
+    }
+
+    #[test]
+    fn list_of_ints_indexes_unboxed() {
+        let ir = compile_entry(
+            "fn f(xs):\n    return xs[0] + 1\nprint(f([4]))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("add i64"), "known Int element must stay unboxed:\n{b}");
+    }
+
+    #[test]
+    fn function_boundary_stays_boxed() {
+        // Calls keep the boxed ABI even though both sides are Int.
+        let ir = compile_entry(
+            "fn g(n):\n    return n\nfn f(n):\n    return g(n) + 1\nprint(f(2))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("@nx_int(i64"), "call argument must re-box:\n{b}");
+    }
+
+    /// An unboxed slot holds a bare scalar, so nothing may read or write
+    /// it as a `%NxVal`. A mismatched load is invalid IR and used to
+    /// crash the binary at runtime.
+    #[test]
+    fn unboxed_slots_are_never_touched_as_boxes() {
+        let ir = compile_entry(
+            "fn work(n):\n    total = 0\n    i = 0\n    while i < n:\n        total = total + i * 3 - 1\n        i = i + 1\n    return total\nprint(work(6))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "work"));
+        let scalar_slots: Vec<String> = b
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                let ty = t.split(" = alloca ").nth(1)?;
+                let ty = ty.split_whitespace().next()?;
+                if matches!(ty, "i64" | "double" | "i1") {
+                    return Some(t.split(' ').next()?.to_string());
+                }
+                None
+            })
+            .collect();
+        assert!(scalar_slots.len() >= 3, "expected typed slots in:\n{b}");
+        for slot in scalar_slots {
+            for l in b.lines() {
+                let t = l.trim();
+                let touches = t.contains(&format!("ptr {slot}"))
+                    && (t.contains("%NxVal") || t.contains("nx_free_val"));
+                assert!(!touches, "typed slot {slot} used as a box: {t}\n{b}");
+            }
+        }
+        assert!(b.contains("mul i64"), "loop body should be raw arithmetic:\n{b}");
+    }
+
+    #[test]
+    fn opt_out_handles_indexing_and_iteration() {
+        // Indexing a list of known scalars and iterating one both go
+        // through as_raw, which declines when unboxing is off. They must
+        // fall back to the box rather than unwrapping nothing.
+        let src = "xs = [1, 2]\nfn first(ys):\n    return ys[0]\nfn total(ys):\n    t = 0\n    for y in ys:\n        t = t + y\n    return t\nprint(first(xs), total(xs))\n";
+        let unboxed = compile_opts(src, std::path::Path::new("."), true).unwrap();
+        let boxed = compile_opts(src, std::path::Path::new("."), false).unwrap();
+        assert!(unboxed.contains("add i64"), "unboxed sum should be raw:\n{unboxed}");
+        assert!(boxed.contains("@nx_add"), "boxed sum should use the helper:\n{boxed}");
+        assert_top_level_defines(&unboxed);
+        assert_top_level_defines(&boxed);
+    }
+
+    #[test]
+    fn nounbox_opt_out_keeps_everything_boxed() {
+        let ir = compile_opts(
+            "fn f(n):\n    t = n * 3\n    return t\nprint(f(2))\n",
+            std::path::Path::new("."),
+            false,
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "f"));
+        assert!(b.contains("@nx_mul"), "opt-out must keep the boxed path:\n{b}");
+        assert!(!b.contains("mul i64"), "opt-out must not emit raw mul:\n{b}");
+        assert!(!b.contains("alloca i64"), "opt-out must not use typed slots:\n{b}");
     }
 
     fn memo_gets(ir: &str) -> usize {
@@ -160,7 +379,39 @@ mod tests {
     }
 }
 
+/// Directory a module's own file lives in, so the checker resolves its
+/// relative imports the same way the loader did.
+fn module_dir(base: &std::path::Path, module: &str) -> std::path::PathBuf {
+    if module == "__main__" {
+        return base.to_path_buf();
+    }
+    match nx_codegen_loader_path(base, module) {
+        Some(p) => p,
+        None => base.to_path_buf(),
+    }
+}
+
+fn nx_codegen_loader_path(base: &std::path::Path, module: &str) -> Option<std::path::PathBuf> {
+    let file = format!("{module}.nx");
+    let mut dirs = vec![base.to_path_buf()];
+    if let Ok(p) = std::env::var("NX_PATH") {
+        dirs.extend(std::env::split_paths(&p));
+    }
+    dirs.iter().map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
 pub fn compile_entry(source: &str, base: &std::path::Path) -> Result<String, CodegenError> {
+    compile_opts(source, base, std::env::var("NX_NOUNBOX").is_err())
+}
+
+/// Compile with an explicit unboxing switch. `compile_entry` reads
+/// NX_NOUNBOX; tests use this directly so they do not race on the
+/// process environment.
+fn compile_opts(
+    source: &str,
+    base: &std::path::Path,
+    unbox_on: bool,
+) -> Result<String, CodegenError> {
     let mut loader = Loader {
         programs: HashMap::new(),
         order: Vec::new(),
@@ -183,7 +434,27 @@ pub fn compile_entry(source: &str, base: &std::path::Path) -> Result<String, Cod
         }
     }
     let order = loader.order.clone();
-    let mut g = Gen::new(plan, loader.programs, memo);
+    // Inferred types drive unboxing. The driver type-checks first, so a
+    // failure here means an unreachable path: fall back to all-boxed.
+    let mut types: HashMap<(String, String), nx_types::FnInfo> = HashMap::new();
+    for module in &order {
+        if let Some(prog) = loader.programs.get(module) {
+            match nx_types::infer_program(prog, &module_dir(&loader.base, module)) {
+                Ok(m) => {
+                    for (k, v) in m {
+                        types.insert(k, v);
+                    }
+                }
+                Err(_) => return Err(CodegenError {
+                    message: "internal: program reached codegen without a clean type check".to_string(),
+                    line: 0,
+                    col: 0,
+                }),
+            }
+        }
+    }
+    let mut g = Gen::new(plan, loader.programs, memo, types);
+    g.unbox_on = unbox_on;
     g.emit_prelude();
     for module in &order {
         let prog = g.programs.get(module).cloned().unwrap();
@@ -329,10 +600,12 @@ fn collect_imports(prog: &Program, out: &mut Vec<String>) {    for s in &prog.st
     }
 }
 
-/// How a source name resolves in generated code.
+/// How a source name resolves in generated code. `Local` carries no slot:
+/// the slot (and its representation) live in `locals`/`rep`, which the
+/// unboxing pass rewrites as it goes.
 #[derive(Debug, Clone)]
 enum Binding {
-    Local(String),
+    Local,
     Global(String),
     Module(String),
     ModuleFn(String, String),
@@ -353,6 +626,14 @@ struct Gen {
     plan: nx_mem::Plan,
     programs: HashMap<String, Program>,
     memo: HashMap<(String, String), i64>,
+    /// Inferred static types per (module, function); drives unboxing.
+    types: HashMap<(String, String), nx_types::FnInfo>,
+    /// Global switch: NX_NOUNBOX=1 keeps the old all-boxed behavior.
+    unbox_on: bool,
+    /// Representation of each *local* slot: present only when the name is
+    /// a proven scalar, absent when the slot holds a boxed `%NxVal`. Kept
+    /// in lockstep with `locals` so a slot's type always matches its alloca.
+    rep: HashMap<String, Ty>,
     tmp: u64,
     label: u64,
     strc: u64,
@@ -376,6 +657,7 @@ impl Gen {
         plan: nx_mem::Plan,
         programs: HashMap<String, Program>,
         memo: HashMap<(String, String), i64>,
+        types: HashMap<(String, String), nx_types::FnInfo>,
     ) -> Self {
         Self {
             pre: String::new(),
@@ -384,6 +666,9 @@ impl Gen {
             plan,
             programs,
             memo,
+            types,
+            unbox_on: std::env::var("NX_NOUNBOX").is_err(),
+            rep: HashMap::new(),
             tmp: 0,
             label: 0,
             strc: 0,
@@ -428,6 +713,261 @@ impl Gen {
             self.out.push_str(s);
             self.out.push('\n');
         }
+    }
+
+    // --- unboxing -----------------------------------------------------
+
+    /// Static type of `name` in the function being emitted, if known.
+    /// Unknowable when unboxing is off, which is what makes the opt-out
+    /// reproduce the old all-boxed code exactly.
+    fn ty_of(&self, name: &str) -> Ty {
+        if !self.unbox_on {
+            return Ty::Unknown;
+        }
+        self.types
+            .get(&(self.cur_module.clone(), self.cur_fn.clone()))
+            .and_then(|f| f.locals.get(name))
+            .cloned()
+            .unwrap_or(Ty::Unknown)
+    }
+
+    /// Representation chosen for `name`: Some(t) means the slot holds a
+    /// bare `ll_scalar(t)`, None means it holds a boxed `%NxVal`.
+    fn rep_of(&self, name: &str) -> Option<Ty> {
+        self.rep.get(name).cloned()
+    }
+
+    /// Declare a local slot for `name` and record its representation.
+    /// `hint` is the static type to unbox into, if any.
+    fn new_slot(&mut self, name: &str, hint: Option<Ty>) -> String {
+        let slot = self.reg();
+        match hint.as_ref().and_then(ll_scalar) {
+            Some(ll) => {
+                self.w(&format!("  {slot} = alloca {ll}"));
+                self.rep.insert(name.to_string(), hint.unwrap());
+            }
+            None => {
+                self.w(&format!("  {slot} = alloca %NxVal"));
+                self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
+                self.rep.remove(name);
+            }
+        }
+        self.locals.insert(name.to_string(), slot.clone());
+        slot
+    }
+
+    /// Load a local as a value of its slot type.
+    fn load_slot(&mut self, name: &str) -> NV {
+        let slot = match self.locals.get(name).cloned() {
+            Some(s) => s,
+            None => return NV::dyn_boxed("zeroinitializer".to_string()),
+        };
+        match self.rep_of(name) {
+            Some(t) => {
+                let ll = ll_scalar(&t).unwrap();
+                let v = self.reg();
+                self.w(&format!("  {v} = load {ll}, ptr {slot}"));
+                NV::raw(t, v)
+            }
+            None => {
+                let v = self.reg();
+                self.w(&format!("  {v} = load %NxVal, ptr {slot}"));
+                NV::boxed_known(v, self.ty_of(name))
+            }
+        }
+    }
+
+    /// Store a value into a local, boxing if the slot is dynamic.
+    fn store_slot(&mut self, name: &str, v: &NV) {
+        let slot = match self.locals.get(name).cloned() {
+            Some(s) => s,
+            None => return,
+        };
+        match self.rep_of(name) {
+            Some(t) => {
+                let ll = ll_scalar(&t).unwrap();
+                let val = self.coerce(v, &t);
+                self.w(&format!("  store {ll} {val}, ptr {slot}"));
+            }
+            None => {
+                let val = self.unbox(v);
+                self.w(&format!("  store %NxVal {val}, ptr {slot}"));
+            }
+        }
+    }
+
+    /// Force a value into a boxed `%NxVal`, which is what every dynamic
+    /// boundary (call argument, return, list element, global, print)
+    /// takes. Returns the incoming register when it is already boxed.
+    fn unbox(&mut self, v: &NV) -> String {
+        let t = match v.raw.clone() {
+            None => return v.reg.clone(),
+            Some(t) => t,
+        };
+        let r = self.reg();
+        let call = match t {
+            Ty::Int => format!("@nx_int(i64 {})", v.reg),
+            Ty::Float => format!("@nx_float(double {})", v.reg),
+            Ty::Bool => format!("@nx_bool(i1 {})", v.reg),
+            _ => unreachable!("only scalars are held raw"),
+        };
+        self.w(&format!("  {r} = call %NxVal {call}"));
+        r
+    }
+
+    /// Payload of a value as a bare `i64`: field 1 of the box, or the
+    /// register itself when it is already an integer. Float payloads come
+    /// back as raw bits, so callers bitcast when they want a double.
+    fn payload(&mut self, v: &NV) -> String {
+        match v.raw {
+            Some(Ty::Float) => {
+                let r = self.reg();
+                self.w(&format!("  {r} = bitcast double {} to i64", v.reg));
+                r
+            }
+            Some(Ty::Int) => v.reg.clone(),
+            _ => {
+                let r = self.reg();
+                self.w(&format!("  {r} = extractvalue %NxVal {}, 1", v.reg));
+                r
+            }
+        }
+    }
+
+    /// Force a value into an `i1` branch condition.
+    fn as_i1(&mut self, v: &NV) -> String {
+        match v.raw {
+            Some(Ty::Bool) => v.reg.clone(),
+            Some(Ty::Int) => {
+                let c = self.reg();
+                self.w(&format!("  {c} = icmp ne i64 {}, 0", v.reg));
+                c
+            }
+            Some(Ty::Float) => {
+                let c = self.reg();
+                self.w(&format!("  {c} = fcmp une double {}, 0.0", v.reg));
+                c
+            }
+            _ => {
+                // Untyped condition: keep the payload-is-nonzero rule the
+                // boxed path has always used (the checker rejects non-Bool
+                // conditions in any program that reaches the backend).
+                let b = self.unbox(v);
+                let r = self.reg();
+                self.w(&format!("  {r} = extractvalue %NxVal {b}, 1"));
+                let c = self.reg();
+                self.w(&format!("  {c} = trunc i64 {r} to i1"));
+                c
+            }
+        }
+    }
+
+    /// Force an integer operand to a bare `i64`.
+    fn as_i64(&mut self, v: &NV) -> String {
+        match v.raw {
+            Some(Ty::Int) => v.reg.clone(),
+            Some(Ty::Float) => {
+                let r = self.reg();
+                self.w(&format!("  {r} = fptosi double {} to i64", v.reg));
+                r
+            }
+            _ => {
+                let b = self.unbox(v);
+                let r = self.reg();
+                self.w(&format!("  {r} = extractvalue %NxVal {b}, 1"));
+                r
+            }
+        }
+    }
+
+    /// Reinterpret a value as a `double`, unboxing it if needed.
+    fn as_f64(&mut self, v: &NV) -> String {
+        match v.raw {
+            Some(Ty::Float) => v.reg.clone(),
+            Some(Ty::Int) => {
+                let r = self.reg();
+                self.w(&format!("  {r} = sitofp i64 {} to double", v.reg));
+                r
+            }
+            _ => {
+                let b = self.unbox(v);
+                let p = self.reg();
+                self.w(&format!("  {p} = extractvalue %NxVal {b}, 1"));
+                let r = self.reg();
+                self.w(&format!("  {r} = bitcast i64 {p} to double"));
+                r
+            }
+        }
+    }
+
+    /// Read a value as a scalar of its static type in a typed register,
+    /// pulling the payload straight out of a box when needed. This is the
+    /// bridge that lets a boxed global feed unboxed arithmetic. Returns
+    /// None when unboxing is off or the type is unknown, so the caller
+    /// takes the boxed path.
+    fn as_raw(&mut self, v: &NV) -> Option<NV> {
+        if !self.unbox_on {
+            return None;
+        }
+        match v.raw {
+            Some(_) => Some(v.clone()),
+            None => {
+                let t = v.ty.clone();
+                let reg = match &t {
+                    Ty::Int => self.payload(v),
+                    Ty::Float => self.as_f64(v),
+                    Ty::Bool => {
+                        let p = self.payload(v);
+                        let c = self.reg();
+                        self.w(&format!("  {c} = trunc i64 {p} to i1"));
+                        c
+                    }
+                    _ => return None,
+                };
+                Some(NV::raw(t, reg))
+            }
+        }
+    }
+
+    /// Coerce a value to a target scalar type, inserting the numeric
+    /// conversion the runtime's mixed Int/Float operators would apply.
+    fn coerce(&mut self, v: &NV, want: &Ty) -> String {
+        let src = match self.as_raw(v) {
+            Some(s) => s,
+            // Untyped value into a typed slot. The checker widens the slot
+            // to Unknown when this can happen, so reaching here would mean
+            // inference and codegen disagree; take the payload anyway
+            // rather than emit a mismatched store.
+            None => {
+                if ll_scalar(want).is_none() {
+                    return self.unbox(v);
+                }
+                let p = self.payload(v);
+                return match want {
+                    Ty::Float => {
+                        let r = self.reg();
+                        self.w(&format!("  {r} = bitcast i64 {p} to double"));
+                        r
+                    }
+                    Ty::Bool => {
+                        let r = self.reg();
+                        self.w(&format!("  {r} = trunc i64 {p} to i1"));
+                        r
+                    }
+                    _ => p,
+                };
+            }
+        };
+        if src.ty == *want {
+            return src.reg;
+        }
+        let r = self.reg();
+        match want {
+            Ty::Float => self.w(&format!("  {r} = sitofp i64 {} to double", src.reg)),
+            Ty::Int => self.w(&format!("  {r} = fptosi double {} to i64", src.reg)),
+            _ => self.w(&format!("  {r} = trunc i64 {} to i1", src.reg)),
+        }
+        r
     }
 
     fn declare_module_fns(&mut self, module: &str, prog: &Program) {
@@ -529,6 +1069,7 @@ impl Gen {
     ) -> Result<(), CodegenError> {
         let fname = mangle_fn(module, name);
         self.locals.clear();
+        self.rep.clear();
         self.term = None;
         self.w(&format!("define %NxVal @{fname}(%NxVal* %args, i64 %nargs) {{"));
         self.w("entry:");
@@ -549,19 +1090,46 @@ impl Gen {
             self.w(&format!("  ret %NxVal {cv}"));
             self.w(&format!("{miss}:"));
         }
-        for (i, p) in params.iter().enumerate() {
-            let slot = self.reg();
-            let ep = self.reg();
-            let v = self.reg();
-            self.w(&format!("  {slot} = alloca %NxVal"));
-            self.w(&format!("  {ep} = getelementptr %NxVal, ptr %args, i64 {i}"));
-            self.w(&format!("  {v} = load %NxVal, ptr {ep}"));
-            self.w(&format!("  store %NxVal {v}, ptr {slot}"));
-            self.locals.insert(p.clone(), slot);
-        }
         let saved = self.cur_module.clone();
+        let saved_fn = self.cur_fn.clone();
         self.cur_module = module.to_string();
         self.cur_fn = name.to_string();
+        for (i, p) in params.iter().enumerate() {
+            // A proven scalar parameter lands straight in a typed slot;
+            // everything else keeps the boxed ABI value.
+            let hint = self.unboxed_ty(p);
+            self.new_slot(p, hint.clone());
+            let ep = self.reg();
+            self.w(&format!("  {ep} = getelementptr %NxVal, ptr %args, i64 {i}"));
+            let v = self.reg();
+            self.w(&format!("  {v} = load %NxVal, ptr {ep}"));
+            // The call site is type-checked, so a proven scalar's tag
+            // needs no runtime guard: take the payload directly.
+            let val = match hint {
+                Some(Ty::Float) => {
+                    let p1 = self.reg();
+                    self.w(&format!("  {p1} = extractvalue %NxVal {v}, 1"));
+                    let d = self.reg();
+                    self.w(&format!("  {d} = bitcast i64 {p1} to double"));
+                    d
+                }
+                Some(Ty::Bool) => {
+                    let p1 = self.reg();
+                    self.w(&format!("  {p1} = extractvalue %NxVal {v}, 1"));
+                    let c = self.reg();
+                    self.w(&format!("  {c} = trunc i64 {p1} to i1"));
+                    c
+                }
+                Some(_) => {
+                    let p1 = self.reg();
+                    self.w(&format!("  {p1} = extractvalue %NxVal {v}, 1"));
+                    p1
+                }
+                None => v.clone(),
+            };
+            let ll = hint.as_ref().and_then(ll_scalar).unwrap_or("%NxVal");
+            self.w(&format!("  store {ll} {val}, ptr {}", self.locals[p].clone()));
+        }
         for s in body {
             self.emit_stmt(s)?;
             if self.term.is_some() {
@@ -574,9 +1142,10 @@ impl Gen {
             self.emit_ret(None);
         }
         self.cur_module = saved;
-        self.cur_fn = String::new();
+        self.cur_fn = saved_fn;
         self.w("}");
         self.locals.clear();
+        self.rep.clear();
         self.term = None;
         Ok(())
     }
@@ -599,12 +1168,15 @@ impl Gen {
             && self.plan.alloc_of(&self.cur_module, &self.cur_fn, name) == nx_mem::Alloc::Unique
     }
 
-    /// Free every Unique local currently in scope.
+    /// Free every Unique local currently in scope. An unboxed slot holds
+    /// a bare scalar, so there is no buffer to release.
     fn free_scope(&mut self) {
         let mut names: Vec<String> = self.locals.keys().cloned().collect();
         names.sort();
         for n in names {
-            if self.plan.alloc_of(&self.cur_module, &self.cur_fn, &n) == nx_mem::Alloc::Unique {
+            if self.plan.alloc_of(&self.cur_module, &self.cur_fn, &n) == nx_mem::Alloc::Unique
+                && self.rep_of(&n).is_none()
+            {
                 if let Some(slot) = self.locals.get(&n).cloned() {
                     let v = self.reg();
                     self.w(&format!("  {v} = load %NxVal, ptr {slot}"));
@@ -636,8 +1208,8 @@ impl Gen {
 
     fn resolve(&self, name: &str) -> Result<Binding, (String, String)> {
         // Returns Binding or (kind, detail) for precise errors.
-        if let Some(r) = self.locals.get(name) {
-            return Ok(Binding::Local(r.clone()));
+        if self.locals.contains_key(name) {
+            return Ok(Binding::Local);
         }
         if let Some(m) = self.modrefs.get(name) {
             return Ok(Binding::Module(m.clone()));
@@ -681,6 +1253,37 @@ impl Gen {
             }
             Stmt::AssignOp { name, op, value, span } => {
                 let rhs = self.emit_expr(value)?;
+                if self.in_init {
+                    let ptr = self
+                        .ptr_of(name)
+                        .ok_or(err(*span, format!("undefined variable '{name}'")))?;
+                    let cur = self.reg();
+                    self.w(&format!("  {cur} = load %NxVal, ptr {ptr}"));
+                    let helper = match op {
+                        BinOp::Add => "nx_add",
+                        BinOp::Sub => "nx_sub",
+                        BinOp::Mul => "nx_mul",
+                        BinOp::Div => "nx_div",
+                        _ => return Err(err(*span, "not an arithmetic assignment".to_string())),
+                    };
+                    let rb = self.unbox(&rhs);
+                    let r = self.reg();
+                    self.w(&format!("  {r} = call %NxVal @{helper}(%NxVal {cur}, %NxVal {rb})"));
+                    self.w(&format!("  store %NxVal {r}, ptr {ptr}"));
+                    return Ok(());
+                }
+                // Local slot: reuse the scalar path when the variable's
+                // representation allows it, so `x += 1` stays unboxed.
+                if self.rep_of(name).is_some() {
+                    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                        return Err(err(*span, "not an arithmetic assignment".to_string()));
+                    }
+                    let cur = self.load_slot(name);
+                    if let Some(v) = self.emit_named_binop(&cur, *op, &rhs) {
+                        self.store_slot(name, &v);
+                        return Ok(());
+                    }
+                }
                 let ptr = self.ptr_of(name).ok_or(err(*span, format!("undefined variable '{name}'")))?;
                 let cur = self.reg();
                 self.w(&format!("  {cur} = load %NxVal, ptr {ptr}"));
@@ -691,9 +1294,10 @@ impl Gen {
                     BinOp::Div => "nx_div",
                     _ => return Err(err(*span, "not an arithmetic assignment".to_string())),
                 };
+                let rb = self.unbox(&rhs);
                 let r = self.reg();
-                self.w(&format!("  {r} = call %NxVal @{helper}(%NxVal {cur}, %NxVal {rhs})"));
-                if !self.in_init && self.is_unique(name) {
+                self.w(&format!("  {r} = call %NxVal @{helper}(%NxVal {cur}, %NxVal {rb})"));
+                if self.is_unique(name) {
                     self.w(&format!("  call void @nx_free_val(%NxVal {cur})"));
                 }
                 self.w(&format!("  store %NxVal {r}, ptr {ptr}"));
@@ -709,9 +1313,10 @@ impl Gen {
                 self.w(&format!("  {arr} = alloca [{n} x %NxVal]"));
                 for (i, e) in values.iter().enumerate() {
                     let v = self.emit_expr(e)?;
+                    let b = self.unbox(&v);
                     let ep = self.reg();
                     self.w(&format!("  {ep} = getelementptr [{n} x %NxVal], ptr {arr}, i64 0, i64 {i}"));
-                    self.w(&format!("  store %NxVal {v}, ptr {ep}"));
+                    self.w(&format!("  store %NxVal {b}, ptr {ep}"));
                 }
                 let p0 = self.reg();
                 self.w(&format!("  {p0} = getelementptr [{n} x %NxVal], ptr {arr}, i64 0, i64 0"));
@@ -728,7 +1333,7 @@ impl Gen {
                 self.w(&format!("  br label %{condl}"));
                 self.w(&format!("{condl}:"));
                 let c = self.emit_expr(cond)?;
-                let b = self.bool_of(&c);
+                let b = self.as_i1(&c);
                 self.w(&format!("  br i1 {b}, label %{bodyl}, label %{endl}"));
                 self.w(&format!("{bodyl}:"));
                 self.loops.push((condl.clone(), endl.clone()));
@@ -767,8 +1372,10 @@ impl Gen {
                 match value {
                     Some(e) => {
                         let v = self.emit_expr(e)?;
+                        // The ABI is boxed, so returns re-box.
+                        let b = self.unbox(&v);
                         self.free_scope();
-                        self.emit_ret(Some(&v));
+                        self.emit_ret(Some(&b));
                     }
                     None => {
                         self.free_scope();
@@ -818,7 +1425,16 @@ impl Gen {
                         let src = mangle_global(module, name);
                         let v = self.reg();
                         self.w(&format!("  {v} = load %NxVal, ptr @{src}"));
-                        self.store_fresh(&bind, &v);
+                        // A from-imported module global: read boxed here,
+                        // but its declared type still lets later uses of
+                        // the local stay unboxed.
+                        let ty = self
+                            .types
+                            .get(&(module.clone(), "<top>".to_string()))
+                            .and_then(|f| f.locals.get(name))
+                            .cloned()
+                            .unwrap_or(Ty::Unknown);
+                        self.store_fresh(&bind, &NV::boxed_known(v, ty));
                     }
                 }
                 Ok(())
@@ -832,42 +1448,57 @@ impl Gen {
     }
 
     /// Store to a name, allocating a local or using the module global.
-    fn store_name(&mut self, name: &str, reg: &str, _span: Span) -> Result<(), CodegenError> {
+    fn store_name(&mut self, name: &str, v: &NV, _span: Span) -> Result<(), CodegenError> {
         if self.in_init {
+            // Module globals are the boxed boundary: other modules and
+            // parallel tasks reach them by address.
             let g = self.ensure_global(&self.cur_module.clone(), name);
-            self.w(&format!("  store %NxVal {reg}, ptr {g}"));
+            let b = self.unbox(v);
+            self.w(&format!("  store %NxVal {b}, ptr {g}"));
             return Ok(());
         }
-        if let Some(slot) = self.locals.get(name).cloned() {
-            // Rebinding a Unique local: release the old buffers first.
-            if self.is_unique(name) {
+        if self.locals.contains_key(name) {
+            // Rebinding a Unique local: release the old buffers first. An
+            // unboxed slot holds a bare scalar with nothing to free.
+            if self.is_unique(name) && self.rep_of(name).is_none() {
+                let slot = self.locals[name].clone();
                 let old = self.reg();
                 self.w(&format!("  {old} = load %NxVal, ptr {slot}"));
                 self.w(&format!("  call void @nx_free_val(%NxVal {old})"));
             }
-            self.w(&format!("  store %NxVal {reg}, ptr {slot}"));
+            self.store_slot(name, v);
         } else {
-            let slot = self.reg();
-            self.w(&format!("  {slot} = alloca %NxVal"));
-            self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
-            self.w(&format!("  store %NxVal {reg}, ptr {slot}"));
-            self.locals.insert(name.to_string(), slot);
+            self.new_slot(name, self.unboxed_ty(name));
+            self.store_slot(name, v);
         }
         Ok(())
     }
 
     /// Always-allocate store (from-imports, loop vars).
-    fn store_fresh(&mut self, name: &str, reg: &str) {
+    fn store_fresh(&mut self, name: &str, v: &NV) {
         if self.in_init {
             let g = self.ensure_global(&self.cur_module.clone(), name);
-            self.w(&format!("  store %NxVal {reg}, ptr {g}"));
+            let b = self.unbox(v);
+            self.w(&format!("  store %NxVal {b}, ptr {g}"));
             return;
         }
-        let slot = self.reg();
-        self.w(&format!("  {slot} = alloca %NxVal"));
-        self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
-        self.w(&format!("  store %NxVal {reg}, ptr {slot}"));
-        self.locals.insert(name.to_string(), slot);
+        // Loop variables and imports are fresh bindings: any previous slot
+        // for the name (a loop re-entry, a shadowed import) is replaced.
+        self.locals.remove(name);
+        self.rep.remove(name);
+        self.new_slot(name, self.unboxed_ty(name));
+        self.store_slot(name, v);
+    }
+
+    /// Representation a fresh local should get: the inferred scalar type
+    /// when unboxing is on, otherwise None for a boxed slot.
+    fn unboxed_ty(&self, name: &str) -> Option<Ty> {
+        if !self.unbox_on {
+            return None;
+        }
+        let t = self.ty_of(name);
+        ll_scalar(&t)?;
+        Some(t)
     }
 
     fn arity_known_module(&self, module: &str) -> bool {
@@ -904,7 +1535,7 @@ impl Gen {
             let bodyl = self.lab("ibranch");
             let next = self.lab("inext");
             let cv = self.emit_expr(c)?;
-            let bv = self.bool_of(&cv);
+            let bv = self.as_i1(&cv);
             self.w(&format!("  br i1 {bv}, label %{bodyl}, label %{next}"));
             self.w(&format!("{bodyl}:"));
             self.term = None;
@@ -949,14 +1580,6 @@ impl Gen {
         Ok(())
     }
 
-    fn bool_of(&mut self, v: &str) -> String {
-        let r = self.reg();
-        self.w(&format!("  {r} = extractvalue %NxVal {v}, 1"));
-        let b = self.reg();
-        self.w(&format!("  {b} = trunc i64 {r} to i1"));
-        b
-    }
-
     fn emit_for(
         &mut self,
         var: &str,
@@ -968,10 +1591,8 @@ impl Gen {
             nx_ast::ForIter::Range { start, end } => {
                 let s = self.emit_expr(start)?;
                 let e = self.emit_expr(end)?;
-                let a = self.reg();
-                let b = self.reg();
-                self.w(&format!("  {a} = extractvalue %NxVal {s}, 1"));
-                self.w(&format!("  {b} = extractvalue %NxVal {e}, 1"));
+                let a = self.as_i64(&s);
+                let b = self.as_i64(&e);
                 let up = self.reg();
                 let step = self.reg();
                 self.w(&format!("  {up} = icmp sle i64 {a}, {b}"));
@@ -994,9 +1615,9 @@ impl Gen {
                 self.w(&format!("  {go} = select i1 {up}, i1 {goup}, i1 {godn}"));
                 self.w(&format!("  br i1 {go}, label %{bodyl}, label %{endl}"));
                 self.w(&format!("{bodyl}:"));
-                let vs = self.reg();
-                self.w(&format!("  {vs} = call %NxVal @nx_int(i64 {cur})"));
-                self.store_fresh(var, &vs);
+                // The induction variable is statically Int.
+                let iv = NV::raw(Ty::Int, cur.clone());
+                self.store_fresh(var, &iv);
                 self.loops.push((condl.clone(), endl.clone()));
                 self.term = None;
                 for st in body {
@@ -1033,9 +1654,10 @@ impl Gen {
             }
             nx_ast::ForIter::Each(e) => {
                 let v = self.emit_expr(e)?;
+                let vb = self.unbox(&v);
                 let len = self.reg();
                 let n = self.reg();
-                self.w(&format!("  {len} = call %NxVal @nx_len(%NxVal {v})"));
+                self.w(&format!("  {len} = call %NxVal @nx_len(%NxVal {vb})"));
                 self.w(&format!("  {n} = extractvalue %NxVal {len}, 1"));
                 let islot = self.reg();
                 self.w(&format!("  {islot} = alloca i64"));
@@ -1053,9 +1675,21 @@ impl Gen {
                 self.w(&format!("{bodyl}:"));
                 let iv = self.reg();
                 let el = self.reg();
+                let ix = NV::raw(Ty::Int, i.clone());
+                let ivb = self.unbox(&ix);
                 self.w(&format!("  {iv} = call %NxVal @nx_int(i64 {i})"));
-                self.w(&format!("  {el} = call %NxVal @nx_index(%NxVal {v}, %NxVal {iv})"));
-                self.store_fresh(var, &el);
+                self.w(&format!("  {el} = call %NxVal @nx_index(%NxVal {vb}, %NxVal {ivb})"));
+                // Element type comes from the list, so a list of scalars
+                // iterates without re-boxing. as_raw declines when
+                // unboxing is off, leaving the box in place.
+                let elem_ty = match &v.ty {
+                    Ty::List(t) => (**t).clone(),
+                    Ty::Str => Ty::Str,
+                    _ => Ty::Unknown,
+                };
+                let boxed_elem = NV::boxed_known(el, elem_ty);
+                let ev = self.as_raw(&boxed_elem).unwrap_or(boxed_elem);
+                self.store_fresh(var, &ev);
                 self.loops.push((condl.clone(), endl.clone()));
                 self.term = None;
                 for st in body {
@@ -1093,30 +1727,31 @@ impl Gen {
         }
     }
 
-    fn emit_expr(&mut self, expr: &Expr) -> Result<String, CodegenError> {
+    /// Emit a fully unboxed integer literal. LLVM folds the instruction,
+    /// so this costs nothing and keeps one code path for scalars.
+    fn emit_i64(&mut self, i: i64) -> NV {
+        let r = self.reg();
+        self.w(&format!("  {r} = add i64 {i}, 0"));
+        NV::raw(Ty::Int, r)
+    }
+
+    fn emit_expr(&mut self, expr: &Expr) -> Result<NV, CodegenError> {
         match expr {
-            Expr::Int(i, _) => {
-                let r = self.reg();
-                self.w(&format!("  {r} = call %NxVal @nx_int(i64 {i})"));
-                Ok(r)
-            }
+            Expr::Int(i, _) => Ok(self.emit_i64(*i)),
             Expr::Float(x, _) => {
-                let bits = x.to_bits();
                 let d = self.reg();
-                let r = self.reg();
-                self.w(&format!("  {d} = bitcast i64 {bits} to double"));
-                self.w(&format!("  {r} = call %NxVal @nx_float(double {d})"));
-                Ok(r)
+                self.w(&format!("  {d} = fadd double {}, 0.0", fmt_double(*x)));
+                Ok(NV::raw(Ty::Float, d))
             }
             Expr::Bool(b, _) => {
                 let r = self.reg();
-                self.w(&format!(
-                    "  {r} = call %NxVal @nx_bool(i1 {})",
-                    if *b { "true" } else { "false" }
-                ));
-                Ok(r)
+                self.w(&format!("  {r} = add i1 {}, 0", if *b { "true" } else { "false" }));
+                Ok(NV::raw(Ty::Bool, r))
             }
-            Expr::Str(s, span) => self.emit_str(s, *span),
+            Expr::Str(s, span) => {
+                let r = self.emit_str(s, *span)?;
+                Ok(NV::boxed_known(r, Ty::Str))
+            }
             Expr::List(items, _) => {
                 let n = items.len() as i64;
                 let l = self.reg();
@@ -1124,24 +1759,30 @@ impl Gen {
                 self.w(&format!("  {l} = call %NxVal @nx_new_list(i64 {n})"));
                 self.w(&format!("  {p} = alloca %NxVal"));
                 self.w(&format!("  store %NxVal {l}, ptr {p}"));
+                let mut elem = Ty::Unknown;
                 for it in items {
                     let v = self.emit_expr(it)?;
-                    self.w(&format!("  call void @nx_listpush(ptr {p}, %NxVal {v})"));
+                    if elem == Ty::Unknown {
+                        elem = v.ty.clone();
+                    }
+                    let b = self.unbox(&v);
+                    self.w(&format!("  call void @nx_listpush(ptr {p}, %NxVal {b})"));
                 }
                 let out = self.reg();
                 self.w(&format!("  {out} = load %NxVal, ptr {p}"));
-                Ok(out)
+                // A list of proven scalars has a known element type, so
+                // reading from it can stay unboxed. It is mutable, so it
+                // never qualifies for memoization.
+                Ok(NV::boxed_known(out, Ty::List(Box::new(elem))))
             }
             Expr::Var(name, span) => match self.resolve(name) {
-                Ok(Binding::Local(r)) => {
-                    let v = self.reg();
-                    self.w(&format!("  {v} = load %NxVal, ptr {r}"));
-                    Ok(v)
-                }
+                Ok(Binding::Local) => Ok(self.load_slot(name)),
                 Ok(Binding::Global(g)) => {
                     let v = self.reg();
                     self.w(&format!("  {v} = load %NxVal, ptr @{g}"));
-                    Ok(v)
+                    // Globals are boxed, but their static type is known,
+                    // so reads of them can still feed unboxed arithmetic.
+                    Ok(NV::boxed_known(v, self.global_ty(name)))
                 }
                 Ok(Binding::Module(m)) => Err(err(
                     *span,
@@ -1169,7 +1810,13 @@ impl Gen {
                         let g = mangle_global(&module, attr);
                         let v = self.reg();
                         self.w(&format!("  {v} = load %NxVal, ptr @{g}"));
-                        return Ok(v);
+                        let ty = self
+                            .types
+                            .get(&(module.clone(), "<top>".to_string()))
+                            .and_then(|f| f.locals.get(attr))
+                            .cloned()
+                            .unwrap_or(Ty::Unknown);
+                        return Ok(NV::boxed_known(v, ty));
                     }
                 }
                 Err(err(*span, "only direct module.attribute access is supported".to_string()))
@@ -1177,18 +1824,52 @@ impl Gen {
             Expr::Index { base, index, .. } => {
                 let b = self.emit_expr(base)?;
                 let ix = self.emit_expr(index)?;
+                let elem = match &b.ty {
+                    Ty::List(t) => (**t).clone(),
+                    Ty::Str => Ty::Str,
+                    _ => Ty::Unknown,
+                };
+                let bv = self.unbox(&b);
+                let iv = self.unbox(&ix);
+                // nx_index returns the element itself, so pulling the
+                // payload straight out of the result costs nothing and
+                // keeps its bounds check.
                 let r = self.reg();
-                self.w(&format!("  {r} = call %NxVal @nx_index(%NxVal {b}, %NxVal {ix})"));
-                Ok(r)
+                self.w(&format!("  {r} = call %NxVal @nx_index(%NxVal {bv}, %NxVal {iv})"));
+                if ll_scalar(&elem).is_some() {
+                    if let Some(raw) = self.as_raw(&NV::boxed_known(r.clone(), elem.clone())) {
+                        return Ok(raw);
+                    }
+                }
+                Ok(NV::boxed_known(r, elem))
             }
             Expr::Unary { op, expr, .. } => {
                 let v = self.emit_expr(expr)?;
+                // Only a value already in a raw register takes the direct
+                // path; a box of a known scalar still goes through the
+                // runtime helper, which also re-checks the tag.
+                if matches!(v.raw, Some(Ty::Int)) && matches!(op, UnaryOp::Neg) {
+                    let r = self.reg();
+                    self.w(&format!("  {r} = sub i64 0, {}", v.reg));
+                    return Ok(NV::raw(Ty::Int, r));
+                }
+                if matches!(v.raw, Some(Ty::Float)) && matches!(op, UnaryOp::Neg) {
+                    let r = self.reg();
+                    self.w(&format!("  {r} = fneg double {}", v.reg));
+                    return Ok(NV::raw(Ty::Float, r));
+                }
+                if matches!(v.raw, Some(Ty::Bool)) && matches!(op, UnaryOp::Not) {
+                    let r = self.reg();
+                    self.w(&format!("  {r} = xor i1 {}, true", v.reg));
+                    return Ok(NV::raw(Ty::Bool, r));
+                }
+                let b = self.unbox(&v);
                 let r = self.reg();
                 match op {
-                    UnaryOp::Neg => self.w(&format!("  {r} = call %NxVal @nx_neg(%NxVal {v})")),
-                    UnaryOp::Not => self.w(&format!("  {r} = call %NxVal @nx_not(%NxVal {v})")),
+                    UnaryOp::Neg => self.w(&format!("  {r} = call %NxVal @nx_neg(%NxVal {b})")),
+                    UnaryOp::Not => self.w(&format!("  {r} = call %NxVal @nx_not(%NxVal {b})")),
                 }
-                Ok(r)
+                Ok(NV::dyn_boxed(r))
             }
             Expr::Binary { left, op, right, span } => {
                 if matches!(op, BinOp::And | BinOp::Or) {
@@ -1196,16 +1877,24 @@ impl Gen {
                 }
                 let l = self.emit_expr(left)?;
                 let r = self.emit_expr(right)?;
+                let _ = span;
+                if let Some(v) = self.emit_scalar_binop(&l, *op, &r) {
+                    return Ok(v);
+                }
+                let lb = self.unbox(&l);
+                let rb = self.unbox(&r);
                 let out = self.reg();
                 match op {
-                    BinOp::Add => self.w(&format!("  {out} = call %NxVal @nx_add(%NxVal {l}, %NxVal {r})")),
-                    BinOp::Sub => self.w(&format!("  {out} = call %NxVal @nx_sub(%NxVal {l}, %NxVal {r})")),
-                    BinOp::Mul => self.w(&format!("  {out} = call %NxVal @nx_mul(%NxVal {l}, %NxVal {r})")),
-                    BinOp::Div => self.w(&format!("  {out} = call %NxVal @nx_div(%NxVal {l}, %NxVal {r})")),
-                    BinOp::Eq => self.w(&format!("  {out} = call %NxVal @nx_eq(%NxVal {l}, %NxVal {r})")),
+                    BinOp::Add => self.w(&format!("  {out} = call %NxVal @nx_add(%NxVal {lb}, %NxVal {rb})")),
+                    BinOp::Sub => self.w(&format!("  {out} = call %NxVal @nx_sub(%NxVal {lb}, %NxVal {rb})")),
+                    BinOp::Mul => self.w(&format!("  {out} = call %NxVal @nx_mul(%NxVal {lb}, %NxVal {rb})")),
+                    BinOp::Div => self.w(&format!("  {out} = call %NxVal @nx_div(%NxVal {lb}, %NxVal {rb})")),
+                    BinOp::Eq => {
+                        self.w(&format!("  {out} = call %NxVal @nx_eq(%NxVal {lb}, %NxVal {rb})"));
+                    }
                     BinOp::NotEq => {
                         let c = self.reg();
-                        self.w(&format!("  {c} = call %NxVal @nx_eq(%NxVal {l}, %NxVal {r})"));
+                        self.w(&format!("  {c} = call %NxVal @nx_eq(%NxVal {lb}, %NxVal {rb})"));
                         self.w(&format!("  {out} = call %NxVal @nx_not(%NxVal {c})"));
                     }
                     BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
@@ -1217,16 +1906,142 @@ impl Gen {
                         };
                         let c = self.reg();
                         let b = self.reg();
-                        self.w(&format!("  {c} = call i32 @nx_cmp(%NxVal {l}, %NxVal {r})"));
+                        self.w(&format!("  {c} = call i32 @nx_cmp(%NxVal {lb}, %NxVal {rb})"));
                         self.w(&format!("  {b} = icmp {pred} i32 {c}, 0"));
                         self.w(&format!("  {out} = call %NxVal @nx_bool(i1 {b})"));
                     }
                     BinOp::And | BinOp::Or => unreachable!(),
                 }
-                let _ = span;
-                Ok(out)
+                let ty = match op {
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => Ty::Bool,
+                    _ => Ty::Unknown,
+                };
+                Ok(NV::boxed_known(out, ty))
             }
             Expr::Call { callee, args, span } => self.emit_call(callee, args, *span),
+        }
+    }
+
+    /// Static type of a module-level variable (always stored boxed).
+    fn global_ty(&self, name: &str) -> Ty {
+        self.types
+            .get(&(self.cur_module.clone(), "<top>".to_string()))
+            .and_then(|f| f.locals.get(name))
+            .cloned()
+            .unwrap_or(Ty::Unknown)
+    }
+
+    /// Arithmetic and comparison on two proven scalars, straight to LLVM
+    /// instructions with no box in between. Returns None when either
+    /// operand is not statically known, so the caller falls back to the
+    /// boxed helpers.
+    fn emit_scalar_binop(&mut self, l: &NV, op: BinOp, r: &NV) -> Option<NV> {
+        // Normalize both sides to raw scalars first. A boxed global or call
+        // result of known type becomes a bare register here, so the
+        // instruction below is the same whether or not a box was involved.
+        let l = self.as_raw(l)?;
+        let r = self.as_raw(r)?;
+        if !(l.ty.is_scalar() && r.ty.is_scalar()) {
+            return None;
+        }
+        // Result type: mixed Int/Float promotes to Float, like the runtime.
+        let numeric = l.ty != Ty::Bool && r.ty != Ty::Bool;
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                if !numeric {
+                    return None;
+                }
+                let float = l.ty == Ty::Float || r.ty == Ty::Float;
+                let ty = if float { Ty::Float } else { Ty::Int };
+                let a = self.coerce(&l, &ty);
+                let b = self.coerce(&r, &ty);
+                let out = self.reg();
+                match (op, float) {
+                    (BinOp::Add, false) => self.w(&format!("  {out} = add i64 {a}, {b}")),
+                    (BinOp::Sub, false) => self.w(&format!("  {out} = sub i64 {a}, {b}")),
+                    (BinOp::Mul, false) => self.w(&format!("  {out} = mul i64 {a}, {b}")),
+                    // Division keeps the runtime's divide-by-zero panic.
+                    (BinOp::Div, false) => {
+                        self.w(&format!("  {out} = call i64 @nx_div_i64(i64 {a}, i64 {b})"))
+                    }
+                    (BinOp::Add, true) => self.w(&format!("  {out} = fadd double {a}, {b}")),
+                    (BinOp::Sub, true) => self.w(&format!("  {out} = fsub double {a}, {b}")),
+                    (BinOp::Mul, true) => self.w(&format!("  {out} = fmul double {a}, {b}")),
+                    (BinOp::Div, true) => {
+                        self.w(&format!("  {out} = call double @nx_fdiv(double {a}, double {b})"))
+                    }
+                    _ => unreachable!(),
+                }
+                Some(NV::raw(ty, out))
+            }
+            BinOp::Eq | BinOp::NotEq => {
+                if l.ty != r.ty {
+                    return None;
+                }
+                let b = match l.ty {
+                    Ty::Int => {
+                        let c = self.reg();
+                        self.w(&format!("  {c} = icmp eq i64 {}, {}", l.reg, r.reg));
+                        c
+                    }
+                    Ty::Float => {
+                        let c = self.reg();
+                        self.w(&format!("  {c} = fcmp oeq double {}, {}", l.reg, r.reg));
+                        c
+                    }
+                    _ => {
+                        let c = self.reg();
+                        self.w(&format!("  {c} = icmp eq i1 {}, {}", l.reg, r.reg));
+                        c
+                    }
+                };
+                let out = if op == BinOp::NotEq {
+                    let n = self.reg();
+                    self.w(&format!("  {n} = xor i1 {b}, true"));
+                    n
+                } else {
+                    b
+                };
+                Some(NV::raw(Ty::Bool, out))
+            }
+            BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                if !numeric {
+                    return None;
+                }
+                let float = l.ty == Ty::Float || r.ty == Ty::Float;
+                let ty = if float { Ty::Float } else { Ty::Int };
+                let a = self.coerce(&l, &ty);
+                let b = self.coerce(&r, &ty);
+                let out = self.reg();
+                if float {
+                    let pred = match op {
+                        BinOp::Lt => "olt",
+                        BinOp::LtEq => "ole",
+                        BinOp::Gt => "ogt",
+                        _ => "oge",
+                    };
+                    self.w(&format!("  {out} = fcmp {pred} double {a}, {b}"));
+                } else {
+                    let pred = match op {
+                        BinOp::Lt => "slt",
+                        BinOp::LtEq => "sle",
+                        BinOp::Gt => "sgt",
+                        _ => "sge",
+                    };
+                    self.w(&format!("  {out} = icmp {pred} i64 {a}, {b}"));
+                }
+                Some(NV::raw(Ty::Bool, out))
+            }
+            BinOp::And | BinOp::Or => None,
+        }
+    }
+
+    /// `emit_scalar_binop` for the compound-assignment operators, which
+    /// the checker has already restricted to arithmetic.
+    fn emit_named_binop(&mut self, l: &NV, op: BinOp, r: &NV) -> Option<NV> {
+        match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => self.emit_scalar_binop(l, op, r),
+            _ => None,
         }
     }
 
@@ -1258,7 +2073,7 @@ impl Gen {
         Ok(r)
     }
 
-    fn emit_logic(&mut self, left: &Expr, op: BinOp, right: &Expr) -> Result<String, CodegenError> {
+    fn emit_logic(&mut self, left: &Expr, op: BinOp, right: &Expr) -> Result<NV, CodegenError> {
         // Diamond with a single deciding branch:
         //   br i1 <decide>, label %short, label %rhs     (and)
         //   br i1 <decide>, label %rhs, label %short     (or)
@@ -1266,7 +2081,7 @@ impl Gen {
         // rhs:   <right> -> rb; br merge
         // merge: phi [decided, short], [rb, rhs]
         let l = self.emit_expr(left)?;
-        let lb = self.bool_of(&l);
+        let lb = self.as_i1(&l);
         let rhs = self.lab("rhs");
         let short = self.lab("short");
         let merge = self.lab("merge");
@@ -1282,15 +2097,14 @@ impl Gen {
         self.w(&format!("  br label %{merge}"));
         self.w(&format!("{rhs}:"));
         let rv = self.emit_expr(right)?;
-        let rb = self.bool_of(&rv);
+        let rb = self.as_i1(&rv);
         // RHS is an expression: it cannot terminate (no return/break inside).
         self.w(&format!("  br label %{merge}"));
         self.w(&format!("{merge}:"));
+        // The result is always a proven Bool: both operands had to be.
         let phi = self.reg();
         self.w(&format!("  {phi} = phi i1 [{decided}, %{short}], [{rb}, %{rhs}]"));
-        let out = self.reg();
-        self.w(&format!("  {out} = call %NxVal @nx_bool(i1 {phi})"));
-        Ok(out)
+        Ok(NV::raw(Ty::Bool, phi))
     }
 
     fn emit_call(
@@ -1298,16 +2112,20 @@ impl Gen {
         callee: &Expr,
         args: &[Expr],
         span: Span,
-    ) -> Result<String, CodegenError> {
+    ) -> Result<NV, CodegenError> {
         if let Expr::Var(name, _) = callee {
             if name == "len" {
                 if args.len() != 1 {
                     return Err(err(span, "len() expects 1 argument".to_string()));
                 }
                 let a = self.emit_expr(&args[0])?;
+                let ab = self.unbox(&a);
                 let r = self.reg();
-                self.w(&format!("  {r} = call %NxVal @nx_len(%NxVal {a})"));
-                return Ok(r);
+                self.w(&format!("  {r} = call %NxVal @nx_len(%NxVal {ab})"));
+                // len is always an Int, so the payload can go straight on.
+                let n = self.reg();
+                self.w(&format!("  {n} = extractvalue %NxVal {r}, 1"));
+                return Ok(NV::raw(Ty::Int, n));
             }
             if name == "push" {
                 if args.len() != 2 {
@@ -1326,10 +2144,11 @@ impl Gen {
                     }
                 };
                 let v = self.emit_expr(&args[1])?;
-                self.w(&format!("  call void @nx_listpush(ptr {ptr}, %NxVal {v})"));
+                let vb = self.unbox(&v);
+                self.w(&format!("  call void @nx_listpush(ptr {ptr}, %NxVal {vb})"));
                 let r = self.reg();
                 self.w(&format!("  {r} = call %NxVal @nx_none()"));
-                return Ok(r);
+                return Ok(NV::boxed_known(r, Ty::None));
             }
             let cur = self.cur_module.clone();
             if self.arity.contains_key(&(cur.clone(), name.clone())) {
@@ -1354,21 +2173,32 @@ impl Gen {
         Err(err(span, "only direct calls are supported".to_string()))
     }
 
+    /// Declared return type of `module`.`name`, used to keep a call
+    /// result unboxed when it feeds straight back into arithmetic.
+    fn ret_ty(&self, module: &str, name: &str) -> Ty {
+        self.types
+            .get(&(module.to_string(), name.to_string()))
+            .map(|f| f.ret.clone())
+            .unwrap_or(Ty::Unknown)
+    }
+
     fn emit_direct(
         &mut self,
         module: &str,
         name: &str,
         args: &[Expr],
-    ) -> Result<String, CodegenError> {
+    ) -> Result<NV, CodegenError> {
         let fname = mangle_fn(module, name);
         let n = args.len();
         let arr = self.reg();
         self.w(&format!("  {arr} = alloca [{n} x %NxVal]"));
         for (i, a) in args.iter().enumerate() {
             let v = self.emit_expr(a)?;
+            // The ABI is boxed: every argument re-boxes here.
+            let vb = self.unbox(&v);
             let ep = self.reg();
             self.w(&format!("  {ep} = getelementptr [{n} x %NxVal], ptr {arr}, i64 0, i64 {i}"));
-            self.w(&format!("  store %NxVal {v}, ptr {ep}"));
+            self.w(&format!("  store %NxVal {vb}, ptr {ep}"));
         }
         let p0 = self.reg();
         if n == 0 {
@@ -1378,7 +2208,25 @@ impl Gen {
         }
         let r = self.reg();
         self.w(&format!("  {r} = call %NxVal @{fname}(ptr {p0}, i64 {n})"));
-        Ok(r)
+        let ty = self.ret_ty(module, name);
+        if let Some(ll) = ll_scalar(&ty) {
+            let p1 = self.reg();
+            self.w(&format!("  {p1} = extractvalue %NxVal {r}, 1"));
+            return Ok(match ll {
+                "double" => {
+                    let d = self.reg();
+                    self.w(&format!("  {d} = bitcast i64 {p1} to double"));
+                    NV::raw(ty, d)
+                }
+                "i1" => {
+                    let c = self.reg();
+                    self.w(&format!("  {c} = trunc i64 {p1} to i1"));
+                    NV::raw(ty, c)
+                }
+                _ => NV::raw(ty, p1),
+            });
+        }
+        Ok(NV::boxed_known(r, ty))
     }
 
     fn emit_parallel(&mut self, tasks: &[Stmt], span: Span) -> Result<(), CodegenError> {
@@ -1437,11 +2285,14 @@ impl Gen {
             let g = format!("nx__snap_{site}_{k}");
             self.top.push_str(&format!("@{g} = global %NxVal zeroinitializer\n"));
             let v = self.emit_expr(&Expr::Var(name.clone(), span))?;
-            self.w(&format!("  store %NxVal {v}, ptr @{g}"));
+            // Tasks read the snapshot through globals, so it stays boxed.
+            let vb = self.unbox(&v);
+            self.w(&format!("  store %NxVal {vb}, ptr @{g}"));
             snap_globals.push(g);
         }
         // Outline each task; save ambient codegen state around it.
         let saved_locals = self.locals.clone();
+        let saved_rep = self.rep.clone();
         let saved_modrefs = self.modrefs.clone();
         let saved_falias = self.falias.clone();
         let saved_loops = std::mem::take(&mut self.loops);
@@ -1449,6 +2300,9 @@ impl Gen {
         for &i in batch {
             let fname = format!("nx__task_{site}_{i}");
             self.locals.clear();
+            // Task bodies run on another thread: every slot they see is
+            // boxed, regardless of the enclosing function's unboxing.
+            self.rep.clear();
             self.term = None;
             self.to_top = true;
             self.w(&format!("define ptr @{fname}(ptr %_) {{"));
@@ -1473,6 +2327,7 @@ impl Gen {
             fnames.push(fname);
         }
         self.locals = saved_locals;
+        self.rep = saved_rep;
         self.modrefs = saved_modrefs;
         self.falias = saved_falias;
         self.loops = saved_loops;
