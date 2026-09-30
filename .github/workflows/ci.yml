@@ -77,13 +77,34 @@ jobs:
           # the generated IR directly.
           for f in examples/parallel.nx; do
             cargo run -q -p nx-driver -- build "$f" --emit-ir > out.ll
-            if grep -qE 'call (i32 @pthread_create|ptr @CreateThread)' out.ll; then
-              echo "threads spawned for $f"
+            if grep -q 'call ptr @nx_thread_start' out.ll; then
+              echo "pool started for $f"
             else
               echo "NO THREADS for $f"
               exit 1
             fi
+            if grep -q 'call void @nx_thread_join' out.ll; then
+              echo "workers joined for $f"
+            else
+              echo "UNJOINED WORKERS for $f"
+              exit 1
+            fi
           done
+      - name: parallel output is identical across runs
+        shell: bash
+        run: |
+          # Threads make output order a real risk. The pool must not
+          # change results, only how long they take.
+          cargo run -q -p nx-driver -- build examples/parallel.nx -o par1
+          cargo run -q -p nx-driver -- build examples/parallel.nx -o par2
+          for i in 1 2 3 4 5 6 7 8; do
+            ./par1 > "run$i.txt"
+            ./par2 >> "run$i.txt"
+          done
+          for i in 2 3 4 5 6 7 8; do
+            diff "run1.txt" "run$i.txt" || (echo "NON-DETERMINISTIC at run $i"; exit 1)
+          done
+          rm -f par1 par2 run*.txt
       - name: asan check (linux, leaks off by design)
         if: runner.os == 'Linux'
         shell: bash

@@ -19,6 +19,13 @@ use nx_types::Ty;
 
 const PRELUDE: &str = include_str!("runtime.ll");
 
+/// OS thread bindings. Only the two shims differ between platforms; the
+/// pool itself is shared, so it is tested identically everywhere.
+#[cfg(windows)]
+const THREADS: &str = include_str!("runtime_threads_win.ll");
+#[cfg(not(windows))]
+const THREADS: &str = include_str!("runtime_threads_unix.ll");
+
 /// A compiled value. Two facts, deliberately kept apart:
 /// - `raw` is the *physical* form: Some(t) means `reg` holds a bare scalar
 ///   of type t, None means it holds a boxed `%NxVal`.
@@ -129,53 +136,78 @@ mod tests {
         assert_top_level_defines(&ir);
     }
 
-    /// A real batch must actually spawn threads, not fall back to running
+    /// A real batch must actually start workers, not fall back to running
     /// the tasks inline. Windows used to lower sequentially here, which
     /// made `parallel:` a no-op on the platform most users are on.
     #[test]
-    fn parallel_batch_spawns_one_thread_per_task() {
+    fn parallel_batch_starts_a_pool() {
         let ir = compile_entry(
             "a = 0\nb = 0\nc = 0\nparallel:\n    a = 1\n    b = 2\n    c = 3\nprint(a, b, c)\n",
             std::path::Path::new("."),
         )
         .unwrap();
-        let spawns = if cfg!(windows) {
-            ir.matches("call ptr @CreateThread").count()
-        } else {
-            ir.matches("call i32 @pthread_create").count()
-        };
-        assert_eq!(spawns, 3, "one thread per task expected in:\n{ir}");
+        // The shim wraps the OS call, so the pool is what codegen targets.
+        let starts = ir.matches("call ptr @nx_thread_start").count();
+        let joins = ir.matches("call void @nx_thread_join").count();
+        assert_eq!(starts, 3, "one worker per task expected in:\n{ir}");
+        assert_eq!(joins, 3, "every worker must be joined:\n{ir}");
         assert_top_level_defines(&ir);
     }
 
-    /// Every task must be joined before the enclosing code continues,
-    /// otherwise a later read races the task that writes it. And all the
-    /// spawns must come before any join, which is what lets a batch
-    /// actually overlap rather than running one task at a time.
+    /// The calling thread works too, which both saves a thread and
+    /// guarantees the batch drains even if a spawn were to fail.
     #[test]
-    fn parallel_spawns_all_then_joins_all() {
+    fn calling_thread_joins_the_pool() {
         let ir = compile_entry(
             "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
             std::path::Path::new("."),
         )
         .unwrap();
-        // The prelude declares both, so count calls rather than mentions.
-        let (spawn_call, join_call) = if cfg!(windows) {
-            ("call ptr @CreateThread", "call i32 @WaitForSingleObject")
-        } else {
-            ("call i32 @pthread_create", "call i32 @pthread_join")
-        };
-        assert_eq!(ir.matches(spawn_call).count(), 2, "two tasks:\n{ir}");
-        assert_eq!(ir.matches(join_call).count(), 2, "both must be joined:\n{ir}");
-        let first_join = ir.find(join_call).expect("a join call");
-        let last_spawn = ir.rfind(spawn_call).expect("a spawn call");
-        assert!(last_spawn < first_join, "spawn every task before joining any");
+        assert_eq!(ir.matches("call ptr @nx_pool_worker(ptr").count(), 1);
+    }
+
+    /// Every worker must be started before any join, and the caller must
+    /// have finished its own share before joining, or the batch would
+    /// partly run inline and lose the overlap.
+    #[test]
+    fn parallel_starts_all_before_joining_any() {
+        let ir = compile_entry(
+            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let last_start = ir.rfind("call ptr @nx_thread_start").expect("a start call");
+        let first_join = ir.find("call void @nx_thread_join").expect("a join call");
+        let self_work = ir.find("call ptr @nx_pool_worker(ptr").expect("self work");
+        assert!(last_start < self_work, "start every worker before working");
+        assert!(self_work < first_join, "finish your own share before joining");
+    }
+
+    /// The pool hands out each task index exactly once, so no task runs
+    /// twice and none is skipped. The count is stored, not recomputed,
+    /// so it has to match the number of workers.
+    #[test]
+    fn pool_publishes_task_count() {
+        let ir = compile_entry(
+            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        // The count lives in field 1. Anchor on the caller's own pool
+        // alloca so the prelude's unrelated %NxPool uses cannot match.
+        let anchor = ir.find("= alloca %NxPool").expect("pool alloca");
+        let after = &ir[anchor..];
+        let field1 = after.find("i32 1").expect("pool count field") + "i32 1".len();
+        let rest = &after[field1..];
+        let store = rest.find("store i64").expect("pool count store") + "store i64".len();
+        let line = &rest[store..];
+        let line = &line[..line.find('\n').unwrap_or(0)];
+        assert!(line.trim_start().starts_with('2'), "two tasks queued: {line}");
     }
 
     /// Conflicting tasks must serialize rather than race, so a batch of
-    /// one is emitted inline with no thread at all. `a` and `b` are
-    /// distinct, so this is a genuine two-thread batch; making them share
-    /// a name is what forces the conflict.
+    /// one is emitted inline with no pool at all. Making both tasks write
+    /// the same name is what forces the conflict.
     #[test]
     fn conflicting_tasks_stay_inline() {
         let ir = compile_entry(
@@ -183,12 +215,11 @@ mod tests {
             std::path::Path::new("."),
         )
         .unwrap();
-        let spawns = if cfg!(windows) {
-            ir.matches("call ptr @CreateThread").count()
-        } else {
-            ir.matches("call i32 @pthread_create").count()
-        };
-        assert_eq!(spawns, 0, "conflicting tasks serialize, so no threads:\n{ir}");
+        assert_eq!(
+            ir.matches("call ptr @nx_thread_start").count(),
+            0,
+            "conflicting tasks serialize, so no pool:\n{ir}"
+        );
         assert_top_level_defines(&ir);
     }
 
@@ -772,6 +803,8 @@ impl Gen {
 
     fn emit_prelude(&mut self) {
         self.pre.push_str(PRELUDE);
+        self.pre.push('\n');
+        self.pre.push_str(THREADS);
         self.pre.push('\n');
     }
 
@@ -2404,53 +2437,58 @@ impl Gen {
         self.falias = saved_falias;
         self.loops = saved_loops;
         self.term = None;
-        // Spawn all, join all.
-        self.spawn_and_join(&fnames);
+        self.run_pool(&fnames);
         let _ = module;
         Ok(())
     }
 
-    /// Start every task, then wait for all of them. Windows uses
-    /// CreateThread/WaitForSingleObject and unix pthreads, but the
-    /// ordering is the same on both: all tasks are spawned before any
-    /// join, which is what lets a batch actually run concurrently.
-    #[cfg(not(windows))]
-    fn spawn_and_join(&mut self, fnames: &[String]) {
-        let mut tids = Vec::new();
-        for fname in fnames {
-            let tid = self.reg();
-            self.w(&format!("  {tid} = alloca i64"));
-            self.w(&format!("  store i64 0, ptr {tid}"));
-            self.w(&format!("  call i32 @pthread_create(ptr {tid}, ptr null, ptr @{fname}, ptr null)"));
-            tids.push(tid);
-        }
-        for tid in tids {
-            let t = self.reg();
-            self.w(&format!("  {t} = load i64, ptr {tid}"));
-            self.w(&format!("  call i32 @pthread_join(i64 {t}, ptr null)"));
-        }
-    }
+    /// Run a batch through a pool sized to the batch: one worker per
+    /// task, each claiming from a shared cursor until it is drained, then
+    /// join everyone. A worker that finishes early picks up the next
+    /// task, so uneven tasks still balance.
+    ///
+    /// The pool is per-block rather than global on purpose: no process
+    /// wide mutable state, nothing to shut down, and no question about
+    /// whether a pool outlives the code that queued work into it.
+    fn run_pool(&mut self, fnames: &[String]) {
+        let n = fnames.len() as i64;
 
-    /// Windows equivalent of the pthread path. The HANDLE comes back as
-    /// CreateThread's return value -- its last argument is `lpThreadId`,
-    /// a DWORD id, which is not something you can wait on. Handles are
-    /// `ptr` rather than the unix `i64`, so the join list differs.
-    #[cfg(windows)]
-    fn spawn_and_join(&mut self, fnames: &[String]) {
+        // The pool block lives in the caller's frame, so it outlives every
+        // worker: they are all joined before this function returns.
+        let pool = self.reg();
+        self.w(&format!("  {pool} = alloca %NxPool"));
+        let arr = self.reg();
+        self.w(&format!("  {arr} = alloca [{n} x ptr]"));
+        for (i, fname) in fnames.iter().enumerate() {
+            let slot = self.reg();
+            self.w(&format!("  {slot} = getelementptr [{n} x ptr], ptr {arr}, i64 0, i64 {i}"));
+            self.w(&format!("  store ptr @{fname}, ptr {slot}"));
+        }
+        let cursor = self.reg();
+        self.w(&format!("  {cursor} = getelementptr %NxPool, ptr {pool}, i64 0, i32 0"));
+        self.w(&format!("  store i64 0, ptr {cursor}"));
+        let cnt = self.reg();
+        self.w(&format!("  {cnt} = getelementptr %NxPool, ptr {pool}, i64 0, i32 1"));
+        self.w(&format!("  store i64 {n}, ptr {cnt}"));
+        let tasks = self.reg();
+        self.w(&format!("  {tasks} = getelementptr %NxPool, ptr {pool}, i64 0, i32 2"));
+        self.w(&format!("  store ptr {arr}, ptr {tasks}"));
+
+        // Start the workers. All of them before any join, so the batch
+        // overlaps instead of running one task at a time.
         let mut handles = Vec::new();
-        for fname in fnames {
-            let tid = self.reg();
-            self.w(&format!("  {tid} = alloca i32"));
-            self.w(&format!("  store i32 0, ptr {tid}"));
+        for _ in fnames {
             let h = self.reg();
-            self.w(&format!(
-                "  {h} = call ptr @CreateThread(ptr null, i64 0, ptr @{fname}, ptr null, i32 0, ptr {tid})"
-            ));
+            self.w(&format!("  {h} = call ptr @nx_thread_start(ptr @nx_pool_worker, ptr {pool})"));
             handles.push(h);
         }
+        // The calling thread is a worker too: with n tasks it saves a
+        // thread, and it guarantees forward progress even if a spawn
+        // were to fail.
+        let me = self.reg();
+        self.w(&format!("  {me} = call ptr @nx_pool_worker(ptr {pool})"));
         for h in handles {
-            self.w(&format!("  call i32 @WaitForSingleObject(ptr {h}, i32 -1)"));
-            self.w(&format!("  call i32 @CloseHandle(ptr {h})"));
+            self.w(&format!("  call void @nx_thread_join(ptr {h})"));
         }
     }
 }

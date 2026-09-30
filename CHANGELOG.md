@@ -31,6 +31,23 @@
 - Opt out with `NX_NOUNBOX=1`. ~6.3x faster on numeric loops, identical
   output.
 
+### Task pool for `parallel:`
+- A batch gets a pool sized to the batch instead of one thread per task.
+  Workers claim task indices from a shared cursor, so a thread that
+  finishes early picks up the next task instead of idling, and uneven
+  tasks still balance. The calling thread works too, which saves a
+  thread and guarantees the batch drains even if a spawn fails.
+- The pool is per-block, not global: no process-wide mutable state,
+  nothing to shut down, and no question about a pool outliving the code
+  that queued work into it.
+- Only the two OS bindings differ between platforms, so they moved to
+  `runtime_threads_win.ll` / `runtime_threads_unix.ll`. The pool logic
+  is shared and therefore tested identically everywhere.
+- 8 independent tasks: 0.190s sequential -> 0.033s, a 6x speedup on 16
+  logical cores (4.42x with thread-per-task), output byte-identical.
+- CI now runs the parallel example 8 times and diffs, since threads make
+  output order a real risk.
+
 ### Windows threaded `parallel:`
 - `parallel:` batches now run on real threads on Windows instead of
   lowering sequentially, so the block means the same thing on every

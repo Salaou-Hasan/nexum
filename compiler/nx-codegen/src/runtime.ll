@@ -261,20 +261,64 @@ done:
 
 declare void @free(ptr)
 
-; Threading for `parallel:`. Both platforms are declared here so this
-; prelude stays platform-neutral: an unused declaration emits no symbol
-; reference, and codegen only ever calls the set it was built for.
+; --- task pool for `parallel:` -------------------------------------
 ;
-; unix: pthread_t travels as i64, so slots are zeroed first and a 32-bit
-; id extends cleanly.
-declare i32 @pthread_create(ptr, ptr, ptr, ptr)
-declare i32 @pthread_join(i64, ptr)
-; windows: the HANDLE is CreateThread's return value. The last argument is
-; lpThreadId (a DWORD), not a handle, so it must not be waited on.
-; INFINITE (-1) means "wait however long it takes".
-declare ptr @CreateThread(ptr, i64, ptr, ptr, i32, ptr)
-declare i32 @WaitForSingleObject(ptr, i32)
-declare i32 @CloseHandle(ptr)
+; A batch gets a fixed pool sized to the batch, created before any task
+; runs and joined before the enclosing code continues. Tasks are claimed
+; from a shared cursor with a cmpxchg loop, so a thread that finishes
+; early picks up the next task instead of idling. Which thread runs
+; which task is not fixed, and does not need to be: the effects analysis
+; has already proven conflicting tasks are serialized into separate
+; batches, and a batch's tasks write disjoint state.
+;
+; %NxPool = { i64 cursor (atomic), i64 count, [n x ptr] tasks }
+; The cursor is a cmpxchg spin rather than an atomicrmw add so the pool
+; needs no target-specific atomic support.
+
+%NxPool = type { i64, i64, ptr }
+
+; Claim the next task index, or -1 when the batch is exhausted.
+define i64 @nx_pool_claim(ptr %pool) {
+entry:
+  %cur = getelementptr %NxPool, ptr %pool, i64 0, i32 0
+  %cntp = getelementptr %NxPool, ptr %pool, i64 0, i32 1
+  %n = load i64, ptr %cntp
+  br label %try
+try:
+  %old = atomicrmw add ptr %cur, i64 1 seq_cst
+  %mine = icmp ult i64 %old, %n
+  br i1 %mine, label %got, label %out
+got:
+  ret i64 %old
+out:
+  ret i64 -1
+}
+
+; Worker body: claim and run until the batch is drained.
+define ptr @nx_pool_worker(ptr %p) {
+entry:
+  %pool = bitcast ptr %p to ptr
+  br label %loop
+loop:
+  %i = call i64 @nx_pool_claim(ptr %pool)
+  %more = icmp ne i64 %i, -1
+  br i1 %more, label %run, label %done
+run:
+  %taskp = getelementptr %NxPool, ptr %pool, i64 0, i32 2
+  %arr = load ptr, ptr %taskp
+  %slot = getelementptr ptr, ptr %arr, i64 %i
+  %f = load ptr, ptr %slot
+  %r = call ptr %f(ptr null)
+  br label %loop
+done:
+  ret ptr null
+}
+
+; Start one worker. Platform-specific: defined in runtime_threads_win.ll or
+; runtime_threads_unix.ll, which codegen includes for the target. Declared
+; here only so the pool reads as one unit.
+; declare ptr @nx_thread_start(ptr, ptr)
+; declare void @nx_thread_join(ptr)
 
 define void @nx_print_val(%NxVal %v) {
 entry:
