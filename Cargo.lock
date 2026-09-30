@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "nx-ast"
-version = "0.0.6"
+version = "0.0.7"
 
 [[package]]
 name = "nx-driver"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "nx-ast",
  "nx-interp",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "nx-interp"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "nx-ast",
  "nx-lexer",
@@ -28,11 +28,11 @@ dependencies = [
 
 [[package]]
 name = "nx-lexer"
-version = "0.0.6"
+version = "0.0.7"
 
 [[package]]
 name = "nx-parser"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "nx-ast",
  "nx-lexer",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "nx-types"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "nx-ast",
  "nx-lexer",

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.0.7
+- Modules: `import` / `as` / `from…import`, `mod.member`, circular detection
+- `nx check` static type checker (advisory)
+
+## v0.0.6
+- `nx update` finds the `code` CLI outside PATH
+
 ## v0.0.5
 - `nx update` self-elevates via UAC on Windows (no more Access denied)
 
