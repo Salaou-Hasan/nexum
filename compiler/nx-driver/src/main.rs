@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx check <file.nx>\n       nx build <file.nx> [-o <out>]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
+    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx check <file.nx>\n       nx dump-ir <file.nx>\n       nx build <file.nx> [-o <out>]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
 }
 
 const UPDATE_REPO: &str = "Salaou-Hasan/nexum";
@@ -34,6 +34,9 @@ fn main() -> ExitCode {
     }
     if args.len() == 3 && args[1] == "check" {
         return check_file(&args[2]);
+    }
+    if args.len() == 3 && args[1] == "dump-ir" {
+        return dump_ir_file(&args[2]);
     }
     if args.len() >= 3 && args[1] == "build" {
         return build_cmd(&args[2..]);
@@ -114,6 +117,32 @@ fn check_file(path: &str) -> ExitCode {
             for e in es {
                 eprintln!("nx: {e}");
             }
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn dump_ir_file(path: &str) -> ExitCode {
+    let source = match read_source(path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let base = std::path::Path::new(path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(".".into());
+    match nx_ir::analyze(&source, &base) {
+        Ok(ir) => {
+            let mut keys: Vec<_> = ir.funcs.keys().collect();
+            keys.sort();
+            for k in keys {
+                let f = &ir.funcs[k];
+                println!("{}.{}({}): {}", k.0, k.1, f.params.join(", "), f.summary);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("nx: {e}");
             ExitCode::from(1)
         }
     }

@@ -13,5 +13,6 @@ nx-lexer = { path = "../nx-lexer" }
 nx-ast = { path = "../nx-ast" }
 nx-parser = { path = "../nx-parser" }
 nx-types = { path = "../nx-types" }
+nx-ir = { path = "../nx-ir" }
 nx-codegen = { path = "../nx-codegen" }
 nx-interp = { path = "../nx-interp" }

@@ -1,0 +1,14 @@
+[package]
+name = "nx-ir"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "nx_ir"
+path = "src/lib.rs"
+
+[dependencies]
+nx-ast = { path = "../nx-ast" }
+nx-lexer = { path = "../nx-lexer" }
+nx-parser = { path = "../nx-parser" }

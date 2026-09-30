@@ -23,6 +23,7 @@ dependencies = [
  "nx-ast",
  "nx-codegen",
  "nx-interp",
+ "nx-ir",
  "nx-lexer",
  "nx-parser",
  "nx-types",
@@ -30,6 +31,15 @@ dependencies = [
 
 [[package]]
 name = "nx-interp"
+version = "0.1.0"
+dependencies = [
+ "nx-ast",
+ "nx-lexer",
+ "nx-parser",
+]
+
+[[package]]
+name = "nx-ir"
 version = "0.1.0"
 dependencies = [
  "nx-ast",
