@@ -54,6 +54,30 @@ fn mangle_done(module: &str) -> String {
 mod tests {
     use super::compile_entry;
 
+    /// Structural invariant: `define` may only appear at brace depth 0.
+    /// (Catches outlined functions emitted mid-body.)
+    fn assert_top_level_defines(ir: &str) {
+        let mut depth = 0i32;
+        for line in ir.lines() {
+            let t = line.trim();
+            if t.starts_with("define ") {
+                assert_eq!(depth, 0, "define inside function body: {t}");
+            }
+            depth += line.chars().filter(|&c| c == '{').count() as i32;
+            depth -= line.chars().filter(|&c| c == '}').count() as i32;
+        }
+    }
+
+    #[test]
+    fn parallel_outlines_at_top_level() {
+        let ir = compile_entry(
+            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        assert_top_level_defines(&ir);
+    }
+
     fn free_calls(ir: &str) -> usize {
         // The prelude defines nx_free_val with one self-recursive call.
         ir.matches("call void @nx_free_val").count() - 1
@@ -298,6 +322,9 @@ struct Gen {
     globals: HashSet<String>,
     cur_module: String,
     cur_fn: String,
+    /// When true, `w()` writes to the top-level buffer (for outlining
+    /// task functions in the middle of another function body).
+    to_top: bool,
     in_init: bool,
     term: Option<Term>,
     loops: Vec<(String, String)>,
@@ -321,6 +348,7 @@ impl Gen {
             globals: HashSet::new(),
             cur_module: String::new(),
             cur_fn: String::new(),
+            to_top: false,
             in_init: false,
             term: None,
             loops: Vec::new(),
@@ -347,8 +375,13 @@ impl Gen {
     }
 
     fn w(&mut self, s: &str) {
-        self.out.push_str(s);
-        self.out.push('\n');
+        if self.to_top {
+            self.top.push_str(s);
+            self.top.push('\n');
+        } else {
+            self.out.push_str(s);
+            self.out.push('\n');
+        }
     }
 
     fn declare_module_fns(&mut self, module: &str, prog: &Program) {
@@ -1345,6 +1378,7 @@ impl Gen {
             let fname = format!("nx__task_{site}_{i}");
             self.locals.clear();
             self.term = None;
+            self.to_top = true;
             self.w(&format!("define ptr @{fname}(ptr %_) {{"));
             self.w("entry:");
             // Rehydrate snapshot reads as task locals.
@@ -1363,6 +1397,7 @@ impl Gen {
             }
             self.w("  ret ptr null");
             self.w("}");
+            self.to_top = false;
             fnames.push(fname);
         }
         self.locals = saved_locals;
