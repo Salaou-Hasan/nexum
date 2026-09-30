@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.0
+- Deterministic `parallel:` blocks (threaded interpreter, pthread codegen)
+- Effects analysis (`nx-ir`, `nx dump-ir`)
+- `nx setup` per-theme icon plus-one; icon coexistence policy
+- `nx build` incremental + `--run`; `NX_CFLAGS` passthrough
+
 ## v0.1.0
 - Memory planner (`nx-mem`): Unique locals freed at scope exit, Shared arena
 - `NX_CFLAGS` passthrough; ASan differential in CI (Linux)
