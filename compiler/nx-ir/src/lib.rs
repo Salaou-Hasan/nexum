@@ -91,10 +91,15 @@ pub fn analyze(source: &str, base: &std::path::Path) -> Result<Ir, IrError> {
         base: base.to_path_buf(),
     };
     loader.load("__main__".to_string(), source)?;
+    analyze_map(loader.programs)
+}
+
+/// Analyze already-loaded module programs.
+pub fn analyze_map(programs: HashMap<String, Program>) -> Result<Ir, IrError> {
     // Index functions.
     let mut params: HashMap<Place, Vec<String>> = HashMap::new();
     let mut bodies: HashMap<Place, Vec<Stmt>> = HashMap::new();
-    for (module, prog) in &loader.programs {
+    for (module, prog) in &programs {
         index_fns(module, &prog.stmts, &mut params, &mut bodies);
         // Top-level statements form a synthetic entry per module so
         // scripts without functions still show their effects.
@@ -110,7 +115,7 @@ pub fn analyze(source: &str, base: &std::path::Path) -> Result<Ir, IrError> {
     // Static environment per module: top-level imports/aliases, shared by
     // every function defined in it.
     let mut menvs: HashMap<String, Env> = HashMap::new();
-    for (module, prog) in &loader.programs {
+    for (module, prog) in &programs {
         menvs.insert(module.clone(), Env::for_body(module, &prog.stmts));
     }
     // Fixpoint over call graph (summaries only grow).
@@ -124,7 +129,7 @@ pub fn analyze(source: &str, base: &std::path::Path) -> Result<Ir, IrError> {
             let cx = Cx { bodies: &bodies, sums: &sums };
             for (key, body) in &bodies {
                 let mut s = Summary::default();
-                summarize(&key.0, body, params[key].as_slice(), &menvs[&key.0], &cx, &mut s);
+                summarize(&programs, &key.0, body, params[key].as_slice(), &menvs[&key.0], &cx, &mut s);
                 fresh.push((key.clone(), s));
             }
         }
@@ -240,8 +245,61 @@ fn assigned(body: &[Stmt], out: &mut HashSet<String>) {
     }
 }
 
+/// Everything a summary walk needs: current module, visible locals,
+/// the module's declared globals, import env, and call-graph summaries.
+#[derive(Clone)]
+struct Scope<'a> {
+    module: &'a str,
+    locals: HashSet<String>,
+    mglobals: HashSet<String>,
+    env: &'a Env,
+    cx: &'a Cx<'a>,
+}
+
+impl<'a> Scope<'a> {
+    /// A bare name is shared traffic only if it is a declared module
+    /// global (temps assigned inside a task stay task-private).
+    fn is_shared(&self, name: &str) -> bool {
+        !self.locals.contains(name) && self.mglobals.contains(name)
+    }
+}
+
+/// Module-global names: top-level Assign/For targets of a module.
+fn module_globals(programs: &HashMap<String, Program>, module: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if let Some(prog) = programs.get(module) {
+        top_assigned(&prog.stmts, &mut out);
+    }
+    out
+}
+
+fn top_assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
+    for s in stmts {
+        match s {
+            Stmt::Assign { name, .. } => {
+                out.insert(name.clone());
+            }
+            Stmt::For { var, .. } => {
+                out.insert(var.clone());
+            }
+            Stmt::If { then_body, elifs, else_body, .. } => {
+                top_assigned(then_body, out);
+                for (_, b) in elifs {
+                    top_assigned(b, out);
+                }
+                if let Some(b) = else_body {
+                    top_assigned(b, out);
+                }
+            }
+            Stmt::While { body, .. } => top_assigned(body, out),
+            _ => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn summarize(
+    programs: &HashMap<String, Program>,
     module: &str,
     body: &[Stmt],
     params: &[String],
@@ -256,7 +314,14 @@ fn summarize(
     // from-bound and import-bound names are local bindings too.
     locals.extend(env.aliases.keys().cloned());
     locals.extend(env.mods.keys().cloned());
-    stmts(module, body, &locals, env, cx, out);
+    let scope = Scope {
+        module,
+        locals,
+        mglobals: module_globals(programs, module),
+        env,
+        cx,
+    };
+    stmts(&scope, body, out);
 }
 
 struct Cx<'a> {
@@ -264,39 +329,26 @@ struct Cx<'a> {
     sums: &'a HashMap<Place, Summary>,
 }
 
-fn stmts(
-    module: &str,
-    body: &[Stmt],
-    locals: &HashSet<String>,
-    env: &Env,
-    cx: &Cx,
-    out: &mut Summary,
-) {
+fn stmts(scope: &Scope, body: &[Stmt], out: &mut Summary) {
     for s in body {
-        stmt(module, s, locals, env, cx, out);
+        stmt(scope, s, out);
     }
 }
 
-fn stmt(
-    module: &str,
-    s: &Stmt,
-    locals: &HashSet<String>,
-    env: &Env,
-    cx: &Cx,
-    out: &mut Summary,
-) {
+fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
+    let module = scope.module;
     match s {
         Stmt::Assign { name, value, .. } => {
-            expr(module, value, locals, env, cx, out);
-            if !locals.contains(name) {
+            expr(scope, value, out);
+            if scope.is_shared(name) {
                 out.writes.insert((module.to_string(), name.clone()));
             }
         }
         Stmt::AssignOp { name, value, .. } => {
-            expr(module, value, locals, env, cx, out);
-            if locals.contains(name) {
+            expr(scope, value, out);
+            if scope.locals.contains(name) {
                 // read-modify-write of a local: no shared traffic.
-            } else {
+            } else if scope.mglobals.contains(name) {
                 out.reads.insert((module.to_string(), name.clone()));
                 out.writes.insert((module.to_string(), name.clone()));
             }
@@ -304,105 +356,210 @@ fn stmt(
         Stmt::Print { values, .. } => {
             out.prints = true;
             for v in values {
-                expr(module, v, locals, env, cx, out);
+                expr(scope, v, out);
             }
         }
         Stmt::If { cond, then_body, elifs, else_body, .. } => {
-            expr(module, cond, locals, env, cx, out);
-            stmts(module, then_body, locals, env, cx, out);
+            expr(scope, cond, out);
+            stmts(scope, then_body, out);
             for (c, b) in elifs {
-                expr(module, c, locals, env, cx, out);
-                stmts(module, b, locals, env, cx, out);
+                expr(scope, c, out);
+                stmts(scope, b, out);
             }
             if let Some(b) = else_body {
-                stmts(module, b, locals, env, cx, out);
+                stmts(scope, b, out);
             }
         }
         Stmt::While { cond, body, .. } => {
-            expr(module, cond, locals, env, cx, out);
-            stmts(module, body, locals, env, cx, out);
+            expr(scope, cond, out);
+            stmts(scope, body, out);
         }
         Stmt::For { var, iter, body, .. } => {
             match iter {
                 nx_ast::ForIter::Range { start, end } => {
-                    expr(module, start, locals, env, cx, out);
-                    expr(module, end, locals, env, cx, out);
+                    expr(scope, start, out);
+                    expr(scope, end, out);
                 }
-                nx_ast::ForIter::Each(e) => expr(module, e, locals, env, cx, out),
+                nx_ast::ForIter::Each(e) => expr(scope, e, out),
             }
-            let mut inner = locals.clone();
-            inner.insert(var.clone());
-            stmts(module, body, &inner, env, cx, out);
+            let mut inner = scope.clone();
+            inner.locals.insert(var.clone());
+            stmts(&inner, body, out);
         }
         Stmt::Fn { .. } => {}
         Stmt::Return { value, .. } => {
             if let Some(e) = value {
-                expr(module, e, locals, env, cx, out);
+                expr(scope, e, out);
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Import { .. } => {}
         Stmt::FromImport { .. } => {}
+        Stmt::Parallel { tasks, .. } => {
+            for t in tasks {
+                let mut ts = Summary::default();
+                stmt_summary(scope, t, &mut ts);
+                out.merge(&ts);
+            }
+        }
         Stmt::Expr(e) => {
-            expr(module, e, locals, env, cx, out);
+            expr(scope, e, out);
         }
     }
 }
 
-fn expr(
+/// Summary of a single statement (used for parallel task partitioning).
+fn stmt_summary(scope: &Scope, s: &Stmt, out: &mut Summary) {
+    stmt(scope, s, out);
+}
+
+/// One summary per task statement of a `parallel:` block.
+/// `locals` are names bound in the enclosing scope (reads/writes to them
+/// are task-private and ignored); everything else is shared traffic.
+pub fn task_summaries(
+    programs: &HashMap<String, Program>,
     module: &str,
-    e: &Expr,
     locals: &HashSet<String>,
-    env: &Env,
-    cx: &Cx,
-    out: &mut Summary,
-) {
+    tasks: &[Stmt],
+) -> Result<Vec<Summary>, IrError> {
+    let ir = analyze_map(programs.clone())?;
+    let menv = Env::for_body(
+        module,
+        &programs
+            .get(module)
+            .map(|p| p.stmts.clone())
+            .unwrap_or_default(),
+    );
+    let cx_bodies: HashMap<Place, Vec<Stmt>> = HashMap::new();
+    let cx_sums: HashMap<Place, Summary> = ir
+        .funcs
+        .iter()
+        .map(|(k, f)| (k.clone(), f.summary.clone()))
+        .collect();
+    let cx = Cx { bodies: &cx_bodies, sums: &cx_sums };
+    let scope = Scope {
+        module,
+        locals: locals.clone(),
+        mglobals: module_globals(programs, module),
+        env: &menv,
+        cx: &cx,
+    };
+    let mut out = Vec::new();
+    for t in tasks {
+        let mut s = Summary::default();
+        stmt(&scope, t, &mut s);
+        out.push(s);
+    }
+    Ok(out)
+}
+
+/// Do two task summaries conflict (must not run concurrently)?
+pub fn conflicts(a: &Summary, b: &Summary) -> bool {
+    // Write-write or read-write on a shared global.
+    if a.writes.iter().any(|w| b.reads.contains(w) || b.writes.contains(w)) {
+        return true;
+    }
+    if b.writes.iter().any(|w| a.reads.contains(w)) {
+        return true;
+    }
+    // Unknown targets serialize with everything except pure silence.
+    if a.opaque && (b.opaque || b.prints || b.heap || !b.reads.is_empty() || !b.writes.is_empty()) {
+        return true;
+    }
+    if b.opaque && (a.prints || a.heap || !a.reads.is_empty() || !a.writes.is_empty()) {
+        return true;
+    }
+    // Heap mutation conflicts with any shared traffic or printing.
+    if a.heap && (b.heap || b.prints || !b.reads.is_empty() || !b.writes.is_empty()) {
+        return true;
+    }
+    if b.heap && (a.prints || !a.reads.is_empty() || !a.writes.is_empty()) {
+        return true;
+    }
+    // Keep stdout order deterministic.
+    if a.prints && b.prints {
+        return true;
+    }
+    if a.prints && (!b.reads.is_empty() || !b.writes.is_empty() || b.heap) {
+        return true;
+    }
+    if b.prints && (!a.reads.is_empty() || !a.writes.is_empty() || a.heap) {
+        return true;
+    }
+    false
+}
+
+/// Greedy in-order batching: each task joins the earliest batch it does
+/// not conflict with. Deterministic; preserves program order.
+pub fn partition(sums: &[Summary]) -> Vec<Vec<usize>> {
+    let mut batches: Vec<Vec<usize>> = Vec::new();
+    for (i, s) in sums.iter().enumerate() {
+        let mut placed = false;
+        for b in batches.iter_mut() {
+            if b.iter().all(|&j| !conflicts(s, &sums[j])) {
+                b.push(i);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            batches.push(vec![i]);
+        }
+    }
+    batches
+}
+
+fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
+    let module = scope.module;
     match e {
         Expr::Var(name, _) => {
-            if locals.contains(name) {
+            if scope.locals.contains(name) {
                 return;
             }
             // A bare function name is a reference, not a data read.
-            if cx.bodies.contains_key(&(module.to_string(), name.clone())) {
+            if scope.cx.bodies.contains_key(&(module.to_string(), name.clone())) {
                 return;
             }
-            out.reads.insert((module.to_string(), name.clone()));
+            if scope.is_shared(name) {
+                out.reads.insert((module.to_string(), name.clone()));
+            }
         }
         Expr::Attr { base, attr, .. } => {
             if let Expr::Var(m, _) = base.as_ref() {
-                if let Some(target) = env.mods.get(m) {
+                if let Some(target) = scope.env.mods.get(m) {
                     out.reads.insert((target.clone(), attr.clone()));
                     return;
                 }
             }
-            expr(module, base, locals, env, cx, out);
+            expr(scope, base, out);
         }
         Expr::Index { base, index, .. } => {
-            expr(module, base, locals, env, cx, out);
-            expr(module, index, locals, env, cx, out);
+            expr(scope, base, out);
+            expr(scope, index, out);
         }
         Expr::List(items, _) => {
             for it in items {
-                expr(module, it, locals, env, cx, out);
+                expr(scope, it, out);
             }
         }
-        Expr::Unary { expr: inner, .. } => expr(module, inner, locals, env, cx, out),
+        Expr::Unary { expr: inner, .. } => expr(scope, inner, out),
         Expr::Binary { left, right, .. } => {
-            expr(module, left, locals, env, cx, out);
-            expr(module, right, locals, env, cx, out);
+            expr(scope, left, out);
+            expr(scope, right, out);
         }
         Expr::Call { callee, args, .. } => {
             for a in args {
-                expr(module, a, locals, env, cx, out);
+                expr(scope, a, out);
             }
-            call(module, callee, env, cx, out);
+            call(scope, callee, out);
         }
         _ => {}
     }
 }
 
 /// Merge a callee's summary (or conservative flags) into `out`.
-fn call(module: &str, callee: &Expr, env: &Env, cx: &Cx, out: &mut Summary) {
+fn call(scope: &Scope, callee: &Expr, out: &mut Summary) {
+    let module = scope.module;
     if let Expr::Var(name, _) = callee {
         if name == "len" {
             return;
@@ -411,14 +568,14 @@ fn call(module: &str, callee: &Expr, env: &Env, cx: &Cx, out: &mut Summary) {
             out.heap = true;
             return;
         }
-        if let Some((m, f)) = env.aliases.get(name) {
-            if let Some(s) = cx.sums.get(&(m.clone(), f.clone())) {
+        if let Some((m, f)) = scope.env.aliases.get(name) {
+            if let Some(s) = scope.cx.sums.get(&(m.clone(), f.clone())) {
                 let s = s.clone();
                 out.merge(&s);
                 return;
             }
         }
-        if let Some(s) = cx.sums.get(&(module.to_string(), name.clone())) {
+        if let Some(s) = scope.cx.sums.get(&(module.to_string(), name.clone())) {
             let s = s.clone();
             out.merge(&s);
             return;
@@ -428,8 +585,8 @@ fn call(module: &str, callee: &Expr, env: &Env, cx: &Cx, out: &mut Summary) {
     }
     if let Expr::Attr { base, attr, .. } = callee {
         if let Expr::Var(m, _) = base.as_ref() {
-            if let Some(target) = env.mods.get(m) {
-                if let Some(s) = cx.sums.get(&(target.clone(), attr.clone())) {
+            if let Some(target) = scope.env.mods.get(m) {
+                if let Some(s) = scope.cx.sums.get(&(target.clone(), attr.clone())) {
                     let s = s.clone();
                     out.merge(&s);
                     return;
@@ -554,5 +711,26 @@ mod tests {
     fn unknown_call_is_opaque() {
         let m = sums_of("fn f(g):\n    g(1)\n");
         assert!(m[&("__main__".to_string(), "f".to_string())].opaque);
+    }
+
+    #[test]
+    fn disjoint_tasks_share_batch() {
+        let a = Summary { writes: [("__main__".into(), "x".into())].into(), ..Default::default() };
+        let b = Summary { writes: [("__main__".into(), "y".into())].into(), ..Default::default() };
+        assert_eq!(partition(&[a, b]), vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn conflicting_tasks_serialize() {
+        let a = Summary { writes: [("__main__".into(), "x".into())].into(), ..Default::default() };
+        let b = Summary { reads: [("__main__".into(), "x".into())].into(), ..Default::default() };
+        assert_eq!(partition(&[a, b]), vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn prints_serialize() {
+        let a = Summary { prints: true, ..Default::default() };
+        let b = Summary { prints: true, ..Default::default() };
+        assert_eq!(partition(&[a, b]), vec![vec![0], vec![1]]);
     }
 }

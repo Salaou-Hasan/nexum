@@ -10,6 +10,14 @@ nx update                     # self-update exe + extension
 nx setup --apply              # wire .nx icons into your VS Code theme
 ```
 
+Prototype with the interpreter, ship with the compiler:
+
+```
+parallel:          # tasks run on threads when conflict-free
+    a = fib(20)    # (deterministic: same output every run)
+    b = fib(20)
+```
+
 ## Layout
 
 - `compiler/nx-lexer/` — chars -> tokens (indent-sensitive)

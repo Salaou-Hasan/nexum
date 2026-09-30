@@ -1,0 +1,15 @@
+fn fib(n):
+    if n <= 1:
+        return n
+    else:
+        return fib(n - 1) + fib(n - 2)
+
+a = 0
+b = 0
+
+parallel:
+    a = fib(20)
+    b = fib(20)
+
+print(a, b)
+print(a + b)

@@ -1,7 +1,7 @@
 import utils
 from utils import double as do, greet as hello
 
-print("version =", utils.VERSION)
+print(utils.VERSION)
 print(do(21))
 print(do(4))
 print(hello("Ada"))

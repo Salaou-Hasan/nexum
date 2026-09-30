@@ -110,6 +110,7 @@ impl Parser {
                 let t = self.next();
                 Ok(Stmt::Continue { span: Span { line: t.line, col: t.col } })
             }
+            TokenKind::Parallel => self.parse_parallel(),
             _ => self.parse_simple_stmt(),
         }
     }
@@ -147,6 +148,14 @@ impl Parser {
         self.expect(TokenKind::Colon, "':'")?;
         let body = self.parse_block()?;
         Ok(Stmt::While { cond, body, span })
+    }
+
+    fn parse_parallel(&mut self) -> Result<Stmt, ParseError> {
+        let kw = self.next(); // parallel
+        let span = Span { line: kw.line, col: kw.col };
+        self.expect(TokenKind::Colon, "':'")?;
+        let tasks = self.parse_block()?;
+        Ok(Stmt::Parallel { tasks, span })
     }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
@@ -660,6 +669,15 @@ mod tests {
     fn fn_def() {
         let p = prog("fn add(a, b):\n    return a + b");
         assert!(matches!(p.stmts[0], Stmt::Fn { .. }));
+    }
+
+    #[test]
+    fn parallel_block() {
+        let p = prog("parallel:\n    a()\n    b()\n");
+        match &p.stmts[0] {
+            Stmt::Parallel { tasks, .. } => assert_eq!(tasks.len(), 2),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

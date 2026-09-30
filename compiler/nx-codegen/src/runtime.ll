@@ -261,6 +261,11 @@ done:
 
 declare void @free(ptr)
 
+; Threading for `parallel:` (unix; Windows lowers sequentially).
+; pthread_t travels as i64 (slots zeroed first so 32-bit ids extend cleanly).
+declare i32 @pthread_create(ptr, ptr, ptr, ptr)
+declare i32 @pthread_join(i64, ptr)
+
 define void @nx_print_val(%NxVal %v) {
 entry:
   %tag = extractvalue %NxVal %v, 0

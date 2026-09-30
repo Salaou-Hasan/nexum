@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use nx_ast::{BinOp, Expr, Program, Stmt, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,10 +109,19 @@ enum Flow {
 pub struct Interpreter {
     frames: Vec<Frame>,
     modules: HashMap<String, Module>,
+    programs: HashMap<String, Program>,
     loading: Vec<String>,
     current: String,
     pub output: Vec<String>,
     call_depth: usize,
+    /// Module writes performed at top level (for parallel join merges).
+    touched: HashSet<(String, String)>,
+    /// Inside a parallel task: names readable from the enclosing scope.
+    /// Writing one is a cross-thread lost update -> runtime error.
+    outer: Option<HashSet<String>>,
+    /// Task spawned at top level (no enclosing frame): assigns behave
+    /// like module-level assigns so results survive the join.
+    task_top: bool,
 }
 
 impl Interpreter {
@@ -134,6 +143,7 @@ impl Interpreter {
     }
 
     pub fn run(&mut self, prog: &Program) -> Result<(), RuntimeError> {
+        self.programs.insert(MAIN_MODULE.to_string(), prog.clone());
         match self.exec_block(&prog.stmts)? {
             None => Ok(()),
             Some(Flow::Return(v)) => Err(RuntimeError {
@@ -167,7 +177,7 @@ impl Interpreter {
         match stmt {
             Stmt::Assign { name, value, .. } => {
                 let v = self.eval_expr(value)?;
-                self.assign(name, v);
+                self.assign(name, v)?;
                 Ok(None)
             }
             Stmt::AssignOp { name, op, value, span } => {
@@ -178,7 +188,7 @@ impl Interpreter {
                 })?;
                 let rhs = self.eval_expr(value)?;
                 let v = self.apply_arith(cur, *op, rhs, span.line, span.col)?;
-                self.assign(name, v);
+                self.assign(name, v)?;
                 Ok(None)
             }
             Stmt::Print { values, .. } => {
@@ -245,15 +255,16 @@ impl Interpreter {
             Stmt::Import { module, alias, span } => {
                 self.load_module(module, span.line, span.col)?;
                 let bind = alias.clone().unwrap_or_else(|| module.clone());
-                self.assign(&bind, Value::Module(module.clone()));
+                self.assign(&bind, Value::Module(module.clone()))?;
                 Ok(None)
             }
+            Stmt::Parallel { tasks, span } => self.exec_parallel(tasks, *span),
             Stmt::FromImport { module, names, span } => {
                 self.load_module(module, span.line, span.col)?;
                 for (name, alias) in names {
                     let v = self.module_member(module, name, span.line, span.col)?;
                     let bind = alias.clone().unwrap_or_else(|| name.clone());
-                    self.assign(&bind, v);
+                    self.assign(&bind, v)?;
                 }
                 Ok(None)
             }
@@ -304,7 +315,13 @@ impl Interpreter {
                 let step: i64 = if a <= b { 1 } else { -1 };
                 let mut cur = a;
                 while (step > 0 && cur < b) || (step < 0 && cur > b) {
-                    self.assign(var, Value::Int(cur));
+                    // Loop vars always shadow: task-private, never an
+                    // outer-local write.
+                    if let Some(top) = self.frames.last_mut() {
+                        top.vars.insert(var.to_string(), Value::Int(cur));
+                    } else {
+                        self.assign(var, Value::Int(cur))?;
+                    }
                     match self.exec_block(body)? {
                         None => {}
                         Some(Flow::Return(v)) => return Ok(Some(Flow::Return(v))),
@@ -340,7 +357,11 @@ impl Interpreter {
                 };
                 let mut count: u64 = 0;
                 for item in items {
-                    self.assign(var, item);
+                    if let Some(top) = self.frames.last_mut() {
+                        top.vars.insert(var.to_string(), item);
+                    } else {
+                        self.assign(var, item)?;
+                    }
                     match self.exec_block(body)? {
                         None => {}
                         Some(Flow::Return(v)) => return Ok(Some(Flow::Return(v))),
@@ -369,12 +390,32 @@ impl Interpreter {
             .unwrap_or_else(|| self.current.clone())
     }
 
-    fn assign(&mut self, name: &str, v: Value) {
-        if let Some(top) = self.frames.last_mut() {
-            top.vars.insert(name.to_string(), v);
-        } else if let Some(m) = self.modules.get_mut(&self.current.clone()) {
-            m.vars.insert(name.to_string(), v);
+    fn assign(&mut self, name: &str, v: Value) -> Result<(), RuntimeError> {
+        // Inside a parallel task, snapshot names are read-only views:
+        // assigning them would be a cross-thread lost update.
+        if let Some(outer) = &self.outer {
+            if outer.contains(name) {
+                return Err(RuntimeError {
+                    message: format!("cannot assign to outer local '{name}' inside parallel (use a module global)"),
+                    line: 1,
+                    col: 1,
+                });
+            }
         }
+        if let Some(top) = self.frames.last_mut() {
+            if self.task_top && !top.vars.contains_key(name) {
+                // Top-level task: mirror sequential semantics (module global).
+            } else {
+                top.vars.insert(name.to_string(), v);
+                return Ok(());
+            }
+        }
+        let cur = self.current.clone();
+        if let Some(m) = self.modules.get_mut(&cur) {
+            m.vars.insert(name.to_string(), v);
+            self.touched.insert((cur, name.to_string()));
+        }
+        Ok(())
     }
 
     fn lookup(&self, name: &str) -> Option<Value> {
@@ -473,6 +514,7 @@ impl Interpreter {
         })?;
         let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(".".into());
         self.modules.insert(name.to_string(), Module { dir, ..Default::default() });
+        self.programs.insert(name.to_string(), prog.clone());
         self.loading.push(name.to_string());
         // Top-level module code runs with no call frames so its bindings
         // land in the module table, not in some caller's locals.
@@ -491,6 +533,136 @@ impl Interpreter {
             }),
             Err(e) => Err(e),
         }
+    }
+
+    fn exec_parallel(&mut self, tasks: &[Stmt], span: nx_ast::Span) -> Result<Option<Flow>, RuntimeError> {
+        if tasks.is_empty() {
+            return Ok(None);
+        }
+        let cur = self.current_module();
+        // Enclosing frame keys are task-private reads; anything else shared.
+        let mut locals: HashSet<String> = HashSet::new();
+        if let Some(top) = self.frames.last() {
+            locals.extend(top.vars.keys().cloned());
+        }
+        let sums = nx_ir::task_summaries(&self.programs, &cur, &locals, tasks).map_err(|e| {
+            RuntimeError { message: e.message, line: span.line, col: span.col }
+        })?;
+        // Imports inside tasks run up-front (single-threaded) so every
+        // worker finds them cached in its private clone.
+        let mut mods = Vec::new();
+        for t in tasks {
+            collect_import_names(t, &mut mods);
+        }
+        for m in &mods {
+            self.load_module(m, span.line, span.col)?;
+        }
+        let outer: HashSet<String> = locals.clone();
+        let snapshot: HashMap<String, Value> = self
+            .frames
+            .last()
+            .map(|f| f.vars.clone())
+            .unwrap_or_default();
+        for batch in nx_ir::partition(&sums) {
+            if batch.len() == 1 {
+                // Fast path: still isolated (uniform semantics), no threads.
+                let mut worker = self.spawn_worker(&snapshot, &outer, &cur);
+                match worker.exec_stmt(&tasks[batch[0]])? {
+                    None => {}
+                    Some(Flow::Return(_)) => {
+                        return Err(RuntimeError {
+                            message: "return inside parallel task is not supported".to_string(),
+                            line: span.line,
+                            col: span.col,
+                        });
+                    }
+                    Some(_) => {
+                        return Err(RuntimeError {
+                            message: "break/continue cannot cross a parallel boundary".to_string(),
+                            line: span.line,
+                            col: span.col,
+                        });
+                    }
+                }
+                self.merge_worker(worker);
+                continue;
+            }
+            let mut results = Vec::new();
+            std::thread::scope(|s| {
+                let mut handles = Vec::new();
+                for &i in &batch {
+                    let mut worker = self.spawn_worker(&snapshot, &outer, &cur);
+                    let stmt = tasks[i].clone();
+                    handles.push(s.spawn(move || {
+                        let r = worker.exec_stmt(&stmt);
+                        (worker, r)
+                    }));
+                }
+                for h in handles {
+                    results.push(h.join());
+                }
+            });
+            for r in results {
+                let (worker, r) = r.map_err(|_| RuntimeError {
+                    message: "parallel task crashed".to_string(),
+                    line: span.line,
+                    col: span.col,
+                })?;
+                match r {
+                    Err(e) => return Err(e),
+                    Ok(None) => {}
+                    Ok(Some(Flow::Return(_))) => {
+                        return Err(RuntimeError {
+                            message: "return inside parallel task is not supported".to_string(),
+                            line: span.line,
+                            col: span.col,
+                        });
+                    }
+                    Ok(Some(_)) => {
+                        return Err(RuntimeError {
+                            message: "break/continue cannot cross a parallel boundary".to_string(),
+                            line: span.line,
+                            col: span.col,
+                        });
+                    }
+                }
+                self.merge_worker(worker);
+            }
+        }
+        Ok(None)
+    }
+
+    fn spawn_worker(
+        &self,
+        snapshot: &HashMap<String, Value>,
+        outer: &HashSet<String>,
+        module: &str,
+    ) -> Interpreter {
+        Interpreter {
+            frames: vec![Frame { vars: snapshot.clone(), module: module.to_string() }],
+            modules: self.modules.clone(),
+            programs: self.programs.clone(),
+            loading: self.loading.clone(),
+            current: module.to_string(),
+            output: Vec::new(),
+            call_depth: self.call_depth,
+            touched: HashSet::new(),
+            outer: Some(outer.clone()),
+            task_top: self.frames.is_empty(),
+        }
+    }
+
+    fn merge_worker(&mut self, worker: Interpreter) {
+        // Disjoint by construction (partitioning); merge touched globals.
+        for (m, k) in &worker.touched {
+            if let (Some(src), Some(dst)) = (
+                worker.modules.get(m).and_then(|x| x.vars.get(k)),
+                self.modules.get_mut(m),
+            ) {
+                dst.vars.insert(k.clone(), src.clone());
+            }
+        }
+        self.output.extend(worker.output);
     }
 
     fn expect_bool(v: Value, span: nx_ast::Span) -> Result<bool, RuntimeError> {
@@ -721,7 +893,7 @@ impl Interpreter {
                 }
             };
             lst.push(v);
-            self.assign(&name, Value::List(lst));
+            self.assign(&name, Value::List(lst))?;
             return Ok(Value::None);
         }
         Err(RuntimeError {
@@ -774,7 +946,10 @@ impl Interpreter {
         self.call_depth += 1;
         self.frames.push(Frame { module: module.to_string(), ..Default::default() });
         for (p, v) in f.params.iter().zip(vals) {
-            self.assign(p, v);
+            // Params are always fresh bindings, never outer writes.
+            if let Some(top) = self.frames.last_mut() {
+                top.vars.insert(p.clone(), v);
+            }
         }
         let ret = self.exec_block(&f.body)?;
         self.frames.pop();
@@ -915,6 +1090,49 @@ pub fn run_with_base(
     let mut interp = Interpreter::with_base(base);
     interp.run(prog)?;
     Ok(interp.output)
+}
+
+/// Module names imported anywhere inside a statement (for pre-loading
+/// before parallel batches spawn).
+fn collect_import_names(s: &Stmt, out: &mut Vec<String>) {
+    match s {
+        Stmt::Import { module, .. } | Stmt::FromImport { module, .. } => {
+            if !out.contains(module) {
+                out.push(module.clone());
+            }
+        }
+        Stmt::If { then_body, elifs, else_body, .. } => {
+            for t in then_body {
+                collect_import_names(t, out);
+            }
+            for (_, b) in elifs {
+                for t in b {
+                    collect_import_names(t, out);
+                }
+            }
+            if let Some(b) = else_body {
+                for t in b {
+                    collect_import_names(t, out);
+                }
+            }
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } => {
+            for t in body {
+                collect_import_names(t, out);
+            }
+        }
+        Stmt::Fn { body, .. } => {
+            for t in body {
+                collect_import_names(t, out);
+            }
+        }
+        Stmt::Parallel { tasks, .. } => {
+            for t in tasks {
+                collect_import_names(t, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -1137,5 +1355,28 @@ mod tests {
         );
         assert!(run_entry(&dir, "main.nx").is_err());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parallel_join_merges() {
+        let out = run_src("a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)").unwrap();
+        assert_eq!(out, vec!["1 2"]);
+    }
+
+    #[test]
+    fn parallel_conflicts_serialize_in_order() {
+        let out = run_src("x = 0\nparallel:\n    x = x + 1\n    x = x + 1\nprint(x)").unwrap();
+        assert_eq!(out, vec!["2"]);
+    }
+
+    #[test]
+    fn parallel_outer_write_errors() {
+        assert!(run_src("fn f():\n    x = 1\n    parallel:\n        x = 2\n    print(x)\nf()").is_err());
+    }
+
+    #[test]
+    fn parallel_fn_tasks() {
+        let out = run_src("fn one():\n    return 1\nfn two():\n    return 2\nparallel:\n    a = one()\n    b = two()\nprint(a + b)").unwrap();
+        assert_eq!(out, vec!["3"]);
     }
 }

@@ -12,3 +12,4 @@ path = "src/lib.rs"
 nx-ast = { path = "../nx-ast" }
 nx-lexer = { path = "../nx-lexer" }
 nx-parser = { path = "../nx-parser" }
+nx-ir = { path = "../nx-ir" }

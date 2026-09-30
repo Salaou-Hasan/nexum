@@ -44,6 +44,7 @@ pub enum Stmt {
     },
     Break { span: Span },
     Continue { span: Span },
+    Parallel { tasks: Vec<Stmt>, span: Span },
     Import { module: String, alias: Option<String>, span: Span },
     FromImport { module: String, names: Vec<(String, Option<String>)>, span: Span },
     Expr(Expr),

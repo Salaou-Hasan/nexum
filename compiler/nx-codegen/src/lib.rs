@@ -118,13 +118,16 @@ pub fn compile_entry(source: &str, base: &std::path::Path) -> Result<String, Cod
     };
     loader.load_main(source)?;
     let plan = nx_mem::plan(&loader.programs, "__main__");
-    let mut g = Gen::new(plan);
+    let order = loader.order.clone();
+    let mut g = Gen::new(plan, loader.programs);
     g.emit_prelude();
-    for (module, prog) in loader.ordered() {
-        g.declare_module_fns(module, prog);
+    for module in &order {
+        let prog = g.programs.get(module).cloned().unwrap();
+        g.declare_module_fns(module, &prog);
     }
-    for (module, prog) in loader.ordered() {
-        g.emit_module(module, prog)?;
+    for module in &order {
+        let prog = g.programs.get(module).cloned().unwrap();
+        g.emit_module(module, &prog)?;
     }
     g.emit_main();
     Ok(g.finish())
@@ -194,13 +197,6 @@ impl Loader {
             dirs.extend(std::env::split_paths(&p));
         }
         dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
-    }
-
-    fn ordered(&self) -> Vec<(&String, &Program)> {
-        self.order
-            .iter()
-            .filter_map(|n| self.programs.get(n).map(|p| (n, p)))
-            .collect()
     }
 }
 
@@ -291,6 +287,7 @@ struct Gen {
     top: String,
     out: String,
     plan: nx_mem::Plan,
+    programs: HashMap<String, Program>,
     tmp: u64,
     label: u64,
     strc: u64,
@@ -307,12 +304,13 @@ struct Gen {
 }
 
 impl Gen {
-    fn new(plan: nx_mem::Plan) -> Self {
+    fn new(plan: nx_mem::Plan, programs: HashMap<String, Program>) -> Self {
         Self {
             pre: String::new(),
             top: String::new(),
             out: String::new(),
             plan,
+            programs,
             tmp: 0,
             label: 0,
             strc: 0,
@@ -720,6 +718,7 @@ impl Gen {
                 }
                 Ok(())
             }
+            Stmt::Parallel { tasks, span } => self.emit_parallel(tasks, *span),
             Stmt::Expr(e) => {
                 self.emit_expr(e)?;
                 Ok(())
@@ -1275,5 +1274,217 @@ impl Gen {
         let r = self.reg();
         self.w(&format!("  {r} = call %NxVal @{fname}(ptr {p0}, i64 {n})"));
         Ok(r)
+    }
+
+    fn emit_parallel(&mut self, tasks: &[Stmt], span: Span) -> Result<(), CodegenError> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let module = self.cur_module.clone();
+        let locals: HashSet<String> = self.locals.keys().cloned().collect();
+        let sums = nx_ir::task_summaries(&self.programs, &module, &locals, tasks).map_err(|e| {
+            CodegenError { message: e.message, line: span.line, col: span.col }
+        })?;
+        for batch in nx_ir::partition(&sums) {
+            if batch.len() == 1 {
+                self.emit_stmt(&tasks[batch[0]])?;
+                if self.term.is_some() {
+                    // Return inside a task: rejected by the checker.
+                    return Err(err(span, "return inside parallel task is not supported".to_string()));
+                }
+                continue;
+            }
+            #[cfg(windows)]
+            {
+                // No portable thread primitive in hand-written IR for
+                // MSVC targets in v0: run the batch in program order.
+                for &i in &batch {
+                    self.emit_stmt(&tasks[i])?;
+                    if self.term.is_some() {
+                        return Err(err(span, "return inside parallel task is not supported".to_string()));
+                    }
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                self.emit_threaded_batch(&module, tasks, &batch, span)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn emit_threaded_batch(
+        &mut self,
+        module: &str,
+        tasks: &[Stmt],
+        batch: &[usize],
+        span: Span,
+    ) -> Result<(), CodegenError> {
+        // Snapshot the enclosing locals each task reads (read-only sharing).
+        let mut reads: Vec<String> = Vec::new();
+        for &i in batch {
+            collect_outer_reads(&tasks[i], &self.locals, &mut reads);
+        }
+        let site = self.lab("par");
+        let mut snap_globals = Vec::new();
+        for (k, name) in reads.iter().enumerate() {
+            let g = format!("nx__snap_{site}_{k}");
+            self.top.push_str(&format!("@{g} = global %NxVal zeroinitializer\n"));
+            let v = self.emit_expr(&Expr::Var(name.clone(), span))?;
+            self.w(&format!("  store %NxVal {v}, ptr @{g}"));
+            snap_globals.push(g);
+        }
+        // Outline each task; save ambient codegen state around it.
+        let saved_locals = self.locals.clone();
+        let saved_modrefs = self.modrefs.clone();
+        let saved_falias = self.falias.clone();
+        let saved_loops = std::mem::take(&mut self.loops);
+        let mut fnames = Vec::new();
+        for &i in batch {
+            let fname = format!("nx__task_{site}_{i}");
+            self.locals.clear();
+            self.term = None;
+            self.w(&format!("define ptr @{fname}(ptr %_) {{"));
+            self.w("entry:");
+            // Rehydrate snapshot reads as task locals.
+            for (k, name) in reads.iter().enumerate() {
+                let slot = self.reg();
+                let v = self.reg();
+                self.w(&format!("  {slot} = alloca %NxVal"));
+                self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
+                self.w(&format!("  {v} = load %NxVal, ptr @{}", snap_globals[k]));
+                self.w(&format!("  store %NxVal {v}, ptr {slot}"));
+                self.locals.insert(name.clone(), slot);
+            }
+            self.emit_stmt(&tasks[i])?;
+            if self.term.is_some() {
+                return Err(err(span, "return inside parallel task is not supported".to_string()));
+            }
+            self.w("  ret ptr null");
+            self.w("}");
+            fnames.push(fname);
+        }
+        self.locals = saved_locals;
+        self.modrefs = saved_modrefs;
+        self.falias = saved_falias;
+        self.loops = saved_loops;
+        self.term = None;
+        // Spawn all, join all.
+        let mut tids = Vec::new();
+        for fname in &fnames {
+            let tid = self.reg();
+            self.w(&format!("  {tid} = alloca i64"));
+            self.w(&format!("  store i64 0, ptr {tid}"));
+            self.w(&format!("  call i32 @pthread_create(ptr {tid}, ptr null, ptr @{fname}, ptr null)"));
+            tids.push(tid);
+        }
+        for tid in tids {
+            let t = self.reg();
+            self.w(&format!("  {t} = load i64, ptr {tid}"));
+            self.w(&format!("  call i32 @pthread_join(i64 {t}, ptr null)"));
+        }
+        let _ = module;
+        Ok(())
+    }
+}
+
+/// Enclosing-local names read anywhere inside a task statement.
+#[cfg(not(windows))]
+fn collect_outer_reads(s: &Stmt, locals: &HashMap<String, String>, out: &mut Vec<String>) {
+    match s {
+        Stmt::Assign { value, .. } => collect_expr_reads(value, locals, out),
+        Stmt::AssignOp { name, value, .. } => {
+            if locals.contains_key(name) && !out.contains(name) {
+                out.push(name.clone());
+            }
+            collect_expr_reads(value, locals, out);
+        }
+        Stmt::Print { values, .. } => {
+            for v in values {
+                collect_expr_reads(v, locals, out);
+            }
+        }
+        Stmt::If { cond, then_body, elifs, else_body, .. } => {
+            collect_expr_reads(cond, locals, out);
+            for t in then_body {
+                collect_outer_reads(t, locals, out);
+            }
+            for (_, b) in elifs {
+                for t in b {
+                    collect_outer_reads(t, locals, out);
+                }
+            }
+            if let Some(b) = else_body {
+                for t in b {
+                    collect_outer_reads(t, locals, out);
+                }
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            collect_expr_reads(cond, locals, out);
+            for t in body {
+                collect_outer_reads(t, locals, out);
+            }
+        }
+        Stmt::For { var, iter, body, .. } => {
+            match iter {
+                nx_ast::ForIter::Range { start, end } => {
+                    collect_expr_reads(start, locals, out);
+                    collect_expr_reads(end, locals, out);
+                }
+                nx_ast::ForIter::Each(e) => collect_expr_reads(e, locals, out),
+            }
+            // The loop var shadows; reads of it inside are task-local.
+            let mut inner = locals.clone();
+            inner.remove(var);
+            for t in body {
+                collect_outer_reads(t, &inner, out);
+            }
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(e) = value {
+                collect_expr_reads(e, locals, out);
+            }
+        }
+        Stmt::Parallel { tasks, .. } => {
+            for t in tasks {
+                collect_outer_reads(t, locals, out);
+            }
+        }
+        Stmt::Expr(e) => collect_expr_reads(e, locals, out),
+        _ => {}
+    }
+}
+
+#[cfg(not(windows))]
+fn collect_expr_reads(e: &Expr, locals: &HashMap<String, String>, out: &mut Vec<String>) {    match e {
+        Expr::Var(n, _) => {
+            if locals.contains_key(n) && !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+        Expr::Attr { base, .. } => collect_expr_reads(base, locals, out),
+        Expr::Index { base, index, .. } => {
+            collect_expr_reads(base, locals, out);
+            collect_expr_reads(index, locals, out);
+        }
+        Expr::List(items, _) => {
+            for it in items {
+                collect_expr_reads(it, locals, out);
+            }
+        }
+        Expr::Unary { expr, .. } => collect_expr_reads(expr, locals, out),
+        Expr::Binary { left, right, .. } => {
+            collect_expr_reads(left, locals, out);
+            collect_expr_reads(right, locals, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_expr_reads(callee, locals, out);
+            for a in args {
+                collect_expr_reads(a, locals, out);
+            }
+        }
+        _ => {}
     }
 }
