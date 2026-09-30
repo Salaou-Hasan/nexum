@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0
 
 ### Purity-directed automatic memoization
 - `nx-ir` proves a function Pure; the compiler caches it automatically,
