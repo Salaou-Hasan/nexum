@@ -184,13 +184,13 @@ fn build_cmd(rest: &[String]) -> ExitCode {
         eprintln!("nx: clang not found — install LLVM: winget install LLVM.LLVM");
         return ExitCode::from(1);
     }
-    match std::process::Command::new("clang")
-        .args(["-O2"])
-        .arg(&ll)
-        .args(["-o"])
-        .arg(&out)
-        .status()
-    {
+    let mut cmd = std::process::Command::new("clang");
+    cmd.args(["-O2"]).arg(&ll).args(["-o"]).arg(&out);
+    // libm for log10/floor/pow/round on unix; MSVC links it implicitly.
+    if cfg!(unix) {
+        cmd.arg("-lm");
+    }
+    match cmd.status() {
         Ok(s) if s.success() => {
             println!("nx: built {out}");
         }
