@@ -12,4 +12,5 @@ path = "src/main.rs"
 nx-lexer = { path = "../nx-lexer" }
 nx-ast = { path = "../nx-ast" }
 nx-parser = { path = "../nx-parser" }
+nx-types = { path = "../nx-types" }
 nx-interp = { path = "../nx-interp" }

@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 fn usage() -> String {
     "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx --version\n       nx --license\n       nx setup [--apply]
+       nx check <file.nx>
        nx update [--version <ver>]".to_string()
 }
 
@@ -32,6 +33,9 @@ fn main() -> ExitCode {
     }
     if args.len() == 3 && args[1] == "--run" {
         return run_file(&args[2]);
+    }
+    if args.len() == 3 && args[1] == "check" {
+        return check_file(&args[2]);
     }
     // Default: nx <file.nx> runs the program.
     if args.len() == 2 && !args[1].starts_with('-') {
@@ -86,6 +90,29 @@ fn parse_file(path: &str) -> ExitCode {
         }
         Err(e) => {
             eprintln!("nx: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn check_file(path: &str) -> ExitCode {
+    let source = match read_source(path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let base = std::path::Path::new(path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(".".into());
+    match nx_types::check_source(&source, &base) {
+        Ok(()) => {
+            println!("nx: no type errors");
+            ExitCode::SUCCESS
+        }
+        Err(es) => {
+            for e in es {
+                eprintln!("nx: {e}");
+            }
             ExitCode::from(1)
         }
     }

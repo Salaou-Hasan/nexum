@@ -14,6 +14,7 @@ dependencies = [
  "nx-interp",
  "nx-lexer",
  "nx-parser",
+ "nx-types",
 ]
 
 [[package]]
@@ -35,4 +36,13 @@ version = "0.0.6"
 dependencies = [
  "nx-ast",
  "nx-lexer",
+]
+
+[[package]]
+name = "nx-types"
+version = "0.0.6"
+dependencies = [
+ "nx-ast",
+ "nx-lexer",
+ "nx-parser",
 ]
