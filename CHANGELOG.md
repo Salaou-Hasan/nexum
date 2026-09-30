@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.0.8
+- LLVM backend: `nx build` native exes, `nx build --run`
+- Interpreter and binaries verified byte-identical in CI
+
 ## v0.0.7
 - Modules: `import` / `as` / `from…import`, `mod.member`, circular detection
 - `nx check` static type checker (advisory)
