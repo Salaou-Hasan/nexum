@@ -36,8 +36,9 @@ You write ordinary code; the compiler finds the expensive parts.
 - **Type inference from use.** NX has no annotations and no overloading,
   so `n - 1` proves `n` is `Int` and `xs[i]` proves `i` is `Int`. That is
   what lets the backend skip the box.
-- **Deterministic parallelism.** Conflicting tasks serialize in program
-  order, so output is byte-identical on every run.
+- **Deterministic parallelism.** Conflict-free tasks run on real threads
+  (pthreads on unix, `CreateThread` on Windows); conflicting ones
+  serialize in program order, so output is byte-identical on every run.
 - **Memory planning.** `nx-mem` classifies each local Unique or Shared
   and releases buffers automatically. You never write a smart pointer or
   a lifetime.

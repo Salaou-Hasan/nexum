@@ -31,6 +31,21 @@
 - Opt out with `NX_NOUNBOX=1`. ~6.3x faster on numeric loops, identical
   output.
 
+### Windows threaded `parallel:`
+- `parallel:` batches now run on real threads on Windows instead of
+  lowering sequentially, so the block means the same thing on every
+  platform. 8 independent tasks: 0.193s sequential -> 0.044s, a 4.42x
+  speedup on 16 logical cores, with byte-identical output.
+- The HANDLE comes from `CreateThread`'s return value. Its last argument
+  is `lpThreadId`, a DWORD id, and waiting on that silently failed
+  every time -- which is why the first Windows build produced zeros.
+- `runtime.ll` declares both platforms' threading APIs and stays
+  platform-neutral: an unused declaration emits no symbol reference.
+- `collect_outer_reads` and the batch emitter are no longer unix-only.
+- CI asserts the generated IR actually contains spawn calls. A batch
+  that quietly fell back to inline execution would still pass the
+  differential test while doing no parallel work at all.
+
 ### Tooling
 - `nx build --emit-ir` prints the generated LLVM IR.
 - Build stamp invalidates the cache when `NX_NOMEMO` or `NX_CFLAGS`

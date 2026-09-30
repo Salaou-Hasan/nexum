@@ -129,6 +129,69 @@ mod tests {
         assert_top_level_defines(&ir);
     }
 
+    /// A real batch must actually spawn threads, not fall back to running
+    /// the tasks inline. Windows used to lower sequentially here, which
+    /// made `parallel:` a no-op on the platform most users are on.
+    #[test]
+    fn parallel_batch_spawns_one_thread_per_task() {
+        let ir = compile_entry(
+            "a = 0\nb = 0\nc = 0\nparallel:\n    a = 1\n    b = 2\n    c = 3\nprint(a, b, c)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let spawns = if cfg!(windows) {
+            ir.matches("call ptr @CreateThread").count()
+        } else {
+            ir.matches("call i32 @pthread_create").count()
+        };
+        assert_eq!(spawns, 3, "one thread per task expected in:\n{ir}");
+        assert_top_level_defines(&ir);
+    }
+
+    /// Every task must be joined before the enclosing code continues,
+    /// otherwise a later read races the task that writes it. And all the
+    /// spawns must come before any join, which is what lets a batch
+    /// actually overlap rather than running one task at a time.
+    #[test]
+    fn parallel_spawns_all_then_joins_all() {
+        let ir = compile_entry(
+            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        // The prelude declares both, so count calls rather than mentions.
+        let (spawn_call, join_call) = if cfg!(windows) {
+            ("call ptr @CreateThread", "call i32 @WaitForSingleObject")
+        } else {
+            ("call i32 @pthread_create", "call i32 @pthread_join")
+        };
+        assert_eq!(ir.matches(spawn_call).count(), 2, "two tasks:\n{ir}");
+        assert_eq!(ir.matches(join_call).count(), 2, "both must be joined:\n{ir}");
+        let first_join = ir.find(join_call).expect("a join call");
+        let last_spawn = ir.rfind(spawn_call).expect("a spawn call");
+        assert!(last_spawn < first_join, "spawn every task before joining any");
+    }
+
+    /// Conflicting tasks must serialize rather than race, so a batch of
+    /// one is emitted inline with no thread at all. `a` and `b` are
+    /// distinct, so this is a genuine two-thread batch; making them share
+    /// a name is what forces the conflict.
+    #[test]
+    fn conflicting_tasks_stay_inline() {
+        let ir = compile_entry(
+            "a = 0\nparallel:\n    a = 1\n    a = 2\nprint(a)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let spawns = if cfg!(windows) {
+            ir.matches("call ptr @CreateThread").count()
+        } else {
+            ir.matches("call i32 @pthread_create").count()
+        };
+        assert_eq!(spawns, 0, "conflicting tasks serialize, so no threads:\n{ir}");
+        assert_top_level_defines(&ir);
+    }
+
     /// Body of one emitted function, so a test can assert on its code
     /// without matching the prelude.
     fn body_of(ir: &str, mangled: &str) -> String {
@@ -2268,26 +2331,14 @@ impl Gen {
                 }
                 continue;
             }
-            #[cfg(windows)]
-            {
-                // No portable thread primitive in hand-written IR for
-                // MSVC targets in v0: run the batch in program order.
-                for &i in &batch {
-                    self.emit_stmt(&tasks[i])?;
-                    if self.term.is_some() {
-                        return Err(err(span, "return inside parallel task is not supported".to_string()));
-                    }
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                self.emit_threaded_batch(&module, tasks, &batch, span)?;
-            }
+            self.emit_threaded_batch(&module, tasks, &batch, span)?;
         }
         Ok(())
     }
 
-    #[cfg(not(windows))]
+    /// Outline each task in `batch` as its own function, run them all
+    /// concurrently, then join. Reads of enclosing locals are snapshotted
+    /// into globals first, so a task only ever sees a consistent copy.
     fn emit_threaded_batch(
         &mut self,
         module: &str,
@@ -2354,8 +2405,19 @@ impl Gen {
         self.loops = saved_loops;
         self.term = None;
         // Spawn all, join all.
+        self.spawn_and_join(&fnames);
+        let _ = module;
+        Ok(())
+    }
+
+    /// Start every task, then wait for all of them. Windows uses
+    /// CreateThread/WaitForSingleObject and unix pthreads, but the
+    /// ordering is the same on both: all tasks are spawned before any
+    /// join, which is what lets a batch actually run concurrently.
+    #[cfg(not(windows))]
+    fn spawn_and_join(&mut self, fnames: &[String]) {
         let mut tids = Vec::new();
-        for fname in &fnames {
+        for fname in fnames {
             let tid = self.reg();
             self.w(&format!("  {tid} = alloca i64"));
             self.w(&format!("  store i64 0, ptr {tid}"));
@@ -2367,13 +2429,33 @@ impl Gen {
             self.w(&format!("  {t} = load i64, ptr {tid}"));
             self.w(&format!("  call i32 @pthread_join(i64 {t}, ptr null)"));
         }
-        let _ = module;
-        Ok(())
+    }
+
+    /// Windows equivalent of the pthread path. The HANDLE comes back as
+    /// CreateThread's return value -- its last argument is `lpThreadId`,
+    /// a DWORD id, which is not something you can wait on. Handles are
+    /// `ptr` rather than the unix `i64`, so the join list differs.
+    #[cfg(windows)]
+    fn spawn_and_join(&mut self, fnames: &[String]) {
+        let mut handles = Vec::new();
+        for fname in fnames {
+            let tid = self.reg();
+            self.w(&format!("  {tid} = alloca i32"));
+            self.w(&format!("  store i32 0, ptr {tid}"));
+            let h = self.reg();
+            self.w(&format!(
+                "  {h} = call ptr @CreateThread(ptr null, i64 0, ptr @{fname}, ptr null, i32 0, ptr {tid})"
+            ));
+            handles.push(h);
+        }
+        for h in handles {
+            self.w(&format!("  call i32 @WaitForSingleObject(ptr {h}, i32 -1)"));
+            self.w(&format!("  call i32 @CloseHandle(ptr {h})"));
+        }
     }
 }
 
 /// Enclosing-local names read anywhere inside a task statement.
-#[cfg(not(windows))]
 fn collect_outer_reads(s: &Stmt, locals: &HashMap<String, String>, out: &mut Vec<String>) {
     match s {
         Stmt::Assign { value, .. } => collect_expr_reads(value, locals, out),
@@ -2440,8 +2522,8 @@ fn collect_outer_reads(s: &Stmt, locals: &HashMap<String, String>, out: &mut Vec
     }
 }
 
-#[cfg(not(windows))]
-fn collect_expr_reads(e: &Expr, locals: &HashMap<String, String>, out: &mut Vec<String>) {    match e {
+fn collect_expr_reads(e: &Expr, locals: &HashMap<String, String>, out: &mut Vec<String>) {
+    match e {
         Expr::Var(n, _) => {
             if locals.contains_key(n) && !out.contains(n) {
                 out.push(n.clone());

@@ -261,10 +261,20 @@ done:
 
 declare void @free(ptr)
 
-; Threading for `parallel:` (unix; Windows lowers sequentially).
-; pthread_t travels as i64 (slots zeroed first so 32-bit ids extend cleanly).
+; Threading for `parallel:`. Both platforms are declared here so this
+; prelude stays platform-neutral: an unused declaration emits no symbol
+; reference, and codegen only ever calls the set it was built for.
+;
+; unix: pthread_t travels as i64, so slots are zeroed first and a 32-bit
+; id extends cleanly.
 declare i32 @pthread_create(ptr, ptr, ptr, ptr)
 declare i32 @pthread_join(i64, ptr)
+; windows: the HANDLE is CreateThread's return value. The last argument is
+; lpThreadId (a DWORD), not a handle, so it must not be waited on.
+; INFINITE (-1) means "wait however long it takes".
+declare ptr @CreateThread(ptr, i64, ptr, ptr, i32, ptr)
+declare i32 @WaitForSingleObject(ptr, i32)
+declare i32 @CloseHandle(ptr)
 
 define void @nx_print_val(%NxVal %v) {
 entry:

@@ -69,6 +69,21 @@ jobs:
               exit 1
             fi
           done
+      - name: parallel must actually spawn threads
+        shell: bash
+        run: |
+          # A parallel batch that silently ran inline would pass the
+          # differential test while doing no work at all, so assert on
+          # the generated IR directly.
+          for f in examples/parallel.nx; do
+            cargo run -q -p nx-driver -- build "$f" --emit-ir > out.ll
+            if grep -qE 'call (i32 @pthread_create|ptr @CreateThread)' out.ll; then
+              echo "threads spawned for $f"
+            else
+              echo "NO THREADS for $f"
+              exit 1
+            fi
+          done
       - name: asan check (linux, leaks off by design)
         if: runner.os == 'Linux'
         shell: bash
