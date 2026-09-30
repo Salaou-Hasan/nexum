@@ -120,12 +120,34 @@ fn check_file(path: &str) -> ExitCode {
 }
 
 fn build_cmd(rest: &[String]) -> ExitCode {
-    // nx build <file.nx> [-o <out>]
-    let (file, out) = match rest {
-        [f] => (f.clone(), None),
-        [f, o, v] if o == "-o" => (f.clone(), Some(v.clone())),
-        _ => {
-            eprintln!("usage: nx build <file.nx> [-o <out>]");
+    // nx build <file.nx> [-o <out>] [--run]
+    let mut file: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut run = false;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "-o" => {
+                i += 1;
+                if i >= rest.len() {
+                    eprintln!("usage: nx build <file.nx> [-o <out>] [--run]");
+                    return ExitCode::from(2);
+                }
+                out = Some(rest[i].clone());
+            }
+            "--run" => run = true,
+            f if file.is_none() => file = Some(f.to_string()),
+            _ => {
+                eprintln!("usage: nx build <file.nx> [-o <out>] [--run]");
+                return ExitCode::from(2);
+            }
+        }
+        i += 1;
+    }
+    let file = match file {
+        Some(f) => f,
+        None => {
+            eprintln!("usage: nx build <file.nx> [-o <out>] [--run]");
             return ExitCode::from(2);
         }
     };
@@ -171,13 +193,27 @@ fn build_cmd(rest: &[String]) -> ExitCode {
     {
         Ok(s) if s.success() => {
             println!("nx: built {out}");
-            ExitCode::SUCCESS
         }
         _ => {
             eprintln!("nx: clang failed");
-            ExitCode::from(1)
+            return ExitCode::from(1);
         }
     }
+    if run {
+        match std::process::Command::new(&out).status() {
+            Ok(s) => {
+                return match s.code() {
+                    Some(c) => ExitCode::from(c as u8),
+                    None => ExitCode::FAILURE,
+                };
+            }
+            Err(e) => {
+                eprintln!("nx: cannot run {out}: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn default_exe_name(file: &str) -> String {
