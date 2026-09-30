@@ -151,59 +151,11 @@ fn build_cmd(rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let source = match read_source(&file) {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let base = std::path::Path::new(&file)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or(".".into());
-    // Types are mandatory for codegen.
-    if let Err(es) = nx_types::check_source(&source, &base) {
-        for e in es {
-            eprintln!("nx: {e}");
-        }
-        return ExitCode::from(1);
-    }
-    let ir = match nx_codegen::compile_entry(&source, &base) {
-        Ok(ir) => ir,
-        Err(e) => {
-            eprintln!("nx: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let ll = std::env::temp_dir().join(format!("nxbuild-{}.ll", std::process::id()));
-    if let Err(e) = std::fs::write(&ll, ir) {
-        eprintln!("nx: cannot write IR: {e}");
-        return ExitCode::from(1);
-    }
     let out = out.unwrap_or_else(|| default_exe_name(&file));
-    // Probe clang first for a helpful error.
-    if std::process::Command::new("clang").arg("--version").output().is_err() {
-        eprintln!("nx: clang not found — install LLVM: winget install LLVM.LLVM");
-        return ExitCode::from(1);
-    }
-    let mut cmd = std::process::Command::new("clang");
-    cmd.args(["-O2"]).arg(&ll).args(["-o"]).arg(&out);
-    // libm for log10/floor/pow/round on unix; MSVC links it implicitly.
-    if cfg!(unix) {
-        cmd.arg("-lm");
-    }
-    // Extra flags, e.g. NX_CFLAGS="-fsanitize=address -g" for CI.
-    if let Ok(extra) = std::env::var("NX_CFLAGS") {
-        for a in extra.split_whitespace() {
-            cmd.arg(a);
-        }
-    }
-    match cmd.status() {
-        Ok(s) if s.success() => {
-            println!("nx: built {out}");
-        }
-        _ => {
-            eprintln!("nx: clang failed");
-            return ExitCode::from(1);
-        }
+    if up_to_date(&file, &out) {
+        println!("nx: up to date ({out})");
+    } else if let Err(c) = build_exe(&file, &out) {
+        return c;
     }
     if run {
         match std::process::Command::new(&out).status() {
@@ -220,6 +172,91 @@ fn build_cmd(rest: &[String]) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Skip clang when the exe is newer than every input (entry + imports)
+/// and newer than nx itself.
+fn up_to_date(file: &str, out: &str) -> bool {
+    let exe_meta = match std::fs::metadata(out) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let exe_time = match exe_meta.modified() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let entry = std::path::Path::new(file);
+    let base = entry.parent().map(|p| p.to_path_buf()).unwrap_or(".".into());
+    let mut inputs = match nx_codegen::dependencies(entry, &base) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if let Ok(nx) = std::env::current_exe() {
+        inputs.push(nx);
+    }
+    inputs.iter().all(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .map(|t| exe_time >= t)
+            .unwrap_or(false)
+    })
+}
+
+fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
+    let source = match read_source(file) {
+        Ok(s) => s,
+        Err(c) => return Err(c),
+    };
+    let base = std::path::Path::new(file)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(".".into());
+    // Types are mandatory for codegen.
+    if let Err(es) = nx_types::check_source(&source, &base) {
+        for e in es {
+            eprintln!("nx: {e}");
+        }
+        return Err(ExitCode::from(1));
+    }
+    let ir = match nx_codegen::compile_entry(&source, &base) {
+        Ok(ir) => ir,
+        Err(e) => {
+            eprintln!("nx: {e}");
+            return Err(ExitCode::from(1));
+        }
+    };
+    let ll = std::env::temp_dir().join(format!("nxbuild-{}.ll", std::process::id()));
+    if let Err(e) = std::fs::write(&ll, ir) {
+        eprintln!("nx: cannot write IR: {e}");
+        return Err(ExitCode::from(1));
+    }
+    // Probe clang first for a helpful error.
+    if std::process::Command::new("clang").arg("--version").output().is_err() {
+        eprintln!("nx: clang not found — install LLVM: winget install LLVM.LLVM");
+        return Err(ExitCode::from(1));
+    }
+    let mut cmd = std::process::Command::new("clang");
+    cmd.args(["-O2"]).arg(&ll).args(["-o"]).arg(out);
+    // libm for log10/floor/pow/round on unix; MSVC links it implicitly.
+    if cfg!(unix) {
+        cmd.arg("-lm");
+    }
+    // Extra flags, e.g. NX_CFLAGS="-fsanitize=address -g" for CI.
+    if let Ok(extra) = std::env::var("NX_CFLAGS") {
+        for a in extra.split_whitespace() {
+            cmd.arg(a);
+        }
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => {
+            println!("nx: built {out}");
+            Ok(())
+        }
+        _ => {
+            eprintln!("nx: clang failed");
+            Err(ExitCode::from(1))
+        }
+    }
 }
 
 fn default_exe_name(file: &str) -> String {

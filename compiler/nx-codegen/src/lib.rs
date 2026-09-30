@@ -217,8 +217,45 @@ fn parse(source: &str) -> Result<Program, CodegenError> {
     })
 }
 
-fn collect_imports(prog: &Program, out: &mut Vec<String>) {
-    for s in &prog.stmts {
+/// All source files a build depends on: the entry plus every transitively
+/// imported `.nx` file. Used for incremental rebuild checks.
+pub fn dependencies(
+    entry: &std::path::Path,
+    base: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, CodegenError> {
+    let mut out = vec![entry.to_path_buf()];
+    let mut queue = vec![entry.to_path_buf()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(path) = queue.pop() {
+        let canon = path.canonicalize().unwrap_or(path.clone());
+        if !seen.insert(canon) {
+            continue;
+        }
+        let src = std::fs::read_to_string(&path).map_err(|e| CodegenError {
+            message: format!("cannot read {}: {e}", path.display()),
+            line: 1,
+            col: 1,
+        })?;
+        let prog = parse(&src)?;
+        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(base.to_path_buf());
+        let mut deps = Vec::new();
+        collect_imports(&prog, &mut deps);
+        for dep in deps {
+            let file = format!("{dep}.nx");
+            let mut dirs = vec![dir.clone(), base.to_path_buf()];
+            if let Ok(p) = std::env::var("NX_PATH") {
+                dirs.extend(std::env::split_paths(&p));
+            }
+            if let Some(p) = dirs.iter().map(|d| d.join(&file)).find(|p| p.is_file()) {
+                out.push(p.clone());
+                queue.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn collect_imports(prog: &Program, out: &mut Vec<String>) {    for s in &prog.stmts {
         let m = match s {
             Stmt::Import { module, .. } => Some(module),
             Stmt::FromImport { module, .. } => Some(module),
