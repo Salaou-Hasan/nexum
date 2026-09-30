@@ -1,9 +1,7 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx --version\n       nx --license\n       nx setup [--apply]
-       nx check <file.nx>
-       nx update [--version <ver>]".to_string()
+    "usage: nx <file.nx>\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx>\n       nx check <file.nx>\n       nx build <file.nx> [-o <out>]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
 }
 
 const UPDATE_REPO: &str = "Salaou-Hasan/nexum";
@@ -36,6 +34,9 @@ fn main() -> ExitCode {
     }
     if args.len() == 3 && args[1] == "check" {
         return check_file(&args[2]);
+    }
+    if args.len() >= 3 && args[1] == "build" {
+        return build_cmd(&args[2..]);
     }
     // Default: nx <file.nx> runs the program.
     if args.len() == 2 && !args[1].starts_with('-') {
@@ -116,6 +117,80 @@ fn check_file(path: &str) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn build_cmd(rest: &[String]) -> ExitCode {
+    // nx build <file.nx> [-o <out>]
+    let (file, out) = match rest {
+        [f] => (f.clone(), None),
+        [f, o, v] if o == "-o" => (f.clone(), Some(v.clone())),
+        _ => {
+            eprintln!("usage: nx build <file.nx> [-o <out>]");
+            return ExitCode::from(2);
+        }
+    };
+    let source = match read_source(&file) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let base = std::path::Path::new(&file)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(".".into());
+    // Types are mandatory for codegen.
+    if let Err(es) = nx_types::check_source(&source, &base) {
+        for e in es {
+            eprintln!("nx: {e}");
+        }
+        return ExitCode::from(1);
+    }
+    let ir = match nx_codegen::compile_entry(&source, &base) {
+        Ok(ir) => ir,
+        Err(e) => {
+            eprintln!("nx: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let ll = std::env::temp_dir().join(format!("nxbuild-{}.ll", std::process::id()));
+    if let Err(e) = std::fs::write(&ll, ir) {
+        eprintln!("nx: cannot write IR: {e}");
+        return ExitCode::from(1);
+    }
+    let out = out.unwrap_or_else(|| default_exe_name(&file));
+    // Probe clang first for a helpful error.
+    if std::process::Command::new("clang").arg("--version").output().is_err() {
+        eprintln!("nx: clang not found — install LLVM: winget install LLVM.LLVM");
+        return ExitCode::from(1);
+    }
+    match std::process::Command::new("clang")
+        .args(["-O2"])
+        .arg(&ll)
+        .args(["-o"])
+        .arg(&out)
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("nx: built {out}");
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("nx: clang failed");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn default_exe_name(file: &str) -> String {
+    let stem = std::path::Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or("a".to_string());
+    let dir = std::path::Path::new(file)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(".".into());
+    let name = if cfg!(windows) { format!("{stem}.exe") } else { stem };
+    dir.join(name).to_string_lossy().to_string()
 }
 
 fn run_file(path: &str) -> ExitCode {

@@ -7,10 +7,20 @@ name = "nx-ast"
 version = "0.0.7"
 
 [[package]]
+name = "nx-codegen"
+version = "0.0.7"
+dependencies = [
+ "nx-ast",
+ "nx-lexer",
+ "nx-parser",
+]
+
+[[package]]
 name = "nx-driver"
 version = "0.0.7"
 dependencies = [
  "nx-ast",
+ "nx-codegen",
  "nx-interp",
  "nx-lexer",
  "nx-parser",

@@ -1,0 +1,14 @@
+[package]
+name = "nx-codegen"
+version = "0.0.7"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "nx_codegen"
+path = "src/lib.rs"
+
+[dependencies]
+nx-ast = { path = "../nx-ast" }
+nx-lexer = { path = "../nx-lexer" }
+nx-parser = { path = "../nx-parser" }

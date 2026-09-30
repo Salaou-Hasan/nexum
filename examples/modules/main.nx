@@ -1,9 +1,9 @@
 import utils
-from utils import double, greet as hello
+from utils import double as do, greet as hello
 
-print(utils.VERSION)
-print(utils.double(21))
-print(double(4))
+print("version =", utils.VERSION)
+print(do(21))
+print(do(4))
 print(hello("Ada"))
 
 for i in 0..3:
