@@ -330,31 +330,43 @@ mod tests {
         assert!(!b.contains("@nx_cmp"), "boxed cmp helper must be gone:\n{b}");
     }
 
+    /// A boxed global whose static type is known still feeds raw
+    /// arithmetic: the payload comes out of the box and widens.
     #[test]
-    fn float_arith_promotes_int_operand() {
-        // `n / 2.0` leaves n numeric, so it defaults to Int and the
-        // division widens it.
+    fn int_global_widens_in_float_arith() {
         let ir = compile_entry(
-            "fn f(n):\n    return n / 2.0\nprint(f(4))\n",
+            "g = 4\nfn f(k):\n    t = g * 0.5\n    return t + k\nprint(f(1))\n",
             std::path::Path::new("."),
         )
         .unwrap();
         let b = body_of(&ir, &mangle_fn("__main__", "f"));
-        assert!(b.contains("sitofp i64"), "Int operand must widen to double:\n{b}");
-        assert!(b.contains("@nx_fdiv"), "float division keeps the zero check:\n{b}");
+        assert!(b.contains("sitofp i64"), "Int global must widen to double:\n{b}");
+        assert!(b.contains("fmul double"), "mixed product must be a float mul:\n{b}");
     }
 
     #[test]
-    fn int_operand_widens_in_mixed_arith() {
-        // n is proven Int by `n + 1`; the literal 0.5 promotes the sum.
+    fn float_division_keeps_the_zero_check() {
         let ir = compile_entry(
-            "fn f(n):\n    return n + 0.5\nprint(f(2))\n",
+            "g = 4\nfn f(k):\n    return g / 0.5 + k\nprint(f(1))\n",
             std::path::Path::new("."),
         )
         .unwrap();
         let b = body_of(&ir, &mangle_fn("__main__", "f"));
-        assert!(b.contains("sitofp i64"), "Int operand must widen to double:\n{b}");
-        assert!(b.contains("fadd double"), "mixed sum must be a float add:\n{b}");
+        assert!(b.contains("@nx_fdiv"), "float division keeps the zero check:\n{b}");
+    }
+
+    /// A parameter used only in a float expression has no determined type,
+    /// so it stays dynamic: nothing is widened because nothing is known.
+    #[test]
+    fn float_context_param_stays_boxed() {
+        let ir = compile_entry(
+            "fn half(x):\n    return x / 2.0\nprint(half(4))\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_fn("__main__", "half"));
+        assert!(!b.contains("sitofp"), "an untyped param must not be widened:\n{b}");
+        assert!(b.contains("@nx_div"), "it takes the boxed division path:\n{b}");
     }
 
     #[test]

@@ -107,9 +107,11 @@ struct Checker {
     /// and are narrowed from how the body uses them, which is what lets
     /// codegen keep them out of the box.
     param_names: Vec<String>,
-    /// Parameters seen in arithmetic, so an unresolved one can default
-    /// to Int instead of staying dynamic.
+    /// Parameters seen in arithmetic, candidates for the integer default.
     numeric_params: Vec<String>,
+    /// Set when a Float appears anywhere in the current function, including
+    /// in an expression that never lands in a local.
+    saw_float: bool,
     /// `local = param` plain copies found in the current body, resolved
     /// once the pass knows a type for either end.
     copies: Vec<(String, String)>,
@@ -174,9 +176,11 @@ impl Checker {
         }
     }
 
-    /// Mark a parameter as used in arithmetic. If nothing else pins its
-    /// type it becomes Int, the same way a numeric local is fixed by its
-    /// first binding.
+    /// Record a parameter used in arithmetic. This does not pin the type:
+    /// NX promotes mixed Int/Float, so `n * 2` is well-typed for an Int n
+    /// and for a Float n, and neither operand's type is forced. It only
+    /// marks the parameter as a candidate for the integer default applied
+    /// once the whole body has been seen.
     fn mark_numeric(&mut self, e: &Expr) {
         if let Expr::Var(name, _) = e {
             if self.param_names.iter().any(|p| p == name) {
@@ -345,10 +349,17 @@ impl Checker {
                 let mut known: HashMap<String, Ty> = HashMap::new();
                 let mut passes = 0;
                 loop {
-                    self.numeric_params.clear();
                     self.copies.clear();
+                    self.saw_float = false;
                     self.vars.clear();
                     self.returns.clear();
+                    // A function body sees the module's own variables, the
+                    // same ones codegen resolves to globals. Seeding the
+                    // scope with them is what lets a function read a
+                    // top-level constant instead of reporting it undefined.
+                    for (name, ty) in &saved_vars {
+                        self.vars.insert(name.clone(), ty.clone());
+                    }
                     for p in params {
                         self.vars
                             .insert(p.clone(), known.get(p).cloned().unwrap_or(Ty::Unknown));
@@ -362,13 +373,26 @@ impl Checker {
                     let nerr = self.errors.len();
                     self.check_block(body);
                     let pass_errors: Vec<CheckError> = self.errors.drain(nerr..).collect();
-                    // A numeric parameter nothing else pinned defaults to Int,
-                    // the same way a numeric local is fixed by its first
-                    // binding.
-                    for p in std::mem::take(&mut self.numeric_params) {
-                        if self.vars.get(&p) == Some(&Ty::Unknown) {
-                            self.vars.insert(p, Ty::Int);
+                    // A numeric parameter nothing else pinned defaults to
+                    // Int, but only in a function that never touches a
+                    // Float. With no float in the body there is nothing a
+                    // Float argument could mean, so Int is the only reading
+                    // left and the caller gets a real signature to check.
+                    //
+                    // With a Float present, leaving the parameter dynamic is
+                    // the honest answer: `zr - zi + cx` and `x / 2.0` are
+                    // well-typed whatever cx and x are, and pinning them
+                    // made `fn mandel(cx, cy, maxiter)` come out as
+                    // `(Int, Int, Int)` and reject Float arguments outright.
+                    if !self.saw_float {
+                        for p in std::mem::take(&mut self.numeric_params) {
+                            if self.vars.get(&p) == Some(&Ty::Unknown) {
+                                self.vars.insert(p, Ty::Int);
+                            }
                         }
+                    } else {
+                        self.numeric_params.clear();
+                        self.saw_float = false;
                     }
                     // A plain copy makes both ends the same type; take it
                     // from whichever end this pass managed to type.
@@ -576,6 +600,17 @@ impl Checker {
     }
 
     fn check_expr(&mut self, expr: &Expr) -> Ty {
+        let t = self.check_expr_inner(expr);
+        if t == Ty::Float {
+            // A float can appear in an expression without ever landing in
+            // a local, as in `fn half(x): return x / 2.0`. Remember it so
+            // the parameter rule below can see the function is float-shaped.
+            self.saw_float = true;
+        }
+        t
+    }
+
+    fn check_expr_inner(&mut self, expr: &Expr) -> Ty {
         match expr {
             Expr::Int(..) => Ty::Int,
             Expr::Float(..) => Ty::Float,
@@ -710,12 +745,6 @@ impl Checker {
                         Ty::Bool
                     }
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                        // Arithmetic does not pin a parameter: Int/Float
-                        // mixing is legal, so `n * 3` and `n * 0.5` are
-                        // both well-typed for n. Mark it numeric instead;
-                        // an unresolved numeric param defaults to Int
-                        // (see the end of function checking), matching how
-                        // a numeric local is fixed by its first binding.
                         if matches!(op, BinOp::Add)
                             && (l == Ty::Str || r == Ty::Str)
                         {
@@ -891,6 +920,7 @@ impl Default for Checker {
             loop_depth: 0,
             param_names: Vec::new(),
             numeric_params: Vec::new(),
+            saw_float: false,
             copies: Vec::new(),
             inferred: HashMap::new(),
             module_name: String::new(),
@@ -1034,11 +1064,40 @@ mod tests {
     }
 
     #[test]
-    fn numeric_param_defaults_to_int() {
-        // `x / 2.0` is well-typed for an Int x (the sum widens), so the
-        // param is numeric rather than pinned: it defaults to Int.
+    fn function_sees_module_globals() {
+        // Codegen resolves a top-level name to a global, so the checker has
+        // to see it too. It used to empty the enclosing scope and report
+        // every module-level constant as undefined inside a function.
+        ok("g = 4\nfn f(k):\n    return g + k\nprint(f(1))\n");
+        let m = infer("g = 4\nfn f(k):\n    return g + k\n");
+        let f = &m[&("__main__".into(), "f".into())];
+        assert_eq!(f.locals["g"], Ty::Int);
+    }
+
+    #[test]
+    fn numeric_param_defaults_to_int_in_an_int_function() {
+        // Nothing in the body is a Float, so Int is the only reading left.
+        let m = infer("fn f(n):\n    return n * 2\n");
+        assert_eq!(m[&("__main__".into(), "f".into())].locals["n"], Ty::Int);
+        ok("fn f(n):\n    return n * 2\nprint(f(21))\n");
+    }
+
+    #[test]
+    fn numeric_param_stays_dynamic_in_a_float_function() {
+        // `x / 2.0` is well-typed for an Int x and for a Float x, so the
+        // parameter is dynamic. Pinning it made this function reject a
+        // Float argument, which is ordinary code failing to compile.
         let m = infer("fn half(x):\n    return x / 2.0\n");
-        assert_eq!(m[&("__main__".into(), "half".into())].locals["x"], Ty::Int);
+        assert_eq!(m[&("__main__".into(), "half".into())].locals["x"], Ty::Unknown);
+        ok("fn half(x):\n    return x / 2.0\nprint(half(1))\n");
+        ok("fn half(x):\n    return x / 2.0\nprint(half(1.0))\n");
+    }
+
+    #[test]
+    fn float_function_takes_float_coordinates() {
+        // The regression that motivated the rule: this used to infer
+        // (Int, Int, Int) and refuse Float arguments.
+        ok("fn mandel(cx, cy, maxiter):\n    zr = 0.0\n    zi = 0.0\n    i = 0\n    while i < maxiter:\n        zr2 = zr * zr\n        zi2 = zi * zi\n        if zr2 + zi2 > 4.0:\n            return i\n        zi = 2.0 * zr * zi + cy\n        zr = zr2 - zi2 + cx\n        i = i + 1\n    return maxiter\nprint(mandel(0.5, 0.5, 10))\n");
     }
 
     #[test]
@@ -1046,13 +1105,6 @@ mod tests {
         // An ordering comparison has no widening, so the type is forced.
         let m = infer("fn over(x):\n    if x < 1.5:\n        return 1\n    else:\n        return 0\n");
         assert_eq!(m[&("__main__".into(), "over".into())].locals["x"], Ty::Float);
-    }
-
-    #[test]
-    fn mixed_arith_param_must_be_int() {
-        // half(1) is fine; half(1.0) is not, because half's param is Int.
-        ok("fn half(x):\n    return x / 2.0\nprint(half(1))\n");
-        assert!(!err("fn half(x):\n    return x / 2.0\nprint(half(1.0))\n").is_empty());
     }
 
     #[test]
