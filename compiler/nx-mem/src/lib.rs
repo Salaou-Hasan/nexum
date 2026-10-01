@@ -248,8 +248,12 @@ fn index_fns(
 fn assigned_in(body: &[Stmt], out: &mut HashSet<String>) {
     for s in body {
         match s {
-            Stmt::Assign { name, .. } => {
-                out.insert(name.clone());
+            Stmt::Assign { targets, .. } => {
+                for t in targets {
+                    if let nx_ast::Target::Name(n) = t {
+                        out.insert(n.clone());
+                    }
+                }
             }
             Stmt::For { var, body, .. } => {
                 out.insert(var.clone());
@@ -322,10 +326,14 @@ fn aliases_in(body: &[Stmt], params: &[String]) -> HashMap<String, HashSet<Strin
 fn collect_alias_pairs(body: &[Stmt], map: &mut HashMap<String, HashSet<String>>) {
     for s in body {
         match s {
-            Stmt::Assign { name, value, .. } => {
-                if let Expr::Var(y, _) = value {
-                    map.entry(name.clone()).or_default().insert(y.clone());
-                    map.entry(y.clone()).or_default().insert(name.clone());
+            Stmt::Assign { targets, values, .. } => {
+                // `x = y` aliases; `a[i] = y` writes into a container and
+                // does not rebind a name, so it creates no alias.
+                if targets.len() == 1 && values.len() == 1 {
+                    if let (nx_ast::Target::Name(name), Expr::Var(y, _)) = (&targets[0], &values[0]) {
+                        map.entry(name.clone()).or_default().insert(y.clone());
+                        map.entry(y.clone()).or_default().insert(name.clone());
+                    }
                 }
             }
             Stmt::If { then_body, elifs, else_body, .. } => {
@@ -350,11 +358,43 @@ fn collect_alias_pairs(body: &[Stmt], map: &mut HashMap<String, HashSet<String>>
 fn escaping_roots(body: &[Stmt], out: &mut HashSet<Root>) {
     for s in body {
         match s {
-            Stmt::Return { value, .. } => {
-                if let Some(e) = value {
+            Stmt::Return { values, .. } => {
+                for e in values {
                     for v in vars_in(e) {
                         out.insert(Root::Var(v));
                     }
+                }
+            }
+            Stmt::Assign { targets, values, .. } => {
+                // A multiple assignment reads every source, so any of them
+                // can reach the caller through a returned tuple.
+                for e in values {
+                    for v in vars_in(e) {
+                        out.insert(Root::Var(v));
+                    }
+                }
+                for t in targets {
+                    if let nx_ast::Target::Index { base, .. } = t {
+                        for v in vars_in(base) {
+                            out.insert(Root::Var(v));
+                        }
+                    }
+                }
+            }
+            Stmt::Del { targets, .. } => {
+                // `del a[i]` hands the container's storage onward; `del a`
+                // only drops a binding.
+                for t in targets {
+                    if let nx_ast::Target::Index { base, .. } = t {
+                        for v in vars_in(base) {
+                            out.insert(Root::Var(v));
+                        }
+                    }
+                }
+            }
+            Stmt::Assert { cond, message, .. } => {
+                for e in [Some(cond), message.as_ref()].into_iter().flatten() {
+                    expr_roots(e, out);
                 }
             }
             Stmt::If { cond, then_body, elifs, else_body, .. } => {
@@ -375,7 +415,7 @@ fn escaping_roots(body: &[Stmt], out: &mut HashSet<Root>) {
                 }
             }
             Stmt::Fn { .. } => {}
-            Stmt::Expr(e) | Stmt::Assign { value: e, .. } => expr_roots(e, out),
+            Stmt::Expr(e) => expr_roots(e, out),
             Stmt::AssignOp { .. } => {}
             Stmt::Print { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
             Stmt::Break { .. } | Stmt::Continue { .. } => {}

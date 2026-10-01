@@ -7,7 +7,7 @@
 //! - `import`/`from` are followed into files; members are checked.
 
 use std::collections::{HashMap, HashSet};
-use nx_ast::{BinOp, Expr, Program, Span, Stmt, UnaryOp};
+use nx_ast::{BinOp, Expr, Program, Span, Stmt, Target, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
@@ -16,6 +16,11 @@ pub enum Ty {
     Bool,
     Str,
     List(Box<Ty>),
+    /// A string-keyed (or generally keyed) mapping. The value type is
+    /// carried so a homogeneous dict can still be tracked, but it is
+    /// advisory: assigning a different value type widens it rather than
+    /// failing, because a dict is how you get heterogeneity on purpose.
+    Dict(Box<Ty>),
     Func(Vec<Ty>, Box<Ty>),
     Module(String),
     None,
@@ -30,6 +35,7 @@ impl std::fmt::Display for Ty {
             Ty::Bool => write!(f, "Bool"),
             Ty::Str => write!(f, "Str"),
             Ty::List(t) => write!(f, "List({t})"),
+            Ty::Dict(t) => write!(f, "Dict({t})"),
             Ty::Func(p, r) => {
                 let ps: Vec<String> = p.iter().map(|t| t.to_string()).collect();
                 write!(f, "fn({}) -> {r}", ps.join(", "))
@@ -133,6 +139,117 @@ impl Checker {
         self.errors.push(CheckError { message: msg, line: span.line, col: span.col });
     }
 
+    /// Bind one assignment target. A name follows the usual monomorphic
+    /// rule; an index or field writes into a container and is checked
+    /// against the container's element type instead of defining anything.
+    fn bind_target(&mut self, target: &Target, t: Ty, value: &Expr, span: Span) {
+        match target {
+            Target::Name(name) => {
+                if let Some(outer) = &self.parallel_outer {
+                    if outer.contains(name) && !self.task_bound.contains(name) {
+                        self.err(span, format!("cannot assign to outer local '{name}' inside parallel (use a module global)"));
+                        return;
+                    }
+                }
+                self.mark_copy(name, value);
+                self.task_bound.insert(name.clone());
+                // `None` means "no value here", so it must not pin a
+                // variable to a type or conflict with one. Widening to
+                // unresolved is what lets `x = 1` / `x = None` / `x = 2`
+                // work without giving up monomorphism for real values.
+                let t = if t == Ty::None { Ty::Unknown } else { t };
+                self.define(name, t, span);
+            }
+            Target::Index { base, index } => {
+                let bt = self.check_expr(base);
+                // Dict keys are values, positions are Ints; which rule
+                // applies follows from the container.
+                if matches!(bt, Ty::Dict(_)) {
+                    let kt = self.check_expr(index);
+                    if !matches!(kt, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
+                        self.err(
+                            index.span(),
+                            format!("dict key must be Int, Float, Bool or Str, found {kt}"),
+                        );
+                    }
+                    return;
+                }
+                let it = self.check_expr(index);
+                if !matches!(it, Ty::Int | Ty::Unknown) {
+                    self.err(index.span(), format!("index must be Int, found {it}"));
+                }
+                match bt {
+                    Ty::List(elem) => {
+                        // The written value has to fit the slot. Refusing
+                        // here is what keeps a `List(Int)` from being handed
+                        // a String by a plain assignment.
+                        if !compatible(&elem, &t) {
+                            self.err(span, format!("cannot store {t} into {}", expr_label(base)));
+                        }
+                    }
+                    Ty::Str => self.err(base.span(), "strings are immutable".to_string()),
+                    Ty::Unknown => {}
+                    other => self.err(base.span(), format!("cannot index-assign into {other}")),
+                }
+            }
+            Target::Attr { base, field } => {
+                let bt = self.check_expr(base);
+                self.err(
+                    base.span(),
+                    format!("cannot assign field '{field}' of {bt}: fields come from a type declaration"),
+                );
+            }
+        }
+    }
+
+    /// The current type of whatever a target designates, so an `op=` can be
+    /// checked against what is already there. `None` means the target is
+    /// not readable at all and an error has already been reported.
+    fn target_ty(&mut self, target: &Target, span: Span) -> Option<Ty> {
+        match target {
+            Target::Name(name) => match self.vars.get(name).cloned() {
+                None => {
+                    self.err(span, format!("undefined variable '{name}'"));
+                    None
+                }
+                Some(t) => Some(t),
+            },
+            Target::Index { base, index } => {
+                let bt = self.check_expr(base);
+                if matches!(bt, Ty::Dict(_)) {
+                    let kt = self.check_expr(index);
+                    if !matches!(kt, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
+                        self.err(
+                            index.span(),
+                            format!("dict key must be Int, Float, Bool or Str, found {kt}"),
+                        );
+                    }
+                    return Some(bt);
+                }
+                let it = self.check_expr(index);
+                if !matches!(it, Ty::Int | Ty::Unknown) {
+                    self.err(index.span(), format!("index must be Int, found {it}"));
+                }
+                match bt {
+                    Ty::List(elem) => Some(*elem),
+                    Ty::Unknown => Some(Ty::Unknown),
+                    other => {
+                        self.err(base.span(), format!("cannot index-assign into {other}"));
+                        None
+                    }
+                }
+            }
+            Target::Attr { base, field } => {
+                let bt = self.check_expr(base);
+                self.err(
+                    base.span(),
+                    format!("cannot assign field '{field}' of {bt}: fields come from a type declaration"),
+                );
+                None
+            }
+        }
+    }
+
     fn define(&mut self, name: &str, ty: Ty, span: Span) {
         match self.vars.get(name) {
             None => {
@@ -208,36 +325,102 @@ impl Checker {
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Assign { name, value, span } => {
-                let t = self.check_expr(value);
-                self.mark_copy(name, value);
-                if let Some(outer) = &self.parallel_outer {
-                    if outer.contains(name) && !self.task_bound.contains(name) {
-                        self.err(*span, format!("cannot assign to outer local '{name}' inside parallel (use a module global)"));
-                        return;
+            Stmt::Assign { targets, values, span } => {
+                // Several targets against one value is destructuring: the
+                // value is a tuple or a multiple return, so every target
+                // takes the same type here. When the parts genuinely differ
+                // the recorded type is unresolved and each target stays
+                // dynamic, which is correct and merely unspecialised.
+                if targets.len() > 1 && values.len() == 1 {
+                    let t = self.check_expr(&values[0]);
+                    for target in targets {
+                        self.bind_target(target, t.clone(), &values[0], *span);
+                    }
+                    return;
+                }
+                if targets.len() != values.len() {
+                    self.err(
+                        *span,
+                        format!("{} targets but {} values", targets.len(), values.len()),
+                    );
+                    return;
+                }
+                for (target, value) in targets.iter().zip(values.iter()) {
+                    let t = self.check_expr(value);
+                    self.bind_target(target, t, value, *span);
+                }
+            }
+            Stmt::Del { targets, span } => {
+                for target in targets {
+                    match target {
+                        Target::Name(name) => {
+                            if self.vars.remove(name).is_none() {
+                                self.err(*span, format!("undefined variable '{name}'"));
+                            }
+                            self.task_bound.insert(name.clone());
+                        }
+                        Target::Index { base, index } => {
+                            let bt = self.check_expr(base);
+                            if matches!(bt, Ty::Dict(_)) {
+                                let kt = self.check_expr(index);
+                                if !matches!(kt, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
+                                    self.err(index.span(), format!("dict key must be Int, Float, Bool or Str, found {kt}"));
+                                }
+                            } else {
+                                let it = self.check_expr(index);
+                                if !matches!(it, Ty::Int | Ty::Unknown) {
+                                    self.err(index.span(), format!("index must be Int, found {it}"));
+                                }
+                                // Strings are indexable but immutable, so
+                                // there is nothing to delete from one.
+                                if matches!(bt, Ty::Str) {
+                                    self.err(base.span(), "strings are immutable".to_string());
+                                } else if !matches!(bt, Ty::List(_) | Ty::Unknown) {
+                                    self.err(base.span(), format!("cannot delete an index of {bt}"));
+                                }
+                            }
+                        }
+                        Target::Attr { base, field } => {
+                            let bt = self.check_expr(base);
+                            self.err(
+                                base.span(),
+                                format!("cannot delete field '{field}' of {bt}: fields come from a type declaration"),
+                            );
+                        }
                     }
                 }
-                self.task_bound.insert(name.clone());
-                self.define(name, t, *span);
             }
-            Stmt::AssignOp { name, op, value, span } => {
-                if let Some(outer) = &self.parallel_outer.clone() {
-                    if outer.contains(name) && !self.task_bound.contains(name) {
-                        self.err(*span, format!("cannot assign to outer local '{name}' inside parallel (use a module global)"));
-                        return;
+            Stmt::Assert { cond, message, .. } => {
+                let t = self.check_expr(cond);
+                if !matches!(t, Ty::Bool | Ty::Unknown) {
+                    self.err(cond.span(), format!("assert condition must be Bool, found {t}"));
+                }
+                self.expect_param(cond, Ty::Bool);
+                if let Some(m) = message {
+                    let mt = self.check_expr(m);
+                    if !matches!(mt, Ty::Str | Ty::Unknown) {
+                        self.err(m.span(), format!("assert message must be Str, found {mt}"));
+                    }
+                }
+            }
+            Stmt::AssignOp { target, op, value, span } => {
+                if let Target::Name(name) = target {
+                    if let Some(outer) = &self.parallel_outer.clone() {
+                        if outer.contains(name) && !self.task_bound.contains(name) {
+                            self.err(*span, format!("cannot assign to outer local '{name}' inside parallel (use a module global)"));
+                            return;
+                        }
                     }
                 }
                 let rhs = self.check_expr(value);
-                match self.vars.get(name).cloned() {
-                    None => self.err(*span, format!("undefined variable '{name}'")),
-                    Some(cur) => {
-                        if let Some(res) = arith_result(&cur, *op, &rhs) {
-                            if !compatible(&cur, &res) {
-                                self.err(*span, format!("cannot apply '{}=' of {rhs} to {cur} variable '{name}'", op.as_str()));
-                            }
-                        } else {
-                            self.err(*span, format!("operator '{}' not supported for {cur} and {rhs}", op.as_str()));
+                let label = target_label(target);
+                if let Some(cur) = self.target_ty(target, *span) {
+                    if let Some(res) = arith_result(&cur, *op, &rhs) {
+                        if !compatible(&cur, &res) {
+                            self.err(*span, format!("cannot apply '{}=' of {rhs} to {cur} {label}", op.as_str()));
                         }
+                    } else {
+                        self.err(*span, format!("operator '{}' not supported for {cur} and {rhs}", op.as_str()));
                     }
                 }
             }
@@ -293,6 +476,11 @@ impl Checker {
                     nx_ast::ForIter::Each(e) => match self.check_expr(e) {
                         Ty::List(t) => *t,
                         Ty::Str => Ty::Str,
+                        // Iterating a dict yields its keys, in insertion
+                        // order. The key type is not tracked -- keys may be
+                        // any mix of scalars -- so the loop variable stays
+                        // dynamic, which is correct and merely unspecialised.
+                        Ty::Dict(_) => Ty::Unknown,
                         Ty::Unknown => Ty::Unknown,
                         other => {
                             self.err(e.span(), format!("cannot iterate over {other}"));
@@ -465,7 +653,7 @@ impl Checker {
                     (param_tys, ret),
                 );
             }
-            Stmt::Return { value, span } => {
+            Stmt::Return { values, span } => {
                 if !self.in_function {
                     self.err(*span, "return outside function".to_string());
                     return;
@@ -474,8 +662,30 @@ impl Checker {
                     self.err(*span, "return inside parallel task is not supported".to_string());
                     return;
                 }
-                let t = value.as_ref().map(|e| self.check_expr(e)).unwrap_or(Ty::None);
-                self.returns.push(t);
+                if values.is_empty() {
+                    self.returns.push(Ty::None);
+                    return;
+                }
+                if values.len() == 1 {
+                    let t = self.check_expr(&values[0]);
+                    self.returns.push(t);
+                    return;
+                }
+                // `return a, b` produces a list, so the function's type is
+                // `List(T)`. Recording it as one entry rather than several
+                // keeps a mixed tuple (`return 1, "x"`) from being reported
+                // as an inconsistent return, while still pinning `T` when
+                // the parts agree so destructuring can stay specialised.
+                let mut elem = Ty::Unknown;
+                for v in values {
+                    let t = self.check_expr(v);
+                    elem = match elem {
+                        Ty::Unknown => t,
+                        prev if compatible(&prev, &t) && prev != Ty::Unknown => prev,
+                        _ => Ty::Unknown,
+                    };
+                }
+                self.returns.push(Ty::List(Box::new(elem)));
             }
             Stmt::Parallel { tasks, span } => {
                 if self.parallel_outer.is_some() {
@@ -616,6 +826,118 @@ impl Checker {
             Expr::Float(..) => Ty::Float,
             Expr::Bool(..) => Ty::Bool,
             Expr::Str(..) => Ty::Str,
+            Expr::NoneLit(..) => Ty::None,
+            Expr::Range { start, end, span } => {
+                let s = self.check_expr(start);
+                let e = self.check_expr(end);
+                for (t, node) in [(&s, &**start), (&e, &**end)] {
+                    if !matches!(t, Ty::Int | Ty::Unknown) {
+                        self.err(node.span(), format!("range bound must be Int, found {t}"));
+                    }
+                    self.expect_param(node, Ty::Int);
+                }
+                let _ = span;
+                // A range is a list of Ints, whatever the bounds turned out
+                // to be, so it composes with everything list-shaped.
+                Ty::List(Box::new(Ty::Int))
+            }
+            Expr::Dict(pairs, span) => {
+                // Keys must be comparable, or the dict cannot be looked up.
+                // Values may be anything; that is what makes a dict the
+                // natural heterogeneous container.
+                for (k, _) in pairs {
+                    let kt = self.check_expr(k);
+                    if !matches!(
+                        kt,
+                        Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown
+                    ) {
+                        self.err(k.span(), format!("dict key must be Int, Float, Bool or Str, found {kt}"));
+                    }
+                }
+                let _ = span;
+                Ty::Dict(Box::new(Ty::Unknown))
+            }
+            Expr::Slice { base, from, to, step, span } => {
+                let b = self.check_expr(base);
+                for part in [from, to, step].into_iter().flatten() {
+                    let t = self.check_expr(part);
+                    if !matches!(t, Ty::Int | Ty::Unknown) {
+                        self.err(part.span(), format!("slice bound must be Int, found {t}"));
+                    }
+                    self.expect_param(part, Ty::Int);
+                }
+                match b {
+                    Ty::List(_) => b,
+                    Ty::Str => Ty::Str,
+                    Ty::Unknown => Ty::Unknown,
+                    other => {
+                        self.err(*span, format!("cannot slice {other}"));
+                        Ty::Unknown
+                    }
+                }
+            }
+            Expr::IfExpr { cond, then_value, else_value, .. } => {
+                let c = self.check_expr(cond);
+                if !matches!(c, Ty::Bool | Ty::Unknown) {
+                    self.err(cond.span(), format!("condition must be Bool, found {c}"));
+                }
+                self.expect_param(cond, Ty::Bool);
+                let t = self.check_expr(then_value);
+                let e = self.check_expr(else_value);
+                if compatible(&t, &e) {
+                    if t == Ty::Unknown {
+                        e
+                    } else {
+                        t
+                    }
+                } else if t == Ty::None {
+                    // `x if c else None` is the optional idiom, so the
+                    // None branch must not be an error.
+                    e
+                } else if e == Ty::None {
+                    t
+                } else {
+                    self.err(
+                        then_value.span(),
+                        format!("branches disagree: {t} vs {e}"),
+                    );
+                    Ty::Unknown
+                }
+            }
+            Expr::Comprehension { element, var, iter, cond, span } => {
+                let it = self.check_expr(iter);
+                let elem = match it {
+                    Ty::List(t) => *t,
+                    Ty::Str => Ty::Str,
+                    Ty::Unknown => Ty::Unknown,
+                    other => {
+                        self.err(iter.span(), format!("cannot iterate over {other}"));
+                        Ty::Unknown
+                    }
+                };
+                // The loop variable is scoped to the comprehension, so it is
+                // bound here and restored after rather than leaking out and
+                // colliding with a same-named variable elsewhere.
+                let saved = self.vars.get(var).cloned();
+                self.vars.insert(var.clone(), elem);
+                if let Some(c) = cond {
+                    let ct = self.check_expr(c);
+                    if !matches!(ct, Ty::Bool | Ty::Unknown) {
+                        self.err(c.span(), format!("filter must be Bool, found {ct}"));
+                    }
+                }
+                let et = self.check_expr(element);
+                match saved {
+                    Some(t) => {
+                        self.vars.insert(var.clone(), t);
+                    }
+                    None => {
+                        self.vars.remove(var);
+                    }
+                }
+                let _ = span;
+                Ty::List(Box::new(et))
+            }
             Expr::List(items, span) => {
                 let mut elem = Ty::Unknown;
                 for it in items {
@@ -666,9 +988,25 @@ impl Checker {
             }
             Expr::Index { base, index, span } => {
                 let b = self.check_expr(base);
+                // A dict is keyed by value, so its index need not be an Int.
+                // Everything positional does, so the requirement is decided
+                // by the container rather than assumed up front.
+                if matches!(b, Ty::Dict(_)) {
+                    let ix = self.check_expr(index);
+                    if !matches!(ix, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
+                        self.err(
+                            index.span(),
+                            format!("dict key must be Int, Float, Bool or Str, found {ix}"),
+                        );
+                    }
+                    return match b {
+                        Ty::Dict(t) => *t,
+                        _ => Ty::Unknown,
+                    };
+                }
                 let ix = self.check_expr(index);
                 if !matches!(ix, Ty::Int | Ty::Unknown) {
-                    self.err(*span, format!("index must be Int, found {ix}"));
+                    self.err(index.span(), format!("index must be Int, found {ix}"));
                 }
                 self.expect_param(index, Ty::Int);
                 match b {
@@ -676,7 +1014,7 @@ impl Checker {
                     Ty::Str => Ty::Str,
                     Ty::Unknown => Ty::Unknown,
                     other => {
-                        self.err(*span, format!("only lists and strings support indexing, found {other}"));
+                        self.err(*span, format!("only lists, strings and dicts support indexing, found {other}"));
                         Ty::Unknown
                     }
                 }
@@ -689,6 +1027,13 @@ impl Checker {
                     (UnaryOp::Neg, Ty::Unknown) => Ty::Unknown,
                     (UnaryOp::Not, Ty::Bool) => Ty::Bool,
                     (UnaryOp::Not, Ty::Unknown) => Ty::Unknown,
+                    // `~x` complements bits, so it is Int-only. Accepting a
+                    // Float here would mean inventing a rounding rule.
+                    (UnaryOp::BitNot, Ty::Int) => Ty::Int,
+                    (UnaryOp::BitNot, Ty::Unknown) => Ty::Unknown,
+                    // Unary plus preserves the type and nothing else.
+                    (UnaryOp::Pos, Ty::Int) | (UnaryOp::Pos, Ty::Float) => t,
+                    (UnaryOp::Pos, Ty::Unknown) => Ty::Unknown,
                     _ => {
                         self.err(*span, format!("operator '{}' not supported for {t}", op.as_str()));
                         Ty::Unknown
@@ -744,6 +1089,55 @@ impl Checker {
                         }
                         Ty::Bool
                     }
+                    BinOp::In | BinOp::NotIn => {
+                        let c = self.check_expr(right);
+                        match c {
+                            Ty::List(_) | Ty::Str | Ty::Dict(_) | Ty::Unknown => {}
+                            other => {
+                                self.err(
+                                    right.span(),
+                                    format!("'{}' needs a list, string or dict on the right, found {other}", op.as_str()),
+                                );
+                            }
+                        }
+                        Ty::Bool
+                    }
+                    BinOp::Shl | BinOp::Shr => {
+                        // The shift distance is a count, not a value of the
+                        // shifted type, so it is checked separately. This is
+                        // what lets `1 << n` work when n is an Int
+                        // parameter and the left side is a literal.
+                        if !matches!(r, Ty::Int | Ty::Unknown) {
+                            self.err(right.span(), format!("shift distance must be Int, found {r}"));
+                        }
+                        self.expect_param(right, Ty::Int);
+                        if !matches!(l, Ty::Int | Ty::Unknown) {
+                            self.err(*span, format!("operator '{}' needs Int on the left, found {l}", op.as_str()));
+                        }
+                        Ty::Int
+                    }
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                        for (side, t) in [("left", &l), ("right", &r)] {
+                            if !matches!(t, Ty::Int | Ty::Unknown) {
+                                self.err(
+                                    *span,
+                                    format!("'{0}' operand of '{1}' must be Int, found {t}", side, op.as_str()),
+                                );
+                            }
+                        }
+                        Ty::Int
+                    }
+                    BinOp::FloorDiv | BinOp::Mod | BinOp::Pow => {
+                        self.mark_numeric(left);
+                        self.mark_numeric(right);
+                        match arith_result(&l, *op, &r) {
+                            Some(t) => t,
+                            None => {
+                                self.err(*span, format!("operator '{}' not supported for {l} and {r}", op.as_str()));
+                                Ty::Unknown
+                            }
+                        }
+                    }
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         if matches!(op, BinOp::Add)
                             && (l == Ty::Str || r == Ty::Str)
@@ -773,8 +1167,8 @@ impl Checker {
                             return Ty::Unknown;
                         }
                         let t = self.check_expr(&args[0]);
-                        if !matches!(t, Ty::List(_) | Ty::Str | Ty::Unknown) {
-                            self.err(*span, format!("len() only supports lists and strings, found {t}"));
+                        if !matches!(t, Ty::List(_) | Ty::Str | Ty::Dict(_) | Ty::Unknown) {
+                            self.err(*span, format!("len() only supports lists, strings and dicts, found {t}"));
                         }
                         return Ty::Int;
                     }
@@ -839,11 +1233,20 @@ impl Checker {
 
 fn arith_result(l: &Ty, op: BinOp, r: &Ty) -> Option<Ty> {
     use Ty::*;
-    // v0 operator matrix (mirrors the interpreter).
+    // Operator result matrix (mirrors the interpreter).
     if matches!(op, BinOp::Add) {
         if matches!((l, r), (Str, Str)) {
             return Some(Str);
         }
+    }
+    // The integral-only operators never widen to Float: `7 % 2.0` is a
+    // mistake worth reporting rather than papering over.
+    if op.is_bitwise() || matches!(op, BinOp::Mod | BinOp::FloorDiv) {
+        return match (l, r) {
+            (Unknown, _) | (_, Unknown) => Some(Unknown),
+            (Int, Int) => Some(Int),
+            _ => Option::None,
+        };
     }
     match (l, r) {
         (Unknown, _) | (_, Unknown) => Some(Unknown),
@@ -931,12 +1334,78 @@ impl Default for Checker {
     }
 }
 
+/// Names bound inside an expression, which only happens in a comprehension
+/// or one part of a multiple assignment. Walks just enough of the tree to
+/// find a `for` loop variable.
+fn collect_assigned_expr(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Comprehension { element, var, iter, cond, .. } => {
+            out.insert(var.clone());
+            collect_assigned_expr(element, out);
+            collect_assigned_expr(iter, out);
+            if let Some(c) = cond {
+                collect_assigned_expr(c, out);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            collect_assigned_expr(base, out);
+            collect_assigned_expr(index, out);
+        }
+        Expr::Attr { base, .. } => collect_assigned_expr(base, out),
+        Expr::Slice { base, from, to, step, .. } => {
+            collect_assigned_expr(base, out);
+            for part in [from, to, step].into_iter().flatten() {
+                collect_assigned_expr(part, out);
+            }
+        }
+        Expr::Unary { expr, .. } => collect_assigned_expr(expr, out),
+        Expr::Binary { left, right, .. } => {
+            collect_assigned_expr(left, out);
+            collect_assigned_expr(right, out);
+        }
+        Expr::IfExpr { cond, then_value, else_value, .. } => {
+            collect_assigned_expr(cond, out);
+            collect_assigned_expr(then_value, out);
+            collect_assigned_expr(else_value, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_assigned_expr(callee, out);
+            for a in args {
+                collect_assigned_expr(a, out);
+            }
+        }
+        Expr::List(items, _) => {
+            for i in items {
+                collect_assigned_expr(i, out);
+            }
+        }
+        Expr::Dict(pairs, _) => {
+            for (k, v) in pairs {
+                collect_assigned_expr(k, out);
+                collect_assigned_expr(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// All assigned names in a body (for parallel outer-scope computation).
 fn collect_assigned(body: &[Stmt], out: &mut HashSet<String>) {
     for s in body {
         match s {
-            Stmt::Assign { name, .. } => {
-                out.insert(name.clone());
+            Stmt::Assign { targets, .. } => {
+                for target in targets {
+                    match target {
+                        Target::Name(n) => {
+                            out.insert(n.clone());
+                        }
+                        // `a[i] = v` reads `a`, so `a` has to be treated as
+                        // bound by the enclosing scope.
+                        Target::Index { base, .. } | Target::Attr { base, .. } => {
+                            collect_assigned_expr(base, out)
+                        }
+                    }
+                }
             }
             Stmt::For { var, body, .. } => {
                 out.insert(var.clone());
@@ -974,6 +1443,166 @@ mod tests {
 
     fn err(src: &str) -> Vec<CheckError> {
         check_source(src, std::path::Path::new(".")).expect_err("expected type errors")
+    }
+
+    // ---- Stage 1 ----
+
+    #[test]
+    fn new_operators_type_check() {
+        ok("x = 7 % 3\ny = x // 2\nz = y ** 2\n");
+        ok("x = 7 & 3\nx = x | 1\nx = x ^ 1\nx = x << 2\nx = x >> 1\nx = ~x\n");
+        ok("x = 2 ** 0.5\nprint(x)\n");
+    }
+
+    /// `%`, `//` and the bitwise operators are Int-only. Widening them to
+    /// Float would mean inventing a rounding rule for `7 % 2.5`, so they
+    /// are refused instead.
+    #[test]
+    fn integral_operators_reject_floats() {
+        assert!(!err("x = 7 % 2.5\n").is_empty());
+        assert!(!err("x = 7 // 2.5\n").is_empty());
+        assert!(!err("x = 7 & 2.5\n").is_empty());
+        // The shift distance is a count, so it is Int even though the
+        // shifted value could be anything integral.
+        assert!(!err("x = 1 << 2.5\n").is_empty());
+    }
+
+    #[test]
+    fn membership_type_checks() {
+        ok("xs = [1, 2, 3]\nprint(1 in xs)\nprint(1 not in xs)\n");
+        ok("print(\"a\" in \"abc\")\n");
+        ok("d = {\"a\": 1}\nprint(\"a\" in d)\n");
+        assert!(!err("print(1 in 5)\n").is_empty());
+    }
+
+    #[test]
+    fn ternary_branches_must_agree() {
+        ok("x = 1 if true else 2\n");
+        // `None` is the optional idiom, so it is allowed to disagree.
+        ok("x = 1 if true else None\n");
+        ok("x = None if true else 1\n");
+        assert!(!err("x = 1 if true else \"a\"\n").is_empty());
+        assert!(!err("x = 1 if 5 else 2\n").is_empty());
+    }
+
+    #[test]
+    fn indexed_assignment_checks_element_type() {
+        ok("xs = [1, 2, 3]\nxs[0] = 9\n");
+        // A List(Int) must not be handed a String by a plain assignment.
+        let es = err("xs = [1, 2, 3]\nxs[0] = \"a\"\n");
+        assert!(es.iter().any(|e| e.message.contains("cannot store")), "{es:?}");
+        assert!(!err("xs = [1, 2, 3]\nxs[0.5] = 9\n").is_empty());
+        assert!(!err("xs = [1, 2, 3]\nxs[0] += \"a\"\n").is_empty());
+    }
+
+    #[test]
+    fn dict_index_uses_value_keys() {
+        ok("d = {\"a\": 1}\nd[\"b\"] = 2\nprint(d[\"a\"])\n");
+        // A dict is keyed by value, so a String key is fine where a
+        // positional index would have to be an Int.
+        ok("d = {1: \"a\", 2.5: \"b\", true: \"c\"}\nprint(d[1])\n");
+        assert!(!err("d = {\"a\": 1}\nprint(d[[1]])\n").is_empty());
+    }
+
+    #[test]
+    fn dict_keys_must_be_scalar() {
+        assert!(!err("d = {[[1]]: 2}\n").is_empty());
+        // Values may be anything -- that is how a dict carries
+        // heterogeneity on purpose.
+        ok("d = {\"a\": [1, 2], \"b\": \"x\"}\n");
+    }
+
+    #[test]
+    fn multiple_assignment_shape_is_checked() {
+        ok("a, b = 1, 2\n");
+        ok("fn f():\n    return 1, 2\na, b = f()\n");
+        // Two targets against one value is destructuring, which the
+        // interpreter resolves at runtime; one target against two values
+        // is a shape error.
+        assert!(!err("a = 1, 2\n").is_empty());
+    }
+
+    /// A mixed tuple keeps the function's type usable rather than being
+    /// reported as an inconsistent return.
+    #[test]
+    fn mixed_tuple_return_is_allowed() {
+        ok("fn f():\n    return 1, \"a\"\nx, y = f()\nprint(x)\n");
+    }
+
+    /// `None` must not pin a variable or conflict with one, so the
+    /// `x = 1` / `x = None` / `x = 2` pattern works.
+    #[test]
+    fn none_does_not_pin_or_conflict() {
+        ok("x = 1\nx = None\nx = 2\nprint(x)\n");
+        ok("x = None\nx = 5\n");
+        ok("x = \"a\"\nx = None\n");
+    }
+
+    #[test]
+    fn comprehension_scopes_its_variable() {
+        // The loop variable is bound inside the comprehension, so a
+        // same-named outer binding is neither read nor clobbered.
+        ok("i = 99\nxs = [i for i in 0..3]\nprint(i)\n");
+        ok("xs = [i * 2 for i in 0..5 if i > 1]\n");
+        ok("i = \"a\"\nxs = [i for i in 0..3]\nprint(i)\n");
+        // A filter must be a Bool, and the source must be iterable.
+        assert!(!err("xs = [i for i in 0..3 if i]\n").is_empty());
+        assert!(!err("xs = [i for i in 5]\n").is_empty());
+    }
+
+    #[test]
+    fn slice_bounds_must_be_int() {
+        ok("xs = [1, 2, 3]\nprint(xs[1:2])\nprint(xs[:2])\nprint(xs[::2])\n");
+        // Slicing a string is legal and yields a string.
+        ok("s = \"abc\"\nprint(s[0:1])\n");
+        assert!(!err("xs = [1, 2, 3]\nprint(xs[1.5:])\n").is_empty());
+        assert!(!err("print(5[0:1])\n").is_empty());
+    }
+
+    #[test]
+    fn range_bounds_must_be_int() {
+        ok("for i in 0..5:\n    print(i)\n");
+        ok("xs = [i for i in 0..5]\n");
+        ok("xs = 0..5\n");
+        assert!(!err("for i in 0.0..5:\n    print(i)\n").is_empty());
+    }
+
+    #[test]
+    fn assert_and_del_type_check() {
+        ok("assert 1 < 2\nassert 1 < 2, \"nope\"\n");
+        assert!(!err("assert 1\n").is_empty());
+        assert!(!err("assert true, 5\n").is_empty());
+        ok("xs = [1, 2]\ndel xs[0]\n");
+        assert!(!err("s = \"ab\"\ndel s[0]\n").is_empty());
+        assert!(!err("del never_defined\n").is_empty());
+    }
+
+    #[test]
+    fn iterating_a_dict_yields_keys() {
+        ok("d = {\"a\": 1}\nfor k in d:\n    print(k)\n");
+        // A dict's keys may be any mix of scalars, so the loop variable
+        // is unresolved rather than guessed at.
+        ok("d = {\"a\": 1}\nfor k in d:\n    k = 5\n    print(k)\n");
+        assert!(!err("for k in 5:\n    print(k)\n").is_empty());
+    }
+
+    /// Strings are immutable, so assigning into one is refused even
+    /// though indexing a string is fine.
+    #[test]
+    fn strings_are_immutable() {
+        let es = err("s = \"ab\"\ns[0] = \"z\"\n");
+        assert!(es.iter().any(|e| e.message.contains("immutable")), "{es:?}");
+    }
+
+    #[test]
+    fn field_assignment_needs_a_type_declaration() {
+        // Records do not exist yet, so the message has to say where they
+        // come from rather than just failing.
+        let es = err("p = {}\np.x = 1\n");
+        assert!(
+            es.iter().any(|e| e.message.contains("type declaration")),
+            "{es:?}"
+        );
     }
 
     #[test]
@@ -1154,5 +1783,28 @@ mod tests {
         // Once widened, a later known assignment must not re-narrow.
         let m = infer("fn f(xs):\n    t = 0\n    for x in xs:\n        t = t + x\n    t = 5\n    return t\n");
         assert_eq!(m[&("__main__".into(), "f".into())].locals["t"], Ty::Unknown);
+    }
+}
+
+/// What an assignment target refers to, for error messages. Reads as
+/// `variable 'n'` or `element of 'xs'`, which is the wording the
+/// diagnostics have always used for a name.
+fn target_label(target: &Target) -> String {
+    match target {
+        Target::Name(n) => format!("variable '{n}'"),
+        Target::Index { base, .. } => format!("element of {}", expr_label(base)),
+        Target::Attr { base, field } => format!("field '{field}' of {}", expr_label(base)),
+    }
+}
+
+/// Short human-readable rendering of an expression, for diagnostics only.
+fn expr_label(e: &Expr) -> String {
+    match e {
+        Expr::Var(n, _) => format!("'{n}'"),
+        Expr::Call { callee, .. } => match &**callee {
+            Expr::Var(n, _) => format!("'{n}'"),
+            _ => "expression".to_string(),
+        },
+        _ => "expression".to_string(),
     }
 }

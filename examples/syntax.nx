@@ -1,0 +1,106 @@
+# Every Stage 1 addition in one program.
+#
+# This file exists to be run through both the interpreter and the native
+# compiler and compared byte for byte, so it is the differential test for
+# the whole new surface. Anything that behaves differently on the two
+# paths shows up here rather than in a user's program.
+
+# --- operators -------------------------------------------------------
+print(7 % 3)          # 1
+print(-7 % 3)         # 2   remainder takes the sign of the divisor
+print(7 % -3)         # -2
+print(-7 // 3)        # -3  floor, not truncation
+print(2 ** 10)        # 1024
+print(2 ** 0.5)       # 1.4142135623731
+print(6 & 3, 6 | 3, 6 ^ 3)
+print(~6, 1 << 10, 1024 >> 3)
+
+x = 17
+x %= 5
+x **= 2
+x <<= 2
+print(x)
+
+# --- literals --------------------------------------------------------
+print(1_000_000, 0xff, 0o17, 0b1011)
+print(1e3, 2.5e-3)
+print(0..5)
+
+# --- membership ------------------------------------------------------
+xs = [1, 2, 3]
+print(2 in xs, 9 in xs, 2 not in xs)
+print("ell" in "hello", "zz" in "hello")
+
+# --- conditional expression -----------------------------------------
+n = 5
+print("big" if n > 3 else "small")
+
+# --- assignment targets ----------------------------------------------
+data = [1, 2, 3]
+data[0] = 10
+data[2] += 5
+print(data)
+
+grid = [[0, 0], [0, 0]]
+grid[1][0] = 7
+print(grid)
+
+a = 1
+b = 2
+a, b = b, a
+print(a, b)
+
+fn minmax(v, w):
+    if v < w:
+        return v, w
+    return w, v
+
+lo, hi = minmax(9, 4)
+print(lo, hi)
+
+# --- comprehensions ---------------------------------------------------
+print([i * i for i in 0..5])
+print([i for i in 0..6 if i % 2 == 0])
+print([c for c in "abc"])
+
+# --- slices ----------------------------------------------------------
+xs = [0, 1, 2, 3, 4, 5]
+print(xs[1:4])
+print(xs[:2])
+print(xs[3:])
+print(xs[::2])
+print(xs[-2:])
+print("hello"[1:4])
+
+# --- dicts -----------------------------------------------------------
+d = {}
+d["z"] = 1
+d["a"] = 2
+d["m"] = 3
+d["z"] = 9
+print(d)
+print(d["a"], len(d), "a" in d, "q" in d)
+del d["a"]
+print(d)
+
+counts = {"apple": 3, "pear": 1}
+for word in counts:
+    print(word, counts[word])
+
+# --- del and assert ---------------------------------------------------
+xs = [1, 2, 3]
+del xs[1]
+print(xs)
+
+assert len(xs) == 2
+assert len(xs) == 2, "length changed"
+print("assert ok")
+
+# --- None ------------------------------------------------------------
+x = None
+print(x)
+
+# `None` is distinct from a missing key, which is what makes it usable
+# as an optional marker.
+lookup = {"a": 1}
+print("a" in lookup, "b" in lookup)

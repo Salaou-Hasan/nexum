@@ -16,8 +16,25 @@ pub enum TokenKind {
     MinusEq,
     Star,
     StarEq,
+    StarStar,
+    StarStarEq,
     Slash,
     SlashEq,
+    SlashSlash,
+    SlashSlashEq,
+    Percent,
+    PercentEq,
+    Amp,
+    AmpEq,
+    Pipe,
+    PipeEq,
+    Caret,
+    CaretEq,
+    Tilde,
+    Shl,
+    ShlEq,
+    Shr,
+    ShrEq,
     Equals,
     EqEq,
     Bang,
@@ -50,6 +67,13 @@ pub enum TokenKind {
     Dedent,
     Dot,
     DotDot,
+    LBrace,
+    RBrace,
+    /// `None`, the unit value. Distinct from an empty list and from a
+    /// missing key, which is what makes it useful for optionals.
+    None,
+    Del,
+    Assert,
     Eof,
 }
 
@@ -71,6 +95,9 @@ fn keyword_kind(lexeme: &str) -> Option<TokenKind> {
         "parallel" => Some(TokenKind::Parallel),
         "true" => Some(TokenKind::True),
         "false" => Some(TokenKind::False),
+        "None" => Some(TokenKind::None),
+        "del" => Some(TokenKind::Del),
+        "assert" => Some(TokenKind::Assert),
         "and" => Some(TokenKind::And),
         "or" => Some(TokenKind::Or),
         "not" => Some(TokenKind::Not),
@@ -305,21 +332,103 @@ impl Lexer {
                 }
                 Some('*') => {
                     self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        tokens.push(Token { kind: TokenKind::StarEq, lexeme: "*=".to_string(), line, col });
-                    } else {
-                        tokens.push(Token { kind: TokenKind::Star, lexeme: "*".to_string(), line, col });
+                    match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            tokens.push(Token { kind: TokenKind::StarEq, lexeme: "*=".to_string(), line, col });
+                        }
+                        Some('*') => {
+                            self.advance();
+                            if self.peek() == Some('=') {
+                                self.advance();
+                                tokens.push(Token {
+                                    kind: TokenKind::StarStarEq,
+                                    lexeme: "**=".to_string(),
+                                    line,
+                                    col,
+                                });
+                            } else {
+                                tokens.push(Token {
+                                    kind: TokenKind::StarStar,
+                                    lexeme: "**".to_string(),
+                                    line,
+                                    col,
+                                });
+                            }
+                        }
+                        _ => tokens.push(Token { kind: TokenKind::Star, lexeme: "*".to_string(), line, col }),
                     }
                 }
                 Some('/') => {
                     self.advance();
+                    match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            tokens.push(Token { kind: TokenKind::SlashEq, lexeme: "/=".to_string(), line, col });
+                        }
+                        // `//` is floor division. A comment is `#`, so there
+                        // is no ambiguity with a line comment here.
+                        Some('/') => {
+                            self.advance();
+                            if self.peek() == Some('=') {
+                                self.advance();
+                                tokens.push(Token {
+                                    kind: TokenKind::SlashSlashEq,
+                                    lexeme: "//=".to_string(),
+                                    line,
+                                    col,
+                                });
+                            } else {
+                                tokens.push(Token {
+                                    kind: TokenKind::SlashSlash,
+                                    lexeme: "//".to_string(),
+                                    line,
+                                    col,
+                                });
+                            }
+                        }
+                        _ => tokens.push(Token { kind: TokenKind::Slash, lexeme: "/".to_string(), line, col }),
+                    }
+                }
+                Some('%') => {
+                    self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::SlashEq, lexeme: "/=".to_string(), line, col });
+                        tokens.push(Token { kind: TokenKind::PercentEq, lexeme: "%=".to_string(), line, col });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Slash, lexeme: "/".to_string(), line, col });
+                        tokens.push(Token { kind: TokenKind::Percent, lexeme: "%".to_string(), line, col });
                     }
+                }
+                Some('&') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        tokens.push(Token { kind: TokenKind::AmpEq, lexeme: "&=".to_string(), line, col });
+                    } else {
+                        tokens.push(Token { kind: TokenKind::Amp, lexeme: "&".to_string(), line, col });
+                    }
+                }
+                Some('|') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        tokens.push(Token { kind: TokenKind::PipeEq, lexeme: "|=".to_string(), line, col });
+                    } else {
+                        tokens.push(Token { kind: TokenKind::Pipe, lexeme: "|".to_string(), line, col });
+                    }
+                }
+                Some('^') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        tokens.push(Token { kind: TokenKind::CaretEq, lexeme: "^=".to_string(), line, col });
+                    } else {
+                        tokens.push(Token { kind: TokenKind::Caret, lexeme: "^".to_string(), line, col });
+                    }
+                }
+                Some('~') => {
+                    self.advance();
+                    tokens.push(Token { kind: TokenKind::Tilde, lexeme: "~".to_string(), line, col });
                 }
                 Some('!') => {
                     self.advance();
@@ -332,21 +441,62 @@ impl Lexer {
                 }
                 Some('<') => {
                     self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        tokens.push(Token { kind: TokenKind::LtEq, lexeme: "<=".to_string(), line, col });
-                    } else {
-                        tokens.push(Token { kind: TokenKind::Lt, lexeme: "<".to_string(), line, col });
+                    // `<<` and `<<=` must be tried before `<=`, and `<`
+                    // stays a comparison, so there is no `<<=`/`<<`/`<=`
+                    // overlap: the second character decides.
+                    match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            tokens.push(Token { kind: TokenKind::LtEq, lexeme: "<=".to_string(), line, col });
+                        }
+                        Some('<') => {
+                            self.advance();
+                            if self.peek() == Some('=') {
+                                self.advance();
+                                tokens.push(Token {
+                                    kind: TokenKind::ShlEq,
+                                    lexeme: "<<=".to_string(),
+                                    line,
+                                    col,
+                                });
+                            } else {
+                                tokens.push(Token { kind: TokenKind::Shl, lexeme: "<<".to_string(), line, col });
+                            }
+                        }
+                        _ => tokens.push(Token { kind: TokenKind::Lt, lexeme: "<".to_string(), line, col }),
                     }
                 }
                 Some('>') => {
                     self.advance();
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        tokens.push(Token { kind: TokenKind::GtEq, lexeme: ">=".to_string(), line, col });
-                    } else {
-                        tokens.push(Token { kind: TokenKind::Gt, lexeme: ">".to_string(), line, col });
+                    match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            tokens.push(Token { kind: TokenKind::GtEq, lexeme: ">=".to_string(), line, col });
+                        }
+                        Some('>') => {
+                            self.advance();
+                            if self.peek() == Some('=') {
+                                self.advance();
+                                tokens.push(Token {
+                                    kind: TokenKind::ShrEq,
+                                    lexeme: ">>=".to_string(),
+                                    line,
+                                    col,
+                                });
+                            } else {
+                                tokens.push(Token { kind: TokenKind::Shr, lexeme: ">>".to_string(), line, col });
+                            }
+                        }
+                        _ => tokens.push(Token { kind: TokenKind::Gt, lexeme: ">".to_string(), line, col }),
                     }
+                }
+                Some('{') => {
+                    self.advance();
+                    tokens.push(Token { kind: TokenKind::LBrace, lexeme: "{".to_string(), line, col });
+                }
+                Some('}') => {
+                    self.advance();
+                    tokens.push(Token { kind: TokenKind::RBrace, lexeme: "}".to_string(), line, col });
                 }
                 Some('.') => {
                     let next = self.chars.get(self.pos + 1).copied();
@@ -405,22 +555,94 @@ impl Lexer {
         s
     }
 
+    /// Lex a numeric literal.
+    ///
+    /// Underscores are allowed as digit separators (`1_000_000`) and are
+    /// stripped here, so every consumer sees a plain digit string. Beyond
+    /// decimal there are `0x` hex, `0o` octal and `0b` binary, and floats
+    /// accept an exponent (`1e10`, `2.5e-3`).
     fn lex_number(&mut self) -> (String, TokenKind) {
-        let mut s = String::new();
-        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-            s.push(self.advance().unwrap());
+        // Radix prefixes. The digits after 0x/0o/0b are not decimal, so
+        // they are collected separately and marked by the kind.
+        if self.peek() == Some('0') {
+            let marker = self.chars.get(self.pos + 1).copied();
+            let radix = match marker {
+                Some('x') | Some('X') => Some(16u32),
+                Some('o') | Some('O') => Some(8u32),
+                Some('b') | Some('B') => Some(2u32),
+                _ => None,
+            };
+            if let Some(radix) = radix {
+                self.advance();
+                self.advance();
+                let mut digits = String::new();
+                while matches!(self.peek(), Some(c) if c.is_digit(radix) || c == '_') {
+                    let c = self.advance().unwrap();
+                    if c != '_' {
+                        digits.push(c);
+                    }
+                }
+                if digits.is_empty() {
+                    return ("0".to_string(), TokenKind::Int);
+                }
+                // Decode to decimal here so the parser only ever sees a
+                // plain integer. On overflow the digits pass through
+                // unchanged and the parser reports the range error.
+                return match i64::from_str_radix(&digits, radix) {
+                    Ok(v) => (v.to_string(), TokenKind::Int),
+                    Err(_) => (digits, TokenKind::Int),
+                };
+            }
         }
+
+        let mut s = String::new();
+        let mut is_float = false;
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == '_') {
+            let c = self.advance().unwrap();
+            if c != '_' {
+                s.push(c);
+            }
+        }
+        // A `.` starts a fraction only when a digit follows, so `1..n`
+        // still lexes as a range.
         if self.peek() == Some('.') {
             let after_dot = self.chars.get(self.pos + 1).copied();
             if matches!(after_dot, Some(c) if c.is_ascii_digit()) {
+                is_float = true;
                 s.push(self.advance().unwrap());
-                while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
-                    s.push(self.advance().unwrap());
+                while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == '_') {
+                    let c = self.advance().unwrap();
+                    if c != '_' {
+                        s.push(c);
+                    }
                 }
-                return (s, TokenKind::Float);
             }
         }
-        (s, TokenKind::Int)
+        // Exponent, with an optional sign. `1e10` is a float; a lone `e`
+        // is not part of a number, so this only fires when digits follow.
+        if matches!(self.peek(), Some('e') | Some('E')) {
+            let digit_ok = match self.chars.get(self.pos + 1).copied() {
+                Some(c) if c.is_ascii_digit() => true,
+                Some('+') | Some('-') => {
+                    matches!(self.chars.get(self.pos + 2).copied(), Some(d) if d.is_ascii_digit())
+                }
+                _ => false,
+            };
+            if digit_ok {
+                is_float = true;
+                s.push(self.advance().unwrap());
+                if matches!(self.peek(), Some('+') | Some('-')) {
+                    s.push(self.advance().unwrap());
+                }
+                while matches!(self.peek(), Some(c) if c.is_ascii_digit() || c == '_') {
+                    let c = self.advance().unwrap();
+                    if c != '_' {
+                        s.push(c);
+                    }
+                }
+            }
+        }
+        (s, if is_float { TokenKind::Float } else { TokenKind::Int })
     }
 
     fn lex_string(&mut self) -> Result<String, LexError> {
@@ -570,6 +792,115 @@ mod tests {
         let toks = lex("x = 1 # it's a \"test\" ###").unwrap();
         assert!(toks.iter().any(|t| t.lexeme == "x"));
         assert_eq!(toks.iter().filter(|t| t.kind == TokenKind::Ident).count(), 1);
+    }
+
+    /// Every operator must lex as exactly one token. A two-character form
+    /// splitting in two would turn `a ** b` into `a * (*b)` and fail much
+    /// later, in the parser, with a confusing message.
+    #[test]
+    fn operators_lex_as_single_tokens() {
+        let cases: &[(&str, TokenKind)] = &[
+            ("**", TokenKind::StarStar),
+            ("**=", TokenKind::StarStarEq),
+            ("//", TokenKind::SlashSlash),
+            ("//=", TokenKind::SlashSlashEq),
+            ("%", TokenKind::Percent),
+            ("%=", TokenKind::PercentEq),
+            ("&", TokenKind::Amp),
+            ("&=", TokenKind::AmpEq),
+            ("|", TokenKind::Pipe),
+            ("|=", TokenKind::PipeEq),
+            ("^", TokenKind::Caret),
+            ("^=", TokenKind::CaretEq),
+            ("~", TokenKind::Tilde),
+            ("<<", TokenKind::Shl),
+            ("<<=", TokenKind::ShlEq),
+            (">>", TokenKind::Shr),
+            (">>=", TokenKind::ShrEq),
+            ("{", TokenKind::LBrace),
+            ("}", TokenKind::RBrace),
+        ];
+        for (src, want) in cases {
+            let toks = lex(src).unwrap_or_else(|e| panic!("{src} failed to lex: {e:?}"));
+            let first = toks[0].kind.clone();
+            assert_eq!(first, *want, "{src} lexed as {first:?}, expected {want:?}");
+            assert_eq!(toks.len(), 2, "{src} should be one token plus Eof");
+        }
+    }
+
+    /// `<` is both a comparison and half a shift, so the two-character
+    /// forms have to be tried in the right order.
+    #[test]
+    fn shift_and_compare_do_not_collide() {
+        assert_eq!(kinds("a < b")[1], TokenKind::Lt);
+        assert_eq!(kinds("a <= b")[1], TokenKind::LtEq);
+        assert_eq!(kinds("a << b")[1], TokenKind::Shl);
+        assert_eq!(kinds("a <<= b")[1], TokenKind::ShlEq);
+        assert_eq!(kinds("a > b")[1], TokenKind::Gt);
+        assert_eq!(kinds("a >= b")[1], TokenKind::GtEq);
+        assert_eq!(kinds("a >> b")[1], TokenKind::Shr);
+        assert_eq!(kinds("a >>= b")[1], TokenKind::ShrEq);
+    }
+
+    /// `**` must win over `*`, or exponentiation becomes multiplication
+    /// followed by a dereference that does not exist.
+    #[test]
+    fn star_star_beats_star() {
+        assert_eq!(kinds("a ** b")[1], TokenKind::StarStar);
+        assert_eq!(kinds("a * b")[1], TokenKind::Star);
+    }
+
+    #[test]
+    fn underscore_separators_are_stripped() {
+        let toks = lex("x = 1_000_000").unwrap();
+        let lit = toks.iter().find(|t| t.kind == TokenKind::Int).unwrap();
+        assert_eq!(lit.lexeme, "1000000");
+    }
+
+    #[test]
+    fn radix_prefixes_decode_to_decimal() {
+        for (src, want) in [
+            ("0xff", "255"),
+            ("0o17", "15"),
+            ("0b1011", "11"),
+            ("0xFF", "255"),
+            ("0b1010_1010", "170"),
+        ] {
+            let toks = lex(&format!("x = {src}")).unwrap();
+            let lit = toks.iter().find(|t| t.kind == TokenKind::Int).unwrap();
+            assert_eq!(lit.lexeme, want, "{src} decoded wrong");
+        }
+    }
+
+    #[test]
+    fn exponent_literals_are_floats() {
+        for src in ["1e10", "2.5e3", "1E-4", "7e+2"] {
+            let toks = lex(&format!("x = {src}")).unwrap();
+            assert!(
+                toks.iter().any(|t| t.kind == TokenKind::Float),
+                "{src} should be a float"
+            );
+        }
+    }
+
+    /// `1..n` is a range, so a `.` only starts a fraction when a digit
+    /// follows it.
+    #[test]
+    fn range_is_not_a_float() {
+        let toks = lex("for i in 1..5:").unwrap();
+        assert!(toks.iter().any(|t| t.kind == TokenKind::DotDot));
+        assert!(
+            !toks.iter().any(|t| t.kind == TokenKind::Float),
+            "1..5 must not lex as a float"
+        );
+    }
+
+    #[test]
+    fn none_is_a_keyword() {
+        // `x = None` lexes as Ident, Equals, None.
+        assert_eq!(kinds("x = None")[2], TokenKind::None);
+        // Still a normal identifier, so a prefix does not shadow it.
+        assert_eq!(kinds("x = NoneOf")[2], TokenKind::Ident);
     }
 
     #[test]

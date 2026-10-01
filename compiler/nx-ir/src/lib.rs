@@ -179,8 +179,12 @@ impl Env {
                         );
                     }
                 }
-                Stmt::Assign { name, .. } => {
-                    env.bound.insert(name.clone());
+                Stmt::Assign { targets, .. } => {
+                    for t in targets {
+                        if let nx_ast::Target::Name(n) = t {
+                            env.bound.insert(n.clone());
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -223,8 +227,12 @@ fn index_fns(
 fn assigned(body: &[Stmt], out: &mut HashSet<String>) {
     for s in body {
         match s {
-            Stmt::Assign { name, .. } => {
-                out.insert(name.clone());
+            Stmt::Assign { targets, .. } => {
+                for t in targets {
+                    if let nx_ast::Target::Name(n) = t {
+                        out.insert(n.clone());
+                    }
+                }
             }
             Stmt::For { var, body, .. } => {
                 out.insert(var.clone());
@@ -276,8 +284,12 @@ fn module_globals(programs: &HashMap<String, Program>, module: &str) -> HashSet<
 fn top_assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
     for s in stmts {
         match s {
-            Stmt::Assign { name, .. } => {
-                out.insert(name.clone());
+            Stmt::Assign { targets, .. } => {
+                for t in targets {
+                    if let nx_ast::Target::Name(n) = t {
+                        out.insert(n.clone());
+                    }
+                }
             }
             Stmt::For { var, .. } => {
                 out.insert(var.clone());
@@ -338,19 +350,37 @@ fn stmts(scope: &Scope, body: &[Stmt], out: &mut Summary) {
 fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
     let module = scope.module;
     match s {
-        Stmt::Assign { name, value, .. } => {
-            expr(scope, value, out);
-            if scope.is_shared(name) {
-                out.writes.insert((module.to_string(), name.clone()));
+        Stmt::Assign { targets, values, .. } => {
+            // Every value is evaluated, whichever target it lands in.
+            for v in values {
+                expr(scope, v, out);
+            }
+            // `a[i] = v` writes into a container rather than binding a
+            // name, so it is not a shared-name write. Reads of the
+            // container still show up through the value expressions.
+            for t in targets {
+                if let nx_ast::Target::Name(name) = t {
+                    if scope.is_shared(name) {
+                        out.writes.insert((module.to_string(), name.clone()));
+                    }
+                }
             }
         }
-        Stmt::AssignOp { name, value, .. } => {
+        Stmt::AssignOp { target, value, .. } => {
             expr(scope, value, out);
-            if scope.locals.contains(name) {
-                // read-modify-write of a local: no shared traffic.
-            } else if scope.mglobals.contains(name) {
-                out.reads.insert((module.to_string(), name.clone()));
-                out.writes.insert((module.to_string(), name.clone()));
+            if let nx_ast::Target::Name(name) = target {
+                if scope.locals.contains(name) {
+                    // read-modify-write of a local: no shared traffic.
+                } else if scope.mglobals.contains(name) {
+                    out.reads.insert((module.to_string(), name.clone()));
+                    out.writes.insert((module.to_string(), name.clone()));
+                }
+            } else {
+                // `a[i] += v` reads and writes the container in place.
+                if let nx_ast::Target::Index { base, index } = target {
+                    expr(scope, base, out);
+                    expr(scope, index, out);
+                }
             }
         }
         Stmt::Print { values, .. } => {
@@ -387,9 +417,32 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
             stmts(&inner, body, out);
         }
         Stmt::Fn { .. } => {}
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
+        Stmt::Return { values, .. } => {
+            for e in values {
                 expr(scope, e, out);
+            }
+        }
+        Stmt::Del { targets, .. } => {
+            // Removing a name makes it unbound, so the read and write both
+            // happen -- otherwise a later use would look safe.
+            for t in targets {
+                match t {
+                    nx_ast::Target::Name(name) => {
+                        out.reads.insert((module.to_string(), name.clone()));
+                        out.writes.insert((module.to_string(), name.clone()));
+                    }
+                    nx_ast::Target::Index { base, index } => {
+                        expr(scope, base, out);
+                        expr(scope, index, out);
+                    }
+                    nx_ast::Target::Attr { base, .. } => expr(scope, base, out),
+                }
+            }
+        }
+        Stmt::Assert { cond, message, .. } => {
+            expr(scope, cond, out);
+            if let Some(m) = message {
+                expr(scope, m, out);
             }
         }
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
@@ -551,6 +604,10 @@ fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
             for it in items {
                 expr(scope, it, out);
             }
+        }
+        Expr::Range { start, end, .. } => {
+            expr(scope, start, out);
+            expr(scope, end, out);
         }
         Expr::Unary { expr: inner, .. } => expr(scope, inner, out),
         Expr::Binary { left, right, .. } => {

@@ -15,6 +15,9 @@
 
 %NxVal = type { i64, i64, i64 }
 %NxList = type { ptr, i64, i64 }
+; Dict header mirrors a list; entries are (key, value) pairs.
+%NxDict = type { ptr, i64, i64 }
+%NxDictEntry = type { %NxVal, %NxVal }
 
 declare i32 @printf(ptr, ...)
 declare void @exit(i32)
@@ -37,6 +40,9 @@ declare double @llvm.pow.f64(double, double)
 @.fmt.false = private constant [6 x i8] c"false\00"
 @.fmt.none = private constant [5 x i8] c"none\00"
 @.fmt.lb = private constant [2 x i8] c"[\00"
+@.fmt.brace_l = private constant [2 x i8] c"{\00"
+@.fmt.brace_r = private constant [2 x i8] c"}\00"
+@.fmt.colonsp = private constant [3 x i8] c": \00"
 @.fmt.rb = private constant [2 x i8] c"]\00"
 @.fmt.comma = private constant [3 x i8] c", \00"
 @.fmt.fnopen = private constant [5 x i8] c"<fn \00"
@@ -334,6 +340,7 @@ entry:
     i64 4, label %str
     i64 5, label %list
     i64 6, label %func
+    i64 7, label %dict
   ]
 none:
   call i32 (ptr, ...) @printf(ptr @.fmt.none)
@@ -391,6 +398,40 @@ lval:
   br label %lcond
 lend:
   call i32 (ptr, ...) @printf(ptr @.fmt.rb)
+  ret void
+; Dicts print in insertion order, the same order iteration yields, so a
+; program's output stays stable across runs.
+dict:
+  call i32 (ptr, ...) @printf(ptr @.fmt.brace_l)
+  %dhp = extractvalue %NxVal %v, 1
+  %dn = extractvalue %NxVal %v, 2
+  %dh = inttoptr i64 %dhp to ptr
+  %dhp2 = getelementptr %NxDict, ptr %dh, i64 0, i32 0
+  %ddata = load ptr, ptr %dhp2
+  br label %dcond
+dcond:
+  %di = phi i64 [0, %dict], [%di2, %dval]
+  %ddone = icmp eq i64 %di, %dn
+  br i1 %ddone, label %dend, label %dbody
+dbody:
+  %dsp = icmp ne i64 %di, 0
+  br i1 %dsp, label %dcomma, label %dval
+dcomma:
+  call i32 (ptr, ...) @printf(ptr @.fmt.comma)
+  br label %dval
+dval:
+  %dep = getelementptr %NxDictEntry, ptr %ddata, i64 %di
+  %dkp = getelementptr %NxDictEntry, ptr %dep, i64 0, i32 0
+  %dvp = getelementptr %NxDictEntry, ptr %dep, i64 0, i32 1
+  %dk = load %NxVal, ptr %dkp
+  %dv = load %NxVal, ptr %dvp
+  call void @nx_print_val(%NxVal %dk)
+  call i32 (ptr, ...) @printf(ptr @.fmt.colonsp)
+  call void @nx_print_val(%NxVal %dv)
+  %di2 = add i64 %di, 1
+  br label %dcond
+dend:
+  call i32 (ptr, ...) @printf(ptr @.fmt.brace_r)
   ret void
 func:
   %np = extractvalue %NxVal %v, 2
@@ -873,11 +914,19 @@ list:
   ret %NxVal %r
 c:
   %isstr = icmp eq i64 %t, 4
-  br i1 %isstr, label %str, label %bad
+  br i1 %isstr, label %str, label %c2
 str:
   %n2 = extractvalue %NxVal %v, 2
   %r2 = call %NxVal @nx_int(i64 %n2)
   ret %NxVal %r2
+c2:
+  %isdict = icmp eq i64 %t, 7
+  br i1 %isdict, label %dict, label %bad
+dict:
+  ; A dict mirrors its length in the same field a list uses.
+  %n3 = extractvalue %NxVal %v, 2
+  %r3 = call %NxVal @nx_int(i64 %n3)
+  ret %NxVal %r3
 bad:
   call void @nx_panic(ptr @.msg.type)
   unreachable
@@ -886,6 +935,19 @@ bad:
 define %NxVal @nx_index(%NxVal %b, %NxVal %ix) {
 entry:
   %it = extractvalue %NxVal %b, 0
+  ; A dict is keyed by value, so it is resolved before the index is
+  %isd = icmp eq i64 %it, 7
+  br i1 %isd, label %dict, label %pidx
+dict:
+  %dv = call %NxVal @nx_dictget(%NxVal %b, %NxVal %ix)
+  ret %NxVal %dv
+pidx:
+  ; A positional index has to be an Int; a string key would read the wrong
+  ; field of the value, so it fails rather than misbehaving quietly.
+  %vt = extractvalue %NxVal %ix, 0
+  %vi = icmp eq i64 %vt, 1
+  br i1 %vi, label %posi, label %bad
+posi:
   %i = extractvalue %NxVal %ix, 1
   %islist = icmp eq i64 %it, 5
   br i1 %islist, label %list, label %c
@@ -1276,4 +1338,947 @@ rel:
   br label %out
 out:
   ret void
+}
+
+; =====================================================================
+
+; =====================================================================
+; Stage 1: integral operators, dicts, membership, slicing.
+;
+; Tag 7 Dict is new: a = header ptr, b = len. The header reuses the
+; { data, len, cap } shape of a list, but data points at %NxDictEntry
+; (key, value) pairs instead of bare values.
+;
+; Dicts are deliberately an insertion-ordered vector rather than a hash
+; table. Iteration order is part of the determinism contract `parallel:`
+; rests on, and a hash map would make it depend on hashing. Linear lookup
+; is the right trade at the sizes a general-purpose program holds; the
+; record/type work can revisit this if measurements justify it.
+; =====================================================================
+
+@.msg.modzero = private constant [15 x i8] c"modulo by zero\00"
+@.msg.shift = private constant [28 x i8] c"shift distance out of range\00"
+@.msg.assert = private constant [17 x i8] c"assertion failed\00"
+@.msg.nokey = private constant [14 x i8] c"key not found\00"
+@.msg.step = private constant [28 x i8] c"slice step must be positive\00"
+@.msg.negexp = private constant [71 x i8] c"negative exponent on Int; use a Float exponent for a fractional result\00"
+; --- integral operators -------------------------------------------
+; `%` and `//` both need floor division, so it is factored out once.
+; `sdiv` truncates toward zero, which is wrong for negative operands;
+; the explicit correction is what makes -7 // 3 equal -3 and -7 % 3 equal
+; 2, matching the interpreter exactly. Reusing sdiv's quotient would
+; make the two disagree on half of all negative inputs.
+
+define i64 @nx_floordiv_i64(i64 %l, i64 %r) {
+entry:
+  %z = icmp eq i64 %r, 0
+  br i1 %z, label %dz, label %go
+dz:
+  call void @nx_panic(ptr @.msg.divzero)
+  unreachable
+go:
+  %q = sdiv i64 %l, %r
+  %rem = srem i64 %l, %r
+  %remz = icmp eq i64 %rem, 0
+  br i1 %remz, label %done, label %fix
+fix:
+  ; Truncation rounded the wrong way only when the operands had
+  ; opposite signs and the division was inexact.
+  %lpos = icmp sgt i64 %l, 0
+  %rpos = icmp sgt i64 %r, 0
+  %opp = xor i1 %lpos, %rpos
+  br i1 %opp, label %down, label %done
+down:
+  %q2 = sub i64 %q, 1
+  ret i64 %q2
+done:
+  ret i64 %q
+}
+
+define i64 @nx_mod_i64(i64 %l, i64 %r) {
+entry:
+  %z = icmp eq i64 %r, 0
+  br i1 %z, label %mz, label %go
+mz:
+  call void @nx_panic(ptr @.msg.modzero)
+  unreachable
+go:
+  %rem = srem i64 %l, %r
+  %rz = icmp eq i64 %rem, 0
+  br i1 %rz, label %done, label %fix
+fix:
+  %lpos = icmp sgt i64 %l, 0
+  %rpos = icmp sgt i64 %r, 0
+  %opp = xor i1 %lpos, %rpos
+  br i1 %opp, label %adj, label %done
+adj:
+  ; Take the divisor's sign, so the remainder follows the divisor.
+  %rneg = icmp slt i64 %r, 0
+  %neg = icmp slt i64 %rem, 0
+  %wrong = xor i1 %rneg, %neg
+  br i1 %wrong, label %shift, label %done
+shift:
+  %s = add i64 %rem, %r
+  ret i64 %s
+done:
+  ret i64 %rem
+}
+
+define double @nx_fpow(double %l, double %r) {
+entry:
+  %p = call double @llvm.pow.f64(double %l, double %r)
+  ret double %p
+}
+
+define i64 @nx_ipow(i64 %base, i64 %e) {
+entry:
+  ; Repeated multiplication by the base, not repeated squaring: the
+  ; exponent is already known to be at most 62 by the caller, so the
+  ; simple loop is both correct and fast enough.
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %acc = phi i64 [1, %entry], [%acc2, %body]
+  %done = icmp sge i64 %i, %e
+  br i1 %done, label %exit, label %body
+body:
+  %m = mul i64 %acc, %base
+  %acc2 = add i64 %m, 0
+  %i2 = add i64 %i, 1
+  br label %loop
+exit:
+  ret i64 %acc
+}
+
+define %NxVal @nx_mod(%NxVal %l, %NxVal %r) {
+entry:
+  %lt = extractvalue %NxVal %l, 0
+  %rt = extractvalue %NxVal %r, 0
+  %both = icmp eq i64 %lt, 1
+  %b2 = icmp eq i64 %rt, 1
+  %ok = and i1 %both, %b2
+  br i1 %ok, label %ints, label %bad
+ints:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %m = call i64 @nx_mod_i64(i64 %a, i64 %b)
+  %res = call %NxVal @nx_int(i64 %m)
+  ret %NxVal %res
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+}
+
+define %NxVal @nx_floordiv(%NxVal %l, %NxVal %r) {
+entry:
+  %lt = extractvalue %NxVal %l, 0
+  %rt = extractvalue %NxVal %r, 0
+  %both = icmp eq i64 %lt, 1
+  %b2 = icmp eq i64 %rt, 1
+  %ok = and i1 %both, %b2
+  br i1 %ok, label %ints, label %bad
+ints:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %m = call i64 @nx_floordiv_i64(i64 %a, i64 %b)
+  %res = call %NxVal @nx_int(i64 %m)
+  ret %NxVal %res
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+}
+
+define %NxVal @nx_pow(%NxVal %l, %NxVal %r) {
+entry:
+  %lt = extractvalue %NxVal %l, 0
+  %rt = extractvalue %NxVal %r, 0
+  %li = icmp eq i64 %lt, 1
+  %ri = icmp eq i64 %rt, 1
+  %both = and i1 %li, %ri
+  br i1 %both, label %ints, label %checkt
+ints:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %neg = icmp slt i64 %b, 0
+  br i1 %neg, label %negexp, label %chkbig
+chkbig:
+  ; Past 62 the result cannot fit, so saturate rather than wrap. A
+  ; saturating answer keeps a runaway loop from silently becoming a
+  ; wrong number. The bases whose power is always exactly representable
+  ; are answered exactly instead of being clamped.
+  %big = icmp sgt i64 %b, 62
+  br i1 %big, label %sat, label %small
+sat:
+  %iszero = icmp eq i64 %a, 0
+  br i1 %iszero, label %zres, label %chkunit
+zres:
+  %rz = call %NxVal @nx_int(i64 0)
+  ret %NxVal %rz
+chkunit:
+  ; (-1)**k is exact for any k, so parity decides the sign.
+  %mone = icmp eq i64 %a, -1
+  br i1 %mone, label %negparity, label %chkone
+negparity:
+  %par = and i64 %b, 1
+  %pe = icmp eq i64 %par, 0
+  %sgn = select i1 %pe, i64 1, i64 -1
+  %rp = call %NxVal @nx_int(i64 %sgn)
+  ret %NxVal %rp
+chkone:
+  %one = icmp eq i64 %a, 1
+  br i1 %one, label %ores, label %satsign
+ores:
+  %ro = call %NxVal @nx_int(i64 1)
+  ret %NxVal %ro
+satsign:
+  %aneg = icmp slt i64 %a, 0
+  %satv = select i1 %aneg, i64 -9223372036854775808, i64 9223372036854775807
+  %r2 = call %NxVal @nx_int(i64 %satv)
+  ret %NxVal %r2
+small:
+  %p = call i64 @nx_ipow(i64 %a, i64 %b)
+  %r3 = call %NxVal @nx_int(i64 %p)
+  ret %NxVal %r3
+negexp:
+  call void @nx_panic(ptr @.msg.negexp)
+  unreachable
+checkt:
+  %lf = icmp eq i64 %lt, 2
+  %rf = icmp eq i64 %rt, 2
+  %anyf = or i1 %lf, %rf
+  br i1 %anyf, label %floats, label %bad
+floats:
+  ; nx_tonum converts per side rather than bitcasting: a mixed
+  ; `2 ** 0.5` has an Int on the left, and reading its payload as float
+  ; bits would yield a denormal instead of 2.0.
+  %av = call double @nx_tonum(%NxVal %l)
+  %bv = call double @nx_tonum(%NxVal %r)
+  %pf = call double @nx_fpow(double %av, double %bv)
+  %r4 = call %NxVal @nx_float(double %pf)
+  ret %NxVal %r4
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+}
+
+define %NxVal @nx_bitand(%NxVal %l, %NxVal %r) {
+entry:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %v = and i64 %a, %b
+  %res = call %NxVal @nx_int(i64 %v)
+  ret %NxVal %res
+}
+
+define %NxVal @nx_bitor(%NxVal %l, %NxVal %r) {
+entry:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %v = or i64 %a, %b
+  %res = call %NxVal @nx_int(i64 %v)
+  ret %NxVal %res
+}
+
+define %NxVal @nx_bitxor(%NxVal %l, %NxVal %r) {
+entry:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %v = xor i64 %a, %b
+  %res = call %NxVal @nx_int(i64 %v)
+  ret %NxVal %res
+}
+
+define %NxVal @nx_shl(%NxVal %l, %NxVal %r) {
+entry:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %lo = icmp slt i64 %b, 0
+  %hi = icmp sgt i64 %b, 63
+  %bad = or i1 %lo, %hi
+  br i1 %bad, label %oob, label %ok
+ok:
+  %v = shl i64 %a, %b
+  %res = call %NxVal @nx_int(i64 %v)
+  ret %NxVal %res
+oob:
+  call void @nx_panic(ptr @.msg.shift)
+  unreachable
+}
+
+define %NxVal @nx_shr(%NxVal %l, %NxVal %r) {
+entry:
+  %a = extractvalue %NxVal %l, 1
+  %b = extractvalue %NxVal %r, 1
+  %lo = icmp slt i64 %b, 0
+  %hi = icmp sgt i64 %b, 63
+  %bad = or i1 %lo, %hi
+  br i1 %bad, label %oob, label %ok
+ok:
+  %v = ashr i64 %a, %b
+  %res = call %NxVal @nx_int(i64 %v)
+  ret %NxVal %res
+oob:
+  call void @nx_panic(ptr @.msg.shift)
+  unreachable
+}
+
+define %NxVal @nx_bitnot(%NxVal %v) {
+entry:
+  %a = extractvalue %NxVal %v, 1
+  %n = xor i64 %a, -1
+  %res = call %NxVal @nx_int(i64 %n)
+  ret %NxVal %res
+}
+
+; --- membership ----------------------------------------------------
+
+define %NxVal @nx_in(%NxVal %needle, %NxVal %hay) {
+entry:
+  %ht = extractvalue %NxVal %hay, 0
+  %isl = icmp eq i64 %ht, 5
+  br i1 %isl, label %list, label %c
+list:
+  %n = extractvalue %NxVal %hay, 2
+  br label %scan
+scan:
+  %i = phi i64 [0, %list], [%i2, %adv]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %no, label %chk
+chk:
+  %e = call %NxVal @nx_listget(%NxVal %hay, i64 %i)
+  %same = call i1 @nx_eqb(%NxVal %e, %NxVal %needle)
+  br i1 %same, label %yes, label %adv
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+c:
+  %iss = icmp eq i64 %ht, 4
+  br i1 %iss, label %str, label %d
+str:
+  %found = call %NxVal @nx_strcontains(%NxVal %hay, %NxVal %needle)
+  ret %NxVal %found
+d:
+  %isd = icmp eq i64 %ht, 7
+  br i1 %isd, label %dict, label %bad
+dict:
+  %found2 = call %NxVal @nx_dictcontains(%NxVal %hay, %NxVal %needle)
+  ret %NxVal %found2
+yes:
+  %r = call %NxVal @nx_bool(i1 true)
+  ret %NxVal %r
+no:
+  %r2 = call %NxVal @nx_bool(i1 false)
+  ret %NxVal %r2
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+}
+
+; Substring search. Byte-wise, matching how strings are stored.
+define %NxVal @nx_strcontains(%NxVal %hay, %NxVal %needle) {
+entry:
+  %t = extractvalue %NxVal %needle, 0
+  %isstr = icmp eq i64 %t, 4
+  br i1 %isstr, label %prep, label %nope
+prep:
+  %hn = extractvalue %NxVal %hay, 2
+  %nn = extractvalue %NxVal %needle, 2
+  ; An empty needle is present in any string, so `"" in s` is true.
+  %empty = icmp eq i64 %nn, 0
+  br i1 %empty, label %nope, label %chkl
+chkl:
+  %fits = icmp sgt i64 %hn, %nn
+  br i1 %fits, label %init, label %nope
+init:
+  %hp = extractvalue %NxVal %hay, 1
+  %np = extractvalue %NxVal %needle, 1
+  %hs = inttoptr i64 %hp to ptr
+  %ns = inttoptr i64 %np to ptr
+  %last = sub i64 %hn, %nn
+  br label %outer
+outer:
+  %i = phi i64 [0, %init], [%i2, %adv]
+  %over = icmp sgt i64 %i, %last
+  br i1 %over, label %nope, label %inner
+inner:
+  %j = phi i64 [0, %outer], [%j2, %icont]
+  %jdone = icmp sge i64 %j, %nn
+  br i1 %jdone, label %match, label %ichk
+ichk:
+  %hp1 = getelementptr i8, ptr %hs, i64 %i
+  %off = getelementptr i8, ptr %hp1, i64 %j
+  %c1 = load i8, ptr %off
+  %np1 = getelementptr i8, ptr %ns, i64 %j
+  %c2 = load i8, ptr %np1
+  %eq = icmp eq i8 %c1, %c2
+  br i1 %eq, label %icont, label %adv
+icont:
+  %j2 = add i64 %j, 1
+  br label %inner
+adv:
+  %i2 = add i64 %i, 1
+  br label %outer
+match:
+  %r = call %NxVal @nx_bool(i1 true)
+  ret %NxVal %r
+nope:
+  %r2 = call %NxVal @nx_bool(i1 false)
+  ret %NxVal %r2
+}
+
+define %NxVal @nx_dictcontains(%NxVal %d, %NxVal %k) {
+entry:
+  %n = extractvalue %NxVal %d, 2
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %adv]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %no, label %chk
+chk:
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
+  %key = load %NxVal, ptr %kv
+  %same = call i1 @nx_eqb(%NxVal %key, %NxVal %k)
+  br i1 %same, label %yes, label %adv
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+yes:
+  %r = call %NxVal @nx_bool(i1 true)
+  ret %NxVal %r
+no:
+  %r2 = call %NxVal @nx_bool(i1 false)
+  ret %NxVal %r2
+}
+
+; --- dicts --------------------------------------------------------
+
+define %NxVal @nx_new_dict(i64 %cap) {
+entry:
+  %c0 = icmp eq i64 %cap, 0
+  %cap2 = select i1 %c0, i64 4, i64 %cap
+  %h = call ptr @malloc(i64 24)
+  %bytes = mul i64 %cap2, 48
+  %data = call ptr @malloc(i64 %bytes)
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  store ptr %data, ptr %dp
+  %lp = getelementptr %NxDict, ptr %h, i64 0, i32 1
+  store i64 0, ptr %lp
+  %cp = getelementptr %NxDict, ptr %h, i64 0, i32 2
+  store i64 %cap2, ptr %cp
+  %hi = ptrtoint ptr %h to i64
+  %r0 = insertvalue %NxVal zeroinitializer, i64 7, 0
+  %r1 = insertvalue %NxVal %r0, i64 %hi, 1
+  %r2 = insertvalue %NxVal %r1, i64 0, 2
+  ret %NxVal %r2
+}
+
+; Linear probe. Returns true and writes the value to %out on a hit.
+define i1 @nx_dictfind(%NxVal %d, %NxVal %k, ptr %out) {
+entry:
+  %n = extractvalue %NxVal %d, 2
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %adv]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %miss, label %chk
+chk:
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
+  %key = load %NxVal, ptr %kv
+  %same = call i1 @nx_eqb(%NxVal %key, %NxVal %k)
+  br i1 %same, label %hit, label %adv
+hit:
+  %vv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 1
+  %val = load %NxVal, ptr %vv
+  store %NxVal %val, ptr %out
+  ret i1 true
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+miss:
+  ret i1 false
+}
+
+define i1 @nx_dictfindidx(%NxVal %d, %NxVal %k, ptr %outidx) {
+entry:
+  %n = extractvalue %NxVal %d, 2
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %adv]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %miss, label %chk
+chk:
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
+  %key = load %NxVal, ptr %kv
+  %same = call i1 @nx_eqb(%NxVal %key, %NxVal %k)
+  br i1 %same, label %hit, label %adv
+hit:
+  store i64 %i, ptr %outidx
+  ret i1 true
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+miss:
+  ret i1 false
+}
+
+; `vp` points at the dict value and is updated in place. An existing key
+; is overwritten where it sits, so its position in iteration order does
+; not move -- that stability is what makes repeated assignment
+; reproducible run to run.
+define void @nx_dictset(ptr %vp, %NxVal %k, %NxVal %v) {
+entry:
+  %idx = alloca i64
+  %dv = load %NxVal, ptr %vp
+  %hit = call i1 @nx_dictfindidx(%NxVal %dv, %NxVal %k, ptr %idx)
+  br i1 %hit, label %overwrite, label %append
+overwrite:
+  %i = load i64, ptr %idx
+  %hp = extractvalue %NxVal %dv, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %vv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 1
+  store %NxVal %v, ptr %vv
+  ret void
+append:
+  %hp2 = extractvalue %NxVal %dv, 1
+  %h2 = inttoptr i64 %hp2 to ptr
+  %lp = getelementptr %NxDict, ptr %h2, i64 0, i32 1
+  %len = load i64, ptr %lp
+  %cp = getelementptr %NxDict, ptr %h2, i64 0, i32 2
+  %cap = load i64, ptr %cp
+  %full = icmp eq i64 %len, %cap
+  br i1 %full, label %grow, label %put
+grow:
+  %ncap = mul i64 %cap, 2
+  %dp2 = getelementptr %NxDict, ptr %h2, i64 0, i32 0
+  %dold = load ptr, ptr %dp2
+  %nb = mul i64 %ncap, 48
+  %nd = call ptr @realloc(ptr %dold, i64 %nb)
+  store ptr %nd, ptr %dp2
+  store i64 %ncap, ptr %cp
+  br label %put
+put:
+  %dp3 = getelementptr %NxDict, ptr %h2, i64 0, i32 0
+  %data3 = load ptr, ptr %dp3
+  %ep3 = getelementptr %NxDictEntry, ptr %data3, i64 %len
+  %kv3 = getelementptr %NxDictEntry, ptr %ep3, i64 0, i32 0
+  store %NxVal %k, ptr %kv3
+  %vv3 = getelementptr %NxDictEntry, ptr %ep3, i64 0, i32 1
+  store %NxVal %v, ptr %vv3
+  %len2 = add i64 %len, 1
+  store i64 %len2, ptr %lp
+  ; The mirrored length keeps the tag-7 `b` field in step with the
+  ; header, which is what iteration and len() read.
+  %r1 = insertvalue %NxVal zeroinitializer, i64 7, 0
+  %r2 = insertvalue %NxVal %r1, i64 %hp2, 1
+  %r3 = insertvalue %NxVal %r2, i64 %len2, 2
+  store %NxVal %r3, ptr %vp
+  ret void
+}
+
+define %NxVal @nx_dictget(%NxVal %d, %NxVal %k) {
+entry:
+  %out = alloca %NxVal
+  %found = call i1 @nx_dictfind(%NxVal %d, %NxVal %k, ptr %out)
+  br i1 %found, label %yes, label %no
+yes:
+  %v = load %NxVal, ptr %out
+  ret %NxVal %v
+no:
+  call void @nx_panic(ptr @.msg.nokey)
+  unreachable
+}
+
+define %NxVal @nx_dictgetor(%NxVal %d, %NxVal %k, %NxVal %dflt) {
+entry:
+  %out = alloca %NxVal
+  %found = call i1 @nx_dictfind(%NxVal %d, %NxVal %k, ptr %out)
+  br i1 %found, label %yes, label %no
+yes:
+  %v = load %NxVal, ptr %out
+  ret %NxVal %v
+no:
+  ret %NxVal %dflt
+}
+
+define i64 @nx_dictlen(%NxVal %d) {
+entry:
+  %n = extractvalue %NxVal %d, 2
+  ret i64 %n
+}
+
+define %NxVal @nx_dictkeys(%NxVal %d) {
+entry:
+  %slot = alloca %NxVal
+  %n = extractvalue %NxVal %d, 2
+  %out = call %NxVal @nx_new_list(i64 %n)
+  store %NxVal %out, ptr %slot
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %exit, label %body
+body:
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
+  %key = load %NxVal, ptr %kv
+  call void @nx_listpush(ptr %slot, %NxVal %key)
+  %i2 = add i64 %i, 1
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+}
+
+define %NxVal @nx_dictvals(%NxVal %d) {
+entry:
+  %slot = alloca %NxVal
+  %n = extractvalue %NxVal %d, 2
+  %out = call %NxVal @nx_new_list(i64 %n)
+  store %NxVal %out, ptr %slot
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %exit, label %body
+body:
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %vv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 1
+  %val = load %NxVal, ptr %vv
+  call void @nx_listpush(ptr %slot, %NxVal %val)
+  %i2 = add i64 %i, 1
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+}
+
+; Each item is a two-element list [key, value], which is what the
+; interpreter produces too, so `for pair in d.items()` behaves the same
+; on both paths.
+define %NxVal @nx_dictitems(%NxVal %d) {
+entry:
+  %slot = alloca %NxVal
+  %pslot = alloca %NxVal
+  %n = extractvalue %NxVal %d, 2
+  %out = call %NxVal @nx_new_list(i64 %n)
+  store %NxVal %out, ptr %slot
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %exit, label %body
+body:
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
+  %vv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 1
+  %key = load %NxVal, ptr %kv
+  %val = load %NxVal, ptr %vv
+  %pair = call %NxVal @nx_new_list(i64 2)
+  store %NxVal %pair, ptr %pslot
+  call void @nx_listpush(ptr %pslot, %NxVal %key)
+  call void @nx_listpush(ptr %pslot, %NxVal %val)
+  %pdone = load %NxVal, ptr %pslot
+  call void @nx_listpush(ptr %slot, %NxVal %pdone)
+  %i2 = add i64 %i, 1
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+}
+
+; Removes a key by shifting the tail down, so order stays stable.
+define %NxVal @nx_dictdel(%NxVal %d, %NxVal %k) {
+entry:
+  %idx = alloca i64
+  %found = call i1 @nx_dictfindidx(%NxVal %d, %NxVal %k, ptr %idx)
+  br i1 %found, label %rm, label %ret
+ret:
+  ret %NxVal %d
+rm:
+  %i = load i64, ptr %idx
+  %n = extractvalue %NxVal %d, 2
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  %last = sub i64 %n, 1
+  br label %scan
+scan:
+  %j = phi i64 [%i, %rm], [%j2, %body]
+  %done = icmp sge i64 %j, %last
+  br i1 %done, label %shrink, label %body
+body:
+  %src = add i64 %j, 1
+  %se = getelementptr %NxDictEntry, ptr %data, i64 %src
+  %sk = getelementptr %NxDictEntry, ptr %se, i64 0, i32 0
+  %sv = getelementptr %NxDictEntry, ptr %se, i64 0, i32 1
+  %skv = load %NxVal, ptr %sk
+  %svv = load %NxVal, ptr %sv
+  %de = getelementptr %NxDictEntry, ptr %data, i64 %j
+  %dk = getelementptr %NxDictEntry, ptr %de, i64 0, i32 0
+  store %NxVal %skv, ptr %dk
+  %dv = getelementptr %NxDictEntry, ptr %de, i64 0, i32 1
+  store %NxVal %svv, ptr %dv
+  %j2 = add i64 %j, 1
+  br label %scan
+shrink:
+  %lp = getelementptr %NxDict, ptr %h, i64 0, i32 1
+  %n2 = sub i64 %n, 1
+  store i64 %n2, ptr %lp
+  %r1 = insertvalue %NxVal zeroinitializer, i64 7, 0
+  %r2 = insertvalue %NxVal %r1, i64 %hp, 1
+  %r3 = insertvalue %NxVal %r2, i64 %n2, 2
+  ret %NxVal %r3
+}
+
+; --- slicing ------------------------------------------------------
+; Copies rather than aliases. A view would make later mutation of either
+; side surprising, and copying keeps the one-owner value model intact.
+
+define %NxVal @nx_slice(%NxVal %b, i64 %from, i64 %to, i64 %step) {
+entry:
+  ; Hoisted into the entry block: an alloca inside the clamp block would
+  ; allocate afresh on every call that reached it.
+  %slot = alloca %NxVal
+  %badstep = icmp sle i64 %step, 0
+  br i1 %badstep, label %bads, label %checktag
+bads:
+  call void @nx_panic(ptr @.msg.step)
+  unreachable
+checktag:
+  %t = extractvalue %NxVal %b, 0
+  %isl = icmp eq i64 %t, 5
+  br i1 %isl, label %clamp, label %strpath
+clamp:
+  %n = extractvalue %NxVal %b, 2
+  %hp = extractvalue %NxVal %b, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  ; from: negative counts from the end, then clamped into [0, n].
+  %fneg = icmp slt i64 %from, 0
+  %fadj = add i64 %from, %n
+  %f0 = select i1 %fneg, i64 %fadj, i64 %from
+  %fhi = icmp sgt i64 %f0, %n
+  %f1 = select i1 %fhi, i64 %n, i64 %f0
+  %flow = icmp slt i64 %f1, 0
+  %f2 = select i1 %flow, i64 0, i64 %f1
+  %tneg = icmp slt i64 %to, 0
+  %tadj = add i64 %to, %n
+  %t0 = select i1 %tneg, i64 %tadj, i64 %to
+  %thi = icmp sgt i64 %t0, %n
+  %t1 = select i1 %thi, i64 %n, i64 %t0
+  %tlow = icmp slt i64 %t1, 0
+  %t2 = select i1 %tlow, i64 0, i64 %t1
+  %cap = sub i64 %t2, %f2
+  %cnt = sdiv i64 %cap, %step
+  %out = call %NxVal @nx_new_list(i64 %cnt)
+  store %NxVal %out, ptr %slot
+  br label %scan
+scan:
+  %i = phi i64 [%f2, %clamp], [%i2, %body]
+  %done = icmp sge i64 %i, %t2
+  br i1 %done, label %exit, label %body
+body:
+  %ep = getelementptr %NxVal, ptr %data, i64 %i
+  %v = load %NxVal, ptr %ep
+  call void @nx_listpush(ptr %slot, %NxVal %v)
+  %i2 = add i64 %i, %step
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+strpath:
+  %iss = icmp eq i64 %t, 4
+  br i1 %iss, label %str, label %bad
+str:
+  %n2 = extractvalue %NxVal %b, 2
+  %sp = extractvalue %NxVal %b, 1
+  %s = inttoptr i64 %sp to ptr
+  %fneg2 = icmp slt i64 %from, 0
+  %fadj2 = add i64 %from, %n2
+  %f02 = select i1 %fneg2, i64 %fadj2, i64 %from
+  %fhi2 = icmp sgt i64 %f02, %n2
+  %f12 = select i1 %fhi2, i64 %n2, i64 %f02
+  %flow2 = icmp slt i64 %f12, 0
+  %f22 = select i1 %flow2, i64 0, i64 %f12
+  %tneg2 = icmp slt i64 %to, 0
+  %tadj2 = add i64 %to, %n2
+  %t02 = select i1 %tneg2, i64 %tadj2, i64 %to
+  %thi2 = icmp sgt i64 %t02, %n2
+  %t12 = select i1 %thi2, i64 %n2, i64 %t02
+  %tlow2 = icmp slt i64 %t12, 0
+  %t22 = select i1 %tlow2, i64 0, i64 %t12
+  %cap2 = sub i64 %t22, %f22
+  %cnt2 = sdiv i64 %cap2, %step
+  %buf = call ptr @malloc(i64 %cnt2)
+  br label %sscan
+sscan:
+  %si = phi i64 [%f22, %str], [%si2, %sbody]
+  %sdone = icmp sge i64 %si, %t22
+  br i1 %sdone, label %sout, label %sbody
+sbody:
+  %srcp = getelementptr i8, ptr %s, i64 %si
+  %c = load i8, ptr %srcp
+  ; The destination is packed from zero, not mirrored from the source
+  ; offset -- otherwise a slice starting past zero would write past the
+  ; end of the buffer.
+  %rel = sub i64 %si, %f22
+  %dstp = getelementptr i8, ptr %buf, i64 %rel
+  store i8 %c, ptr %dstp
+  %si2 = add i64 %si, %step
+  br label %sscan
+sout:
+  %sv = call %NxVal @nx_str(ptr %buf, i64 %cnt2)
+  ret %NxVal %sv
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+}
+
+; --- list removal --------------------------------------------------
+
+define %NxVal @nx_listdel(%NxVal %l, i64 %i) {
+entry:
+  %slot = alloca %NxVal
+  %n = extractvalue %NxVal %l, 2
+  %neg = icmp slt i64 %i, 0
+  %adj = add i64 %i, %n
+  %pos = select i1 %neg, i64 %adj, i64 %i
+  %oob1 = icmp slt i64 %pos, 0
+  %oob2 = icmp sge i64 %pos, %n
+  %oob = or i1 %oob1, %oob2
+  br i1 %oob, label %bad, label %go
+bad:
+  call void @nx_panic_idx(i64 %i, i64 %n)
+  unreachable
+go:
+  %hp = extractvalue %NxVal %l, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  %out = call %NxVal @nx_new_list(i64 %n)
+  store %NxVal %out, ptr %slot
+  br label %scan
+scan:
+  %j = phi i64 [0, %go], [%j2, %adv]
+  %done = icmp sge i64 %j, %n
+  br i1 %done, label %exit, label %body
+body:
+  %skip = icmp eq i64 %j, %pos
+  br i1 %skip, label %adv, label %keep
+keep:
+  %ep = getelementptr %NxVal, ptr %data, i64 %j
+  %v = load %NxVal, ptr %ep
+  call void @nx_listpush(ptr %slot, %NxVal %v)
+  br label %adv
+adv:
+  %j2 = add i64 %j, 1
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+}
+
+; --- assertion ----------------------------------------------------
+
+define void @nx_assert_fail() {
+entry:
+  call void @nx_panic(ptr @.msg.assert)
+  unreachable
+}
+
+define void @nx_assert_fail_msg(%NxVal %msg) {
+entry:
+  call void @nx_print_val(%NxVal %msg)
+  call i32 (ptr, ...) @printf(ptr @.fmt.colonsp)
+  call void @nx_panic(ptr @.msg.assert)
+  unreachable
+}
+
+; --- in-place element write ---------------------------------------
+; Updates the element in the list's own storage rather than building a
+; replacement, so an alias of the list sees the change. A grow never
+; happens here, which is why the element pointer stays valid.
+
+define void @nx_listset(%NxVal %l, i64 %i, %NxVal %v) {
+entry:
+  %n = extractvalue %NxVal %l, 2
+  %neg = icmp slt i64 %i, 0
+  %adj = add i64 %i, %n
+  %pos = select i1 %neg, i64 %adj, i64 %i
+  %oob1 = icmp slt i64 %pos, 0
+  %oob2 = icmp sge i64 %pos, %n
+  %oob = or i1 %oob1, %oob2
+  br i1 %oob, label %bad, label %go
+bad:
+  call void @nx_panic_idx(i64 %i, i64 %n)
+  unreachable
+go:
+  %hp = extractvalue %NxVal %l, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  %ep = getelementptr %NxVal, ptr %data, i64 %pos
+  store %NxVal %v, ptr %ep
+  ret void
+}
+
+define void @nx_dictset_at(%NxVal %l, i64 %i, %NxVal %v) {
+entry:
+  call void @nx_listset(%NxVal %l, i64 %i, %NxVal %v)
+  ret void
+}
+
+; Key at a positional index, so `for k in d` walks the dict in insertion
+; order without first materialising the whole key list.
+define %NxVal @nx_dictkeyat(%NxVal %d, i64 %i) {
+entry:
+  %n = extractvalue %NxVal %d, 2
+  %oob1 = icmp slt i64 %i, 0
+  %oob2 = icmp sge i64 %i, %n
+  %oob = or i1 %oob1, %oob2
+  br i1 %oob, label %bad, label %go
+bad:
+  call void @nx_panic_idx(i64 %i, i64 %n)
+  unreachable
+go:
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
+  %key = load %NxVal, ptr %kv
+  ret %NxVal %key
 }
