@@ -62,6 +62,16 @@ pub enum Stmt {
     Break { span: Span },
     Continue { span: Span },
     Parallel { tasks: Vec<Stmt>, span: Span },
+    /// `type Point:` followed by an indented list of `name: Type` fields.
+    ///
+    /// Module-level only. A declaration is a compile-time fact, so it
+    /// emits no code and has no value: it tells the checker the type
+    /// exists and hands the backend a field layout to compile against.
+    TypeDecl {
+        name: String,
+        fields: Vec<Field>,
+        span: Span,
+    },
     Import { module: String, alias: Option<String>, span: Span },
     FromImport { module: String, names: Vec<(String, Option<String>)>, span: Span },
     /// `del a`, `del a[i]`, `del p.x`
@@ -69,6 +79,16 @@ pub enum Stmt {
     /// `assert cond` / `assert cond, "message"`
     Assert { cond: Expr, message: Option<Expr>, span: Span },
     Expr(Expr),
+}
+
+/// One declared field of a `type`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field {
+    pub name: String,
+    /// The type as written. `Any` (or an omitted type) means unresolved,
+    /// which is what keeps a record usable before the field's type is
+    /// pinned down by how it is used.
+    pub ty: String,
 }
 
 /// Somewhere an assignment can write. Reading one yields an [`Expr`], so
@@ -162,6 +182,23 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+}
+
+impl Expr {
+    /// A `Type(...)` constructor call, if the callee is a bare name.
+    ///
+    /// Construction is a call, not its own node, because only the checker
+    /// knows which names are types -- a type may be declared later in the
+    /// module, so the parser cannot decide.
+    pub fn constructor_name(&self) -> Option<&str> {
+        match self {
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Var(n, _) => Some(n.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

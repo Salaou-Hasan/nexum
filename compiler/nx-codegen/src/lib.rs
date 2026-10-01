@@ -42,25 +42,36 @@ struct NV {
     /// Shifts need it: a shift distance outside 0..63 is a runtime panic,
     /// and only a constant lets the unboxed path skip that check.
     const_i: Option<i64>,
+    /// Uniquely owned storage: freshly allocated by this expression, with
+    /// no other binding referencing it. Storing a fresh value needs no
+    /// `nx_clone` -- there is nothing to separate from. Anything that may
+    /// alias (loads, calls, reads of stored containers) is not fresh.
+    fresh: bool,
 }
 
 impl NV {
     /// A bare scalar already sitting in a register.
     fn raw(t: Ty, reg: String) -> NV {
-        NV { reg, raw: Some(t.clone()), ty: t, const_i: None }
+        NV { reg, raw: Some(t.clone()), ty: t, const_i: None, fresh: false }
     }
     /// A box whose dynamic type the backend does not know.
     fn dyn_boxed(reg: String) -> NV {
-        NV { reg, raw: None, ty: Ty::Unknown, const_i: None }
+        NV { reg, raw: None, ty: Ty::Unknown, const_i: None, fresh: false }
     }
     /// A box whose static type is known: usable unboxed where the caller
     /// needs the payload, but still physically a `%NxVal`.
     fn boxed_known(reg: String, ty: Ty) -> NV {
-        NV { reg, raw: None, ty, const_i: None }
+        NV { reg, raw: None, ty, const_i: None, fresh: false }
     }
     /// A bare Int whose value is known at compile time.
     fn raw_const(t: Ty, reg: String, value: i64) -> NV {
-        NV { reg, raw: Some(t.clone()), ty: t, const_i: Some(value) }
+        NV { reg, raw: Some(t.clone()), ty: t, const_i: Some(value), fresh: false }
+    }
+    /// A freshly allocated box: uniquely owned, so storing it clones
+    /// nothing. Only for values this expression itself created --
+    /// literals, runtime constructors, and operators that allocate.
+    fn fresh_boxed(reg: String, ty: Ty) -> NV {
+        NV { reg, raw: None, ty, const_i: None, fresh: true }
     }
 }
 
@@ -106,6 +117,12 @@ fn mangle_fn(module: &str, name: &str) -> String {
 
 fn mangle_global(module: &str, name: &str) -> String {
     format!("nx__g_{module}__{name}")
+}
+
+fn mangle_desc(module: &str, name: &str) -> String {
+    // Length-prefixed like mangle_fn, so `a.b` and `a_bc` style collisions
+    // cannot alias two descriptors.
+    format!("nx__d_{}__{module}__{name}", name.len())
 }
 
 fn mangle_init(module: &str) -> String {
@@ -500,8 +517,12 @@ mod tests {
     }
 
     fn free_calls(ir: &str) -> usize {
-        // The prelude defines nx_free_val with one self-recursive call.
-        ir.matches("call void @nx_free_val").count() - 1
+        // `nx_free_val` recurses over elements; only calls outside its own
+        // definition free program values. The self-count is derived from
+        // the prelude text so growing the runtime (dicts, records) does
+        // not silently shift every assertion.
+        let own = super::PRELUDE.matches("call void @nx_free_val").count();
+        ir.matches("call void @nx_free_val").count() - own
     }
 
     /// A Unique local owns heap buffers, so it must be released on every
@@ -652,6 +673,7 @@ fn compile_opts(
     let mut g = Gen::new(plan, loader.programs, memo, types);
     g.unbox_on = unbox_on;
     g.emit_prelude();
+    g.harvest_layouts();
     for module in &order {
         let prog = g.programs.get(module).cloned().unwrap();
         g.declare_module_fns(module, &prog);
@@ -851,6 +873,17 @@ struct Gen {
     /// alloca inside a loop body allocates fresh stack every iteration and
     /// is only released when the function returns.
     alloc_frames: Vec<AllocFrame>,
+    /// Declared `type` layouts: (module, type) to field names in
+    /// declaration order. Harvested from every program before emission,
+    /// so a constructor in one module can use a layout from another.
+    layouts: HashMap<(String, String), Vec<String>>,
+    /// `from m import T [as U]` in module `cur`: (cur, alias) to
+    /// (declaring module, type). A bare `T(...)` in `cur` resolves
+    /// through this exactly the way the checker does.
+    type_alias: HashMap<(String, String), (String, String)>,
+    /// Type-descriptor globals already emitted, so two records in one
+    /// module share one descriptor.
+    desc_emitted: HashSet<String>,
 }
 
 /// Where a function's allocas have to be spliced back in: the byte offset
@@ -893,6 +926,9 @@ impl Gen {
             term: None,
             loops: Vec::new(),
             alloc_frames: Vec::new(),
+            layouts: HashMap::new(),
+            type_alias: HashMap::new(),
+            desc_emitted: HashSet::new(),
         }
     }
 
@@ -901,6 +937,144 @@ impl Gen {
         self.pre.push('\n');
         self.pre.push_str(THREADS);
         self.pre.push('\n');
+    }
+
+    /// Walk every program's top-level statements for `type` declarations
+    /// and `from ... import` type aliases, before any module is emitted.
+    /// A constructor in one module can use a layout declared in another,
+    /// so this cannot be done lazily during emission.
+    fn harvest_layouts(&mut self) {
+        let modules: Vec<String> = self.programs.keys().cloned().collect();
+        for module in &modules {
+            let prog = match self.programs.get(module) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            for s in &prog.stmts {
+                match s {
+                    Stmt::TypeDecl { name, fields, .. } => {
+                        self.layouts.insert(
+                            (module.clone(), name.clone()),
+                            fields.iter().map(|f| f.name.clone()).collect(),
+                        );
+                    }
+                    Stmt::FromImport { module: m, names, .. } => {
+                        for (name, alias) in names {
+                            let bind = alias.clone().unwrap_or_else(|| name.clone());
+                            self.type_alias.insert(
+                                (module.clone(), bind),
+                                (m.clone(), name.clone()),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Descriptor globals, one per declared type, in a stable order so
+        // the emitted IR is reproducible run to run.
+        let mut keys: Vec<(String, String)> = self.layouts.keys().cloned().collect();
+        keys.sort();
+        for (module, name) in keys {
+            self.emit_descriptor(&module, &name);
+        }
+    }
+
+    /// The static type descriptor for one declared type: the type name and
+    /// the field names, which is what the dynamic field-by-name path and
+    /// `print` read at runtime.
+    fn emit_descriptor(&mut self, module: &str, name: &str) {
+        let key = format!("{module}::{name}");
+        if !self.desc_emitted.insert(key.clone()) {
+            return;
+        }
+        let fields = match self.layouts.get(&(module.to_string(), name.to_string())) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        let d = mangle_desc(module, name);
+        let tname = format!("@.rec.tname.{d}");
+        let tn = name.len();
+        // The type name as a byte string. Not NUL-terminated: the length
+        // travels alongside it, the same convention strings use.
+        self.pre.push_str(&format!("{tname} = private constant [{tn} x i8] c\""));
+        for b in name.bytes() {
+            if (32..=126).contains(&b) && b != b'"' && b != b'\\' {
+                self.pre.push(b as char);
+            } else {
+                self.pre.push_str(&format!("\\{b:02X}"));
+            }
+        }
+        self.pre.push_str("\"\n");
+        // One { len, bytes } entry per field name.
+        let mut entries = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            let g = format!("@.rec.fname.{d}.{i}");
+            self.pre.push_str(&format!("{g} = private constant [{} x i8] c\"", f.len()));
+            for b in f.bytes() {
+                if (32..=126).contains(&b) && b != b'"' && b != b'\\' {
+                    self.pre.push(b as char);
+                } else {
+                    self.pre.push_str(&format!("\\{b:02X}"));
+                }
+            }
+            self.pre.push_str("\"\n");
+            entries.push(format!("%NxRecName {{ i64 {}, ptr {g} }}", f.len()));
+        }
+        let n = fields.len();
+        let names = format!("@.rec.names.{d}");
+        self.pre.push_str(&format!("{names} = private constant [{n} x %NxRecName] ["));
+        self.pre.push_str(&entries.join(", "));
+        self.pre.push_str("]\n");
+        // The array's own address is the name table: it points at element
+        // zero, which is exactly what the runtime indexes. An extra global
+        // holding the pointer would add an indirection the reader would
+        // have to load through.
+        self.pre.push_str(&format!(
+            "@{d} = private constant %NxDesc {{ ptr {tname}, i64 {tn}, i64 {n}, ptr {names} }}\n"
+        ));
+    }
+
+    /// Resolve a constructor or field-access type name in the current
+    /// module to its declaring module, canonical name and layout. Follows
+    /// `from ... import` aliases exactly the way the checker does; a local
+    /// declaration wins over an alias, matching source-order semantics.
+    /// The global fallback covers a canonical name that is reachable but
+    /// neither declared nor aliased locally -- the checker guarantees such
+    /// a program only when the declaration exists somewhere, and the
+    /// sorted search keeps the choice deterministic.
+    fn resolve_type(&self, name: &str) -> Option<(String, String, Vec<String>)> {
+        if let Some(fields) = self.layouts.get(&(self.cur_module.clone(), name.to_string())) {
+            return Some((self.cur_module.clone(), name.to_string(), fields.clone()));
+        }
+        if let Some((m, t)) = self.type_alias.get(&(self.cur_module.clone(), name.to_string())) {
+            if let Some(fields) = self.layouts.get(&(m.clone(), t.clone())) {
+                return Some((m.clone(), t.clone(), fields.clone()));
+            }
+        }
+        let mut mods: Vec<String> = self.layouts.keys().map(|(m, _)| m.clone()).collect();
+        mods.sort();
+        mods.dedup();
+        for m in mods {
+            if let Some(fields) = self.layouts.get(&(m.clone(), name.to_string())) {
+                return Some((m, name.to_string(), fields.clone()));
+            }
+        }
+        None
+    }
+
+    /// Descriptor global for a resolved type.
+    fn desc_of(&self, module: &str, name: &str) -> String {
+        format!("@{}", mangle_desc(module, name))
+    }
+
+    /// Field offset of `field` in a resolved layout, or an error naming
+    /// the type rather than the index.
+    fn field_index(fields: &[String], type_name: &str, field: &str, span: Span) -> Result<usize, CodegenError> {
+        fields.iter().position(|f| f == field).ok_or(err(
+            span,
+            format!("type '{type_name}' has no field '{field}'"),
+        ))
     }
 
     fn finish(self) -> String {
@@ -994,6 +1168,17 @@ impl Gen {
             .unwrap_or(Ty::Unknown)
     }
 
+    /// Static type of `name` wherever it lives: function locals first,
+    /// then module globals. `ty_of` alone misses globals (it keys on the
+    /// current function), which is what sent every top-level `push` down
+    /// the dynamic path.
+    fn ty_of_any(&self, name: &str) -> Ty {
+        if self.locals.contains_key(name) {
+            return self.ty_of(name);
+        }
+        self.global_ty(name)
+    }
+
     /// Representation chosen for `name`: Some(t) means the slot holds a
     /// bare `ll_scalar(t)`, None means it holds a boxed `%NxVal`.
     fn rep_of(&self, name: &str) -> Option<Ty> {
@@ -1041,6 +1226,54 @@ impl Gen {
         }
     }
 
+    /// Whether storing a value of this static type must duplicate container
+    /// storage. NX has value semantics for containers: `ys = xs` leaves
+    /// `ys` independent, and a function argument never aliases the
+    /// caller's value. Scalars need no copy, and strings are never mutated
+    /// in place, so sharing one is observably identical to copying it.
+    /// Everything else goes through `nx_clone`, which passes non-container
+    /// tags through unchanged at runtime.
+    fn needs_clone(ty: &Ty) -> bool {
+        matches!(ty, Ty::List(_) | Ty::Dict(_) | Ty::Record(_) | Ty::Unknown)
+    }
+
+    /// Box a value for storage, cloning container storage so the stored
+    /// binding owns its value outright. See `needs_clone`. A fresh value
+    /// (newly allocated by this expression) skips the clone: there is no
+    /// other owner to separate from, which is what keeps `s = s + a*b`
+    /// from copying on every iteration.
+    fn store_boxed(&mut self, v: &NV) -> String {
+        let b = self.unbox(v);
+        if v.fresh || !Self::needs_clone(&v.ty) {
+            return b;
+        }
+        let c = self.reg();
+        self.w(&format!("  {c} = call %NxVal @nx_clone(%NxVal {b})"));
+        c
+    }
+
+    /// Store a value into a local that already owns this storage: the
+    /// write-back path after an in-place container update. Unlike
+    /// `store_slot`, this never clones -- the value derives from the very
+    /// binding it is stored into.
+    fn store_slot_owned(&mut self, name: &str, v: &NV) {
+        let slot = match self.locals.get(name).cloned() {
+            Some(s) => s,
+            None => return,
+        };
+        match self.rep_of(name) {
+            Some(t) => {
+                let ll = ll_scalar(&t).unwrap();
+                let val = self.coerce(v, &t);
+                self.w(&format!("  store {ll} {val}, ptr {slot}"));
+            }
+            None => {
+                let val = self.unbox(v);
+                self.w(&format!("  store %NxVal {val}, ptr {slot}"));
+            }
+        }
+    }
+
     /// Store a value into a local, boxing if the slot is dynamic.
     fn store_slot(&mut self, name: &str, v: &NV) {
         let slot = match self.locals.get(name).cloned() {
@@ -1054,7 +1287,7 @@ impl Gen {
                 self.w(&format!("  store {ll} {val}, ptr {slot}"));
             }
             None => {
-                let val = self.unbox(v);
+                let val = self.store_boxed(v);
                 self.w(&format!("  store %NxVal {val}, ptr {slot}"));
             }
         }
@@ -1376,7 +1609,12 @@ impl Gen {
             self.w(&format!("{go}:"));
             let cv = self.reg();
             self.w(&format!("  {cv} = load %NxVal, ptr {slot}"));
-            self.w(&format!("  ret %NxVal {cv}"));
+            // The cache holds one box shared across calls; the caller gets
+            // a copy, or a mutation through one call site would corrupt the
+            // next. The interpreter clones on a memo hit the same way.
+            let cc = self.reg();
+            self.w(&format!("  {cc} = call %NxVal @nx_clone(%NxVal {cv})"));
+            self.w(&format!("  ret %NxVal {cc}"));
             self.w(&format!("{miss}:"));
         }
         let saved = self.cur_module.clone();
@@ -1393,7 +1631,8 @@ impl Gen {
             let v = self.reg();
             self.w(&format!("  {v} = load %NxVal, ptr {ep}"));
             // The call site is type-checked, so a proven scalar's tag
-            // needs no runtime guard: take the payload directly.
+            // needs no runtime guard: take the payload directly. Anything
+            // else is a bind, and binds own their containers outright.
             let val = match hint {
                 Some(Ty::Float) => {
                     let p1 = self.reg();
@@ -1414,7 +1653,20 @@ impl Gen {
                     self.w(&format!("  {p1} = extractvalue %NxVal {v}, 1"));
                     p1
                 }
-                None => v.clone(),
+                None => {
+                    // A bind owns its containers outright. The static type
+                    // decides: scalars (and strings) store as-is, anything
+                    // that may hold container storage duplicates it. When
+                    // unboxing is off every parameter lands here, so the
+                    // static check is what keeps scalar calls cheap.
+                    if Self::needs_clone(&self.ty_of(p)) {
+                        let vc = self.reg();
+                        self.w(&format!("  {vc} = call %NxVal @nx_clone(%NxVal {v})"));
+                        vc
+                    } else {
+                        v.clone()
+                    }
+                }
             };
             let ll = hint.as_ref().and_then(ll_scalar).unwrap_or("%NxVal");
             self.w(&format!("  store {ll} {val}, ptr {}", self.locals[p].clone()));
@@ -1605,6 +1857,11 @@ impl Gen {
                 self.w(&format!("{done}:"));
                 Ok(())
             }
+            Stmt::TypeDecl { .. } => {
+                // A declaration is compile-time only. The layouts are
+                // harvested before emission, so there is nothing to emit.
+                Ok(())
+            }
             Stmt::Print { values, .. } => {
                 let n = values.len();
                 if n == 0 {
@@ -1693,7 +1950,8 @@ impl Gen {
                         self.w(&format!("  store %NxVal {l}, ptr {p}"));
                         for e in values {
                             let v = self.emit_expr(e)?;
-                            let b = self.unbox(&v);
+                            // The tuple owns its elements.
+                            let b = self.store_boxed(&v);
                             self.w(&format!("  call void @nx_listpush(ptr {p}, %NxVal {b})"));
                         }
                         let out = self.reg();
@@ -1739,6 +1997,13 @@ impl Gen {
                 self.w(&format!("  call void @{}()", mangle_init(module)));
                 for (name, alias) in names {
                     let bind = alias.clone().unwrap_or_else(|| name.clone());
+                    // A type imports as an alias only: types are constructed,
+                    // never held, so there is no global to load. The alias
+                    // map (harvested up front) is what `Pt(...)` resolves
+                    // through, and the descriptor global is shared.
+                    if self.layouts.contains_key(&(module.clone(), name.clone())) {
+                        continue;
+                    }
                     if self.is_module_fn(module, name) {
                         self.falias.insert(bind, (module.clone(), name.clone()));
                     } else {
@@ -1784,10 +2049,37 @@ impl Gen {
         match target {
             nx_ast::Target::Name(name) => self.store_name(name, v, span),
             nx_ast::Target::Index { base, index } => self.store_index(base, index, v, span),
-            nx_ast::Target::Attr { base, field } => Err(err(
-                base.span(),
-                format!("cannot assign field '{field}': fields come from a type declaration"),
-            )),
+            nx_ast::Target::Attr { base, field } => {
+                let b = self.emit_expr(base)?;
+                let bv = self.unbox(&b);
+                let vb = self.store_boxed(v);
+                match &b.ty {
+                    Ty::Record(t) => {
+                        let (_, _, fields) = self
+                            .resolve_type(t)
+                            .ok_or(err(span, format!("unknown type '{t}'")))?;
+                        let i = Self::field_index(&fields, t, field, span)?;
+                        self.w(&format!(
+                            "  call void @nx_rec_set(%NxVal {bv}, i64 {i}, %NxVal {vb})"
+                        ));
+                        Ok(())
+                    }
+                    // A dynamic base resolves the field by name at runtime.
+                    Ty::Unknown => {
+                        let s = self.emit_str(field, span)?;
+                        let nv = NV::boxed_known(s, Ty::Str);
+                        let pbits = self.payload(&nv);
+                        let p = self.reg();
+                        self.w(&format!("  {p} = inttoptr i64 {pbits} to ptr"));
+                        self.w(&format!(
+                            "  call void @nx_rec_setn(%NxVal {bv}, ptr {p}, i64 {}, %NxVal {vb})",
+                            field.len()
+                        ));
+                        Ok(())
+                    }
+                    _ => Err(err(span, "only types have fields".to_string())),
+                }
+            }
         }
     }
 
@@ -1808,9 +2100,12 @@ impl Gen {
         let b = self.emit_expr(base)?;
         let ix = self.emit_expr(index)?;
         let bv = self.unbox(&b);
+        // The stored value is owned by the container, so it is duplicated
+        // on the way in -- the same rule as every other store.
+        let sv = self.store_boxed(v);
         if matches!(b.ty, Ty::Dict(_)) {
             let kb = self.unbox(&ix);
-            let vb = self.unbox(v);
+            let vb = sv;
             // nx_dictset updates the mirrored length in place, so it needs
             // an addressable copy of the dict value.
             let p = self.alloca("%NxVal");
@@ -1821,10 +2116,20 @@ impl Gen {
             let nty = Ty::Dict(Box::new(Ty::Unknown));
             return self.write_back(base, &NV::boxed_known(updated, nty));
         }
+        if matches!(b.ty, Ty::Unknown) {
+            // Unresolved base: the tag decides list versus dict at runtime.
+            // The updated value comes back out because a dict may have
+            // grown, which moves its mirrored length.
+            let kb = self.unbox(&ix);
+            let out = self.reg();
+            self.w(&format!(
+                "  {out} = call %NxVal @nx_storeindex(%NxVal {bv}, %NxVal {kb}, %NxVal {sv})"
+            ));
+            return self.write_back(base, &NV::boxed_known(out, Ty::Unknown));
+        }
         let k = self.as_i64(&ix);
-        let vb = self.unbox(v);
         self.w(&format!(
-            "  call void @nx_listset(%NxVal {bv}, i64 {k}, %NxVal {vb})"
+            "  call void @nx_listset(%NxVal {bv}, i64 {k}, %NxVal {sv})"
         ));
         Ok(())
     }
@@ -1836,15 +2141,20 @@ impl Gen {
     fn write_back(&mut self, base: &Expr, updated: &NV) -> Result<(), CodegenError> {
         match base {
             Expr::Var(name, _) => {
+                // No clone: `updated` derives from this same binding's
+                // storage (an in-place update refreshed the header or
+                // length), so there is no second owner to separate from.
+                // Cloning here would deep-copy the container on every
+                // indexed write.
                 if self.in_init {
                     let g = self.ensure_global(&self.cur_module.clone(), name);
                     let b = self.unbox(updated);
                     self.w(&format!("  store %NxVal {b}, ptr {g}"));
                 } else if self.locals.contains_key(name) {
-                    self.store_slot(name, updated);
+                    self.store_slot_owned(name, updated);
                 } else {
                     self.new_slot(name, None);
-                    self.store_slot(name, updated);
+                    self.store_slot_owned(name, updated);
                 }
                 Ok(())
             }
@@ -1904,6 +2214,17 @@ impl Gen {
             nx_ast::Target::Index { base, index } => {
                 let b = self.emit_expr(base)?;
                 let ix = self.emit_expr(index)?;
+                // An unresolved base dispatches on the tag at runtime;
+                // the updated container comes back out for the write-back.
+                if matches!(b.ty, Ty::Unknown) {
+                    let bv = self.unbox(&b);
+                    let kb = self.unbox(&ix);
+                    let out = self.reg();
+                    self.w(&format!(
+                        "  {out} = call %NxVal @nx_delindex(%NxVal {bv}, %NxVal {kb})"
+                    ));
+                    return self.write_back(base, &NV::boxed_known(out, Ty::Unknown));
+                }
                 match b.ty {
                     Ty::Dict(_) => {
                         let bv = self.unbox(&b);
@@ -1929,10 +2250,40 @@ impl Gen {
                     }
                 }
             }
-            nx_ast::Target::Attr { base, field } => Err(err(
-                base.span(),
-                format!("cannot delete field '{field}': fields come from a type declaration"),
-            )),
+            nx_ast::Target::Attr { base, field } => {
+                let b = self.emit_expr(base)?;
+                let bv = self.unbox(&b);
+                // A record's arity is fixed, so removing a value means
+                // blanking the field rather than changing the layout --
+                // the same rule the interpreter follows.
+                let none = self.reg();
+                self.w(&format!("  {none} = call %NxVal @nx_none()"));
+                match &b.ty {
+                    Ty::Record(t) => {
+                        let (_, _, fields) = self
+                            .resolve_type(t)
+                            .ok_or(err(span, format!("unknown type '{t}'")))?;
+                        let i = Self::field_index(&fields, t, field, span)?;
+                        self.w(&format!(
+                            "  call void @nx_rec_set(%NxVal {bv}, i64 {i}, %NxVal {none})"
+                        ));
+                        Ok(())
+                    }
+                    Ty::Unknown => {
+                        let s = self.emit_str(field, span)?;
+                        let nv = NV::boxed_known(s, Ty::Str);
+                        let pbits = self.payload(&nv);
+                        let p = self.reg();
+                        self.w(&format!("  {p} = inttoptr i64 {pbits} to ptr"));
+                        self.w(&format!(
+                            "  call void @nx_rec_setn(%NxVal {bv}, ptr {p}, i64 {}, %NxVal {none})",
+                            field.len()
+                        ));
+                        Ok(())
+                    }
+                    _ => Err(err(span, "only types have fields".to_string())),
+                }
+            }
         }
     }
 
@@ -2001,14 +2352,14 @@ impl Gen {
             BinOp::In => {
                 let c = self.reg();
                 self.w(&format!("  {c} = call %NxVal @nx_in(%NxVal {lb}, %NxVal {rb})"));
-                return Ok(NV::boxed_known(c, Ty::Bool));
+                return Ok(NV::fresh_boxed(c, Ty::Bool));
             }
             BinOp::NotIn => {
                 let c = self.reg();
                 let n = self.reg();
                 self.w(&format!("  {c} = call %NxVal @nx_in(%NxVal {lb}, %NxVal {rb})"));
                 self.w(&format!("  {n} = call %NxVal @nx_not(%NxVal {c})"));
-                return Ok(NV::boxed_known(n, Ty::Bool));
+                return Ok(NV::fresh_boxed(n, Ty::Bool));
             }
             BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
                 let v = self.emit_cmp_dyn(l, op, r)?;
@@ -2021,7 +2372,8 @@ impl Gen {
             | BinOp::BitXor | BinOp::Shl | BinOp::Shr => Ty::Int,
             _ => Ty::Unknown,
         };
-        Ok(NV::boxed_known(out, ty))
+        // Every helper above allocates its result box, so it is fresh.
+        Ok(NV::fresh_boxed(out, ty))
     }
 
     fn emit_cmp_dyn(&mut self, l: &NV, op: BinOp, r: &NV) -> Result<NV, CodegenError> {
@@ -2050,7 +2402,8 @@ impl Gen {
             }
             _ => unreachable!(),
         }
-        Ok(NV::boxed_known(out, Ty::Bool))
+        // `nx_bool` allocates its result, like every other helper here.
+        Ok(NV::fresh_boxed(out, Ty::Bool))
     }
 
     fn store_name(&mut self, name: &str, v: &NV, _span: Span) -> Result<(), CodegenError> {
@@ -2058,7 +2411,7 @@ impl Gen {
             // Module globals are the boxed boundary: other modules and
             // parallel tasks reach them by address.
             let g = self.ensure_global(&self.cur_module.clone(), name);
-            let b = self.unbox(v);
+            let b = self.store_boxed(v);
             self.w(&format!("  store %NxVal {b}, ptr {g}"));
             return Ok(());
         }
@@ -2083,7 +2436,7 @@ impl Gen {
     fn store_fresh(&mut self, name: &str, v: &NV) {
         if self.in_init {
             let g = self.ensure_global(&self.cur_module.clone(), name);
-            let b = self.unbox(v);
+            let b = self.store_boxed(v);
             self.w(&format!("  store %NxVal {b}, ptr {g}"));
             return;
         }
@@ -2286,6 +2639,14 @@ impl Gen {
                         "  {el} = call %NxVal @nx_dictkeyat(%NxVal {vb}, i64 {i})"
                     ));
                     self.store_fresh(var, &NV::dyn_boxed(el));
+                } else if matches!(v.ty, Ty::Unknown) {
+                    // Unresolved iterable: the tag decides list, string or
+                    // dict at runtime. A dict yields its keys, matching the
+                    // static-dict path and the interpreter exactly.
+                    self.w(&format!(
+                        "  {el} = call %NxVal @nx_each(%NxVal {vb}, i64 {i})"
+                    ));
+                    self.store_fresh(var, &NV::dyn_boxed(el));
                 } else {
                 let iv = self.reg();
                 let ix = NV::raw(Ty::Int, i.clone());
@@ -2421,7 +2782,7 @@ impl Gen {
                 self.emit_range_fill(&p, &a, &n);
                 let out = self.reg();
                 self.w(&format!("  {out} = load %NxVal, ptr {p}"));
-                Ok(NV::boxed_known(out, Ty::List(Box::new(Ty::Int))))
+                Ok(NV::fresh_boxed(out, Ty::List(Box::new(Ty::Int))))
             }
             Expr::Dict(pairs, _) => {
                 let n = pairs.len() as i64;
@@ -2433,14 +2794,14 @@ impl Gen {
                     let kv = self.emit_expr(k)?;
                     let vv = self.emit_expr(v)?;
                     let kb = self.unbox(&kv);
-                    let vb = self.unbox(&vv);
+                    let vb = self.store_boxed(&vv);
                     self.w(&format!(
                         "  call void @nx_dictset(ptr {p}, %NxVal {kb}, %NxVal {vb})"
                     ));
                 }
                 let out = self.reg();
                 self.w(&format!("  {out} = load %NxVal, ptr {p}"));
-                Ok(NV::boxed_known(out, Ty::Dict(Box::new(Ty::Unknown))))
+                Ok(NV::fresh_boxed(out, Ty::Dict(Box::new(Ty::Unknown))))
             }
             Expr::Slice { base, from, to, step, span } => {
                 let b = self.emit_expr(base)?;
@@ -2470,10 +2831,11 @@ impl Gen {
                 ));
                 let _ = span;
                 // Slicing a list of known scalars keeps that element type.
+                // Fresh storage, like every other constructor here.
                 match &b.ty {
-                    Ty::List(t) => Ok(NV::boxed_known(out, Ty::List(t.clone()))),
-                    Ty::Str => Ok(NV::boxed_known(out, Ty::Str)),
-                    _ => Ok(NV::boxed_known(out, Ty::Unknown)),
+                    Ty::List(t) => Ok(NV::fresh_boxed(out, Ty::List(t.clone()))),
+                    Ty::Str => Ok(NV::fresh_boxed(out, Ty::Str)),
+                    _ => Ok(NV::fresh_boxed(out, Ty::Unknown)),
                 }
             }
             Expr::IfExpr { cond, then_value, else_value, .. } => {
@@ -2498,7 +2860,9 @@ impl Gen {
                 self.w(&format!("  {out} = phi %NxVal [ {tb}, %{tl} ], [ {eb}, %{el} ]"));
                 // The phi merges the boxed form, so the result type only has to be
                 // precise when both arms agree. Otherwise it stays dynamic,
-                // which is correct and merely unspecialised.
+                // which is correct and merely unspecialised. Fresh only when
+                // both arms are: the taken arm's box is then uniquely owned
+                // no matter which arm was taken.
                 let arms_agree =
                     tv.ty == ev.ty || matches!(tv.ty, Ty::Unknown) || matches!(ev.ty, Ty::Unknown);
                 let ty = if arms_agree {
@@ -2510,7 +2874,9 @@ impl Gen {
                 } else {
                     Ty::Unknown
                 };
-                Ok(NV::boxed_known(out, ty))
+                let mut nv = NV::boxed_known(out, ty);
+                nv.fresh = tv.fresh && ev.fresh;
+                Ok(nv)
             }
             Expr::Comprehension { element, var, iter, cond, .. } => {
                 // Emitted as a real loop rather than a recursive call, so it
@@ -2581,10 +2947,11 @@ impl Gen {
                 self.new_slot(var, vty);
                 self.store_slot(var, &NV::boxed_known(cur, elem.clone()));
                 // The filter and the append share one tail block, so the
-                // element expression is emitted exactly once.
+                // element expression is emitted exactly once. Elements are
+                // owned by the result list.
                 let emit_push = |me: &mut Self| -> Result<(), CodegenError> {
                     let ev = me.emit_expr(element)?;
-                    let eb = me.unbox(&ev);
+                    let eb = me.store_boxed(&ev);
                     me.w(&format!("  call void @nx_listpush(ptr {slot}, %NxVal {eb})"));
                     Ok(())
                 };
@@ -2612,7 +2979,7 @@ impl Gen {
                 self.w(&format!("{endl}:"));
                 let res = self.reg();
                 self.w(&format!("  {res} = load %NxVal, ptr {slot}"));
-                Ok(NV::boxed_known(res, items_ty))
+                Ok(NV::fresh_boxed(res, items_ty))
             }
             Expr::List(items, _) => {
                 let n = items.len() as i64;
@@ -2626,15 +2993,18 @@ impl Gen {
                     if elem == Ty::Unknown {
                         elem = v.ty.clone();
                     }
-                    let b = self.unbox(&v);
+                    // Elements are owned by the list, so a container
+                    // element is duplicated on the way in.
+                    let b = self.store_boxed(&v);
                     self.w(&format!("  call void @nx_listpush(ptr {p}, %NxVal {b})"));
                 }
                 let out = self.reg();
                 self.w(&format!("  {out} = load %NxVal, ptr {p}"));
                 // A list of proven scalars has a known element type, so
                 // reading from it can stay unboxed. It is mutable, so it
-                // never qualifies for memoization.
-                Ok(NV::boxed_known(out, Ty::List(Box::new(elem))))
+                // never qualifies for memoization. Fresh storage, owned by
+                // whoever binds it.
+                Ok(NV::fresh_boxed(out, Ty::List(Box::new(elem))))
             }
             Expr::Var(name, span) => match self.resolve(name) {
                 Ok(Binding::Local) => Ok(self.load_slot(name)),
@@ -2668,6 +3038,14 @@ impl Gen {
                                 format!("function '{module}.{attr}' cannot be used as a value; call it"),
                             ));
                         }
+                        // A type used as `m.T` in value position is not
+                        // meaningful: types construct, they are not values.
+                        if self.layouts.contains_key(&(module.clone(), attr.clone())) {
+                            return Err(err(
+                                *span,
+                                format!("type '{module}.{attr}' cannot be used as a value; construct it"),
+                            ));
+                        }
                         let g = mangle_global(&module, attr);
                         let v = self.reg();
                         self.w(&format!("  {v} = load %NxVal, ptr @{g}"));
@@ -2680,7 +3058,45 @@ impl Gen {
                         return Ok(NV::boxed_known(v, ty));
                     }
                 }
-                Err(err(*span, "only direct module.attribute access is supported".to_string()))
+                // A record field. When the static type is known the offset
+                // is a constant; when it is not, the name is resolved
+                // against the value's own descriptor at runtime.
+                let b = self.emit_expr(base)?;
+                let bv = self.unbox(&b);
+                match &b.ty {
+                    Ty::Record(t) => {
+                        let (decl_module, _, fields) = self
+                            .resolve_type(t)
+                            .ok_or(err(*span, format!("unknown type '{t}'")))?;
+                        let _ = decl_module;
+                        let i = Self::field_index(&fields, t, attr, *span)?;
+                        let r = self.reg();
+                        self.w(&format!("  {r} = call %NxVal @nx_rec_get(%NxVal {bv}, i64 {i})"));
+                        // The field's static type is not tracked past the
+                        // declaration (it may be `Any`), so the result is
+                        // dynamic. Specialising it is the unboxed-fields
+                        // pass, which comes with the ownership work.
+                        Ok(NV::dyn_boxed(r))
+                    }
+                    Ty::Unknown => {
+                        // The field-name bytes come from an ordinary
+                        // string constant; its payload is the byte
+                        // pointer `nx_rec_getn` compares, and the length
+                        // is known at compile time.
+                        let s = self.emit_str(attr, *span)?;
+                        let nv = NV::boxed_known(s, Ty::Str);
+                        let pbits = self.payload(&nv);
+                        let p = self.reg();
+                        self.w(&format!("  {p} = inttoptr i64 {pbits} to ptr"));
+                        let r = self.reg();
+                        self.w(&format!(
+                            "  {r} = call %NxVal @nx_rec_getn(%NxVal {bv}, ptr {p}, i64 {})",
+                            attr.len()
+                        ));
+                        Ok(NV::dyn_boxed(r))
+                    }
+                    _ => Err(err(*span, "only modules and types have attributes".to_string())),
+                }
             }
             Expr::Index { base, index, .. } => {
                 let b = self.emit_expr(base)?;
@@ -2747,7 +3163,8 @@ impl Gen {
                     UnaryOp::BitNot => Ty::Int,
                     _ => Ty::Unknown,
                 };
-                Ok(NV::boxed_known(r, ty))
+                // Every helper above allocates its result box.
+                Ok(NV::fresh_boxed(r, ty))
             }
             Expr::Binary { left, op, right, span } => {
                 if matches!(op, BinOp::And | BinOp::Or) {
@@ -3029,7 +3446,27 @@ impl Gen {
         args: &[Expr],
         span: Span,
     ) -> Result<NV, CodegenError> {
-        if let Expr::Var(name, _) = callee {
+        // A declared type is constructed by name, sharing the call spelling
+            // with a function. Checked before function resolution: a type
+            // and a function cannot share a name, so reaching here with a
+            // type name means construction, not a call.
+            if let Expr::Var(name, _) = callee {
+                if let Some((decl_module, canon, fields)) = self.resolve_type(name) {
+                    if args.len() != fields.len() {
+                        return Err(err(
+                            span,
+                            format!(
+                                "type '{name}' takes {} field{}, got {}",
+                                fields.len(),
+                                if fields.len() == 1 { "" } else { "s" },
+                                args.len()
+                            ),
+                        ));
+                    }
+                    return self.emit_construct(&decl_module, &canon, name, args);
+                }
+            }
+            if let Expr::Var(name, _) = callee {
             if name == "len" {
                 if args.len() != 1 {
                     return Err(err(span, "len() expects 1 argument".to_string()));
@@ -3047,21 +3484,46 @@ impl Gen {
                 if args.len() != 2 {
                     return Err(err(span, "push() expects 2 arguments".to_string()));
                 }
-                let ptr = match &args[0] {
-                    Expr::Var(n, _) => self.ptr_of(n).ok_or(err(
+                // The target must be a variable: pushing into a temporary
+                // would drop the result, so the checker rejects it and
+                // this arm never sees one.
+                if !matches!(&args[0], Expr::Var(..)) {
+                    return Err(err(
                         span,
                         "push() first argument must be a list variable".to_string(),
-                    ))?,
+                    ));
+                }
+                let v = self.emit_expr(&args[1])?;
+                let vb = self.store_boxed(&v);
+                // The pushed value is owned by the list from here on.
+                match &args[0] {
+                    Expr::Var(n, _) if !matches!(self.ty_of_any(n), Ty::Unknown) => {
+                        let ptr = self.ptr_of(n).ok_or(err(
+                            span,
+                            "push() first argument must be a list variable".to_string(),
+                        ))?;
+                        self.w(&format!("  call void @nx_listpush(ptr {ptr}, %NxVal {vb})"));
+                    }
+                    Expr::Var(_, _) => {
+                        // Unresolved base: only a list can be pushed to, and
+                        // the tag check says so at runtime rather than
+                        // corrupting a dict's entry array.
+                        let lv = self.emit_expr(&args[0])?;
+                        let lb = self.unbox(&lv);
+                        let p = self.alloca("%NxVal");
+                        self.w(&format!("  store %NxVal {lb}, ptr {p}"));
+                        self.w(&format!("  call void @nx_pushdyn(ptr {p}, %NxVal {vb})"));
+                        let updated = self.reg();
+                        self.w(&format!("  {updated} = load %NxVal, ptr {p}"));
+                        self.write_back(&args[0], &NV::boxed_known(updated, Ty::Unknown))?;
+                    }
                     _ => {
                         return Err(err(
                             span,
                             "push() first argument must be a list variable".to_string(),
                         ))
                     }
-                };
-                let v = self.emit_expr(&args[1])?;
-                let vb = self.unbox(&v);
-                self.w(&format!("  call void @nx_listpush(ptr {ptr}, %NxVal {vb})"));
+                }
                 let r = self.reg();
                 self.w(&format!("  {r} = call %NxVal @nx_none()"));
                 return Ok(NV::boxed_known(r, Ty::None));
@@ -3078,6 +3540,22 @@ impl Gen {
         if let Expr::Attr { base, attr, .. } = callee {
             if let Expr::Var(m, _) = base.as_ref() {
                 if let Some(module) = self.modrefs.get(m).cloned() {
+                    // A type exported by the module constructs the same
+                    // way a local one does.
+                    if let Some(fields) = self.layouts.get(&(module.clone(), attr.clone())).cloned() {
+                        if args.len() != fields.len() {
+                            return Err(err(
+                                span,
+                                format!(
+                                    "type '{attr}' takes {} field{}, got {}",
+                                    fields.len(),
+                                    if fields.len() == 1 { "" } else { "s" },
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        return self.emit_construct(&module, attr, attr, args);
+                    }
                     if self.is_module_fn(&module, attr) {
                         return self.emit_direct(&module, attr, args);
                     }
@@ -3087,6 +3565,31 @@ impl Gen {
             return Err(err(span, "only direct module.attr() calls are supported".to_string()));
         }
         Err(err(span, "only direct calls are supported".to_string()))
+    }
+
+    /// `Type(v0, v1, ...)` -- allocate the record, then fill each field in
+    /// declaration order. The record value is in a register throughout;
+    /// `nx_rec_set` writes through the header, so no alloca is needed to
+    /// hold it between the fills. The static type carries the canonical
+    /// name, so a value built through an alias compares and resolves
+    /// exactly like one built through the original name.
+    fn emit_construct(
+        &mut self,
+        decl_module: &str,
+        canon: &str,
+        _written: &str,
+        args: &[Expr],
+    ) -> Result<NV, CodegenError> {
+        let n = args.len() as i64;
+        let desc = self.desc_of(decl_module, canon);
+        let r = self.reg();
+        self.w(&format!("  {r} = call %NxVal @nx_new_record(i64 {n}, ptr {desc})"));
+        for (i, a) in args.iter().enumerate() {
+            let v = self.emit_expr(a)?;
+            let vb = self.store_boxed(&v);
+            self.w(&format!("  call void @nx_rec_set(%NxVal {r}, i64 {i}, %NxVal {vb})"));
+        }
+        Ok(NV::fresh_boxed(r, Ty::Record(canon.to_string())))
     }
 
     /// Declared return type of `module`.`name`, used to keep a call
@@ -3211,13 +3714,20 @@ impl Gen {
             self.w(&format!("define ptr @{fname}(ptr %_) {{"));
             self.w("entry:");
             self.begin_allocs();
-            // Rehydrate snapshot reads as task locals.
+            // Rehydrate snapshot reads as task locals. Each worker clones
+            // container storage: the snapshot global is shared read-only
+            // traffic, and a task that mutates through it (push, `a[i] =
+            // v`) must not corrupt the parent's value or race with another
+            // worker. The interpreter hands each worker a deep copy the
+            // same way.
             for (k, name) in reads.iter().enumerate() {
                 let v = self.reg();
                 let slot = self.alloca("%NxVal");
                 self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
                 self.w(&format!("  {v} = load %NxVal, ptr @{}", snap_globals[k]));
-                self.w(&format!("  store %NxVal {v}, ptr {slot}"));
+                let c = self.reg();
+                self.w(&format!("  {c} = call %NxVal @nx_clone(%NxVal {v})"));
+                self.w(&format!("  store %NxVal {c}, ptr {slot}"));
                 self.locals.insert(name.clone(), slot);
             }
             self.emit_stmt(&tasks[i])?;

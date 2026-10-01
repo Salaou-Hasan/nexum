@@ -359,9 +359,29 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
             // name, so it is not a shared-name write. Reads of the
             // container still show up through the value expressions.
             for t in targets {
-                if let nx_ast::Target::Name(name) = t {
-                    if scope.is_shared(name) {
-                        out.writes.insert((module.to_string(), name.clone()));
+                match t {
+                    nx_ast::Target::Name(name) => {
+                        if scope.is_shared(name) {
+                            out.writes.insert((module.to_string(), name.clone()));
+                        }
+                    }
+                    // A field write mutates the record in place, which is
+                    // a read-modify-write of whatever holds it. When that
+                    // holder is a module global the write is shared
+                    // traffic, and treating it as such is the safe
+                    // direction: missing it would be a silent race.
+                    nx_ast::Target::Attr { base, .. } => {
+                        if let Expr::Var(n, _) = base.as_ref() {
+                            if scope.is_shared(n) {
+                                out.reads.insert((module.to_string(), n.clone()));
+                                out.writes.insert((module.to_string(), n.clone()));
+                            }
+                        }
+                        expr(scope, base, out);
+                    }
+                    nx_ast::Target::Index { base, index } => {
+                        expr(scope, base, out);
+                        expr(scope, index, out);
                     }
                 }
             }
@@ -376,10 +396,24 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
                     out.writes.insert((module.to_string(), name.clone()));
                 }
             } else {
-                // `a[i] += v` reads and writes the container in place.
-                if let nx_ast::Target::Index { base, index } = target {
-                    expr(scope, base, out);
-                    expr(scope, index, out);
+                // `a[i] += v` and `p.x += v` both read and write the
+                // container in place, so both are shared traffic when the
+                // container is a module global.
+                match target {
+                    nx_ast::Target::Index { base, index } => {
+                        expr(scope, base, out);
+                        expr(scope, index, out);
+                    }
+                    nx_ast::Target::Attr { base, .. } => {
+                        if let Expr::Var(n, _) = base.as_ref() {
+                            if scope.is_shared(n) {
+                                out.reads.insert((module.to_string(), n.clone()));
+                                out.writes.insert((module.to_string(), n.clone()));
+                            }
+                        }
+                        expr(scope, base, out);
+                    }
+                    nx_ast::Target::Name(_) => {}
                 }
             }
         }
@@ -416,6 +450,8 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
             inner.locals.insert(var.clone());
             stmts(&inner, body, out);
         }
+        // A declaration is compile-time only: no reads, no writes.
+        Stmt::TypeDecl { .. } => {}
         Stmt::Fn { .. } => {}
         Stmt::Return { values, .. } => {
             for e in values {
@@ -591,6 +627,15 @@ fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
             if let Expr::Var(m, _) = base.as_ref() {
                 if let Some(target) = scope.env.mods.get(m) {
                     out.reads.insert((target.clone(), attr.clone()));
+                    return;
+                }
+            }
+            // A record field read. Reading a field of a module global is
+            // still a read of that global, which is what the shared-traffic
+            // analysis keys on.
+            if let Expr::Var(n, _) = base.as_ref() {
+                if scope.is_shared(n) {
+                    out.reads.insert((scope.module.to_string(), n.clone()));
                     return;
                 }
             }

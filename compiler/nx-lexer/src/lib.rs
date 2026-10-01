@@ -74,6 +74,10 @@ pub enum TokenKind {
     None,
     Del,
     Assert,
+    /// `type` -- a field declaration. A keyword so that a bare `type`
+    /// cannot be read as a call to a function named `type`, which would
+    /// make `type(x: Int)` ambiguous with a parameter list.
+    Type,
     Eof,
 }
 
@@ -98,6 +102,7 @@ fn keyword_kind(lexeme: &str) -> Option<TokenKind> {
         "None" => Some(TokenKind::None),
         "del" => Some(TokenKind::Del),
         "assert" => Some(TokenKind::Assert),
+        "type" => Some(TokenKind::Type),
         "and" => Some(TokenKind::And),
         "or" => Some(TokenKind::Or),
         "not" => Some(TokenKind::Not),

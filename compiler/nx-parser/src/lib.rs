@@ -134,6 +134,7 @@ impl Parser {
             TokenKind::Parallel => self.parse_parallel(),
             TokenKind::Del => self.parse_del(),
             TokenKind::Assert => self.parse_assert(),
+            TokenKind::Type => self.parse_type_decl(),
             _ => self.parse_simple_stmt(),
         }
     }
@@ -170,6 +171,61 @@ impl Parser {
     fn parse_target(&mut self) -> Result<Target, ParseError> {
         let e = self.parse_postfix()?;
         Ok(target_from_expr(e))
+    }
+
+    /// `type Point:` then an indented block of `x: Float` lines. Indent
+    /// based like every other block in the language, so a declaration
+    /// reads the same way a function body does.
+    ///
+    /// The body is parsed line by line rather than through `parse_block`
+    /// because a field line is not an expression: it is `name: Type`.
+    fn parse_type_decl(&mut self) -> Result<Stmt, ParseError> {
+        let kw = self.next(); // type
+        let span = Span { line: kw.line, col: kw.col };
+        let name = self.expect(TokenKind::Ident, "type name")?.lexeme;
+        self.expect(TokenKind::Colon, "':' after type name")?;
+        self.expect(TokenKind::Newline, "newline before type body")?;
+        self.expect(TokenKind::Indent, "indented type body")?;
+        let mut fields = Vec::new();
+        loop {
+            if *self.peek_kind() == TokenKind::Dedent || *self.peek_kind() == TokenKind::Eof {
+                break;
+            }
+            let fname = self.expect(TokenKind::Ident, "field name")?.lexeme;
+            // The type is optional: `x` alone declares an unresolved
+            // field, which is how a field's type gets pinned later by how
+            // it is used rather than being written out in advance.
+            let ty = if *self.peek_kind() == TokenKind::Colon {
+                self.next();
+                self.expect(TokenKind::Ident, "field type")?.lexeme
+            } else {
+                "Any".to_string()
+            };
+            if fields.iter().any(|f: &nx_ast::Field| f.name == fname) {
+                return Err(ParseError {
+                    message: format!("duplicate field '{fname}' in type '{name}'"),
+                    line: kw.line,
+                    col: kw.col,
+                });
+            }
+            fields.push(nx_ast::Field { name: fname, ty });
+            // A field line ends at the newline; there is no comma form,
+            // so a stray one is a clear error rather than being ignored.
+            if *self.peek_kind() == TokenKind::Newline {
+                self.next();
+            }
+        }
+        if *self.peek_kind() == TokenKind::Dedent {
+            self.next();
+        }
+        if fields.is_empty() {
+            return Err(ParseError {
+                message: format!("type '{name}' has no fields"),
+                line: kw.line,
+                col: kw.col,
+            });
+        }
+        Ok(Stmt::TypeDecl { name, fields, span })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {

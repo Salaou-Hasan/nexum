@@ -8,6 +8,12 @@ pub enum Value {
     Bool(bool),
     Str(String),
     List(Vec<Value>),
+    /// A declared type's instance. Fields are positional, matching
+    /// declaration order. The declaring module travels with the value so
+    /// field layout always resolves deterministically -- two modules may
+    /// declare the same type name, and searching by name alone would pick
+    /// one at hash order.
+    Record { module: String, type_name: String, fields: Vec<Value> },
     /// Insertion-ordered map. Order is part of the contract rather than an
     /// implementation detail: iterating a dict has to be reproducible for
     /// `parallel:` determinism to mean anything, so this is a `Vec` of
@@ -36,6 +42,10 @@ impl std::fmt::Display for Value {
                     .map(|(k, v)| format!("{}: {}", k.to_string(), v.to_string()))
                     .collect();
                 write!(f, "{{{}}}", parts.join(", "))
+            }
+            Value::Record { type_name, fields, .. } => {
+                let parts: Vec<String> = fields.iter().map(|v| v.to_string()).collect();
+                write!(f, "{}({})", type_name, parts.join(", "))
             }
             Value::Module(m) => write!(f, "<module {m}>"),
             Value::Func { name, .. } => write!(f, "<fn {name}>"),
@@ -134,6 +144,10 @@ struct Function {
 struct Module {
     vars: HashMap<String, Value>,
     funcs: HashMap<String, Function>,
+    /// Declared `type` layouts: type name to field names in order. The
+    /// name is kept on the value as well, so a record still prints
+    /// usefully and its fields stay resolvable after it has moved.
+    types: HashMap<String, Vec<String>>,
     dir: std::path::PathBuf,
 }
 
@@ -173,6 +187,10 @@ pub struct Interpreter {
     memo_ok: HashSet<(String, String)>,
     /// Functions already classified (avoid re-analyzing per call).
     memo_seen: HashSet<(String, String)>,
+    /// `from m import T [as U]` in a module: (importer, alias) to
+    /// (declaring module, type). Types are constructed, never held, so an
+    /// imported type registers an alias here rather than a value binding.
+    type_alias: HashMap<(String, String), (String, String)>,
     /// Shared memo cache (across parallel tasks). None when NX_NOMEMO=1.
     memo: Option<std::sync::Arc<std::sync::Mutex<Memo>>>,
 }
@@ -228,61 +246,11 @@ impl Interpreter {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Option<Flow>, RuntimeError> {
         match stmt {
+            // Split out into its own `inline(never)` method: `exec_stmt` shares a
+            // single stack frame across every arm, so a bulky arm costs
+            // stack on every recursive call rather than only its own.
             Stmt::Assign { targets, values, span } => {
-                // Several targets against one value destructures: the value
-                // is a tuple, which is carried as a list.
-                if targets.len() > 1 && values.len() == 1 {
-                    let v = self.eval_expr(&values[0])?;
-                    let parts = match v {
-                        Value::List(items) => items,
-                        other => {
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "cannot destructure {} into {} targets",
-                                    other,
-                                    targets.len()
-                                ),
-                                line: span.line,
-                                col: span.col,
-                            })
-                        }
-                    };
-                    if parts.len() != targets.len() {
-                        return Err(RuntimeError {
-                            message: format!(
-                                "expected {} values to unpack, got {}",
-                                targets.len(),
-                                parts.len()
-                            ),
-                            line: span.line,
-                            col: span.col,
-                        });
-                    }
-                    for (t, p) in targets.iter().zip(parts) {
-                        self.store_target(t, p)?;
-                    }
-                    return Ok(None);
-                }
-                if targets.len() != values.len() {
-                    return Err(RuntimeError {
-                        message: format!(
-                            "{} targets but {} values",
-                            targets.len(),
-                            values.len()
-                        ),
-                        line: span.line,
-                        col: span.col,
-                    });
-                }
-                // Values are evaluated left to right before any is stored,
-                // so `a, b = b, a` swaps rather than clobbering.
-                let mut computed = Vec::with_capacity(values.len());
-                for v in values {
-                    computed.push(self.eval_expr(v)?);
-                }
-                for (t, v) in targets.iter().zip(computed) {
-                    self.store_target(t, v)?;
-                }
+                self.exec_assign(targets, values, *span)?;
                 Ok(None)
             }
             Stmt::AssignOp { target, op, value, span } => {
@@ -296,100 +264,23 @@ impl Interpreter {
                 Ok(None)
             }
             Stmt::Del { targets, span } => {
-                for t in targets {
-                    match t {
-                        nx_ast::Target::Name(name) => {
-                            if self.lookup(name).is_none() {
-                                return Err(RuntimeError {
-                                    message: format!("undefined variable '{name}'"),
-                                    line: span.line,
-                                    col: span.col,
-                                });
-                            }
-                            self.unbind(name)?;
-                        }
-                        nx_ast::Target::Index { base, index } => {
-                            let kv = self.eval_expr(index)?;
-                            // A dict is keyed by value, so it is matched
-                            // before the index has to be an Int.
-                            if let nx_ast::Expr::Var(name, _) = base.as_ref() {
-                                if let Some(entries) = self.lookup_mut_dict(name) {
-                                    let before = entries.len();
-                                    entries.retain(|(k, _)| !values_equal(k, &kv));
-                                    if entries.len() == before {
-                                        return Err(RuntimeError {
-                                            message: format!("key {kv} not found"),
-                                            line: span.line,
-                                            col: span.col,
-                                        });
-                                    }
-                                    continue;
-                                }
-                            }
-                            let b = self.eval_expr(base)?;
-                            if let Value::Dict(entries) = b {
-                                let before = entries.len();
-                                let kept: Vec<(Value, Value)> =
-                                    entries.into_iter().filter(|(k, _)| !values_equal(k, &kv)).collect();
-                                if kept.len() == before {
-                                    return Err(RuntimeError {
-                                        message: format!("key {kv} not found"),
-                                        line: span.line,
-                                        col: span.col,
-                                    });
-                                }
-                                self.store_expr(base, Value::Dict(kept))?;
-                                continue;
-                            }
-                            let i = Self::as_index(kv, *span)?;
-                            match b {
-                                Value::List(mut items) => {
-                                    let n = items.len() as i64;
-                                    let i = if i < 0 { i + n } else { i };
-                                    if i < 0 || i >= n {
-                                        return Err(RuntimeError {
-                                            message: format!("index {i} out of range (len {n})"),
-                                            line: span.line,
-                                            col: span.col,
-                                        });
-                                    }
-                                    items.remove(i as usize);
-                                    self.store_expr(base, Value::List(items))?;
-                                }
-                                other => {
-                                    return Err(RuntimeError {
-                                        message: format!("cannot delete an index of {other}"),
-                                        line: span.line,
-                                        col: span.col,
-                                    })
-                                }
-                            }
-                        }
-                        nx_ast::Target::Attr { base, field } => {
-                            return Err(RuntimeError {
-                                message: format!(
-                                    "cannot delete field '{field}': fields come from a type declaration"
-                                ),
-                                line: base.span().line,
-                                col: base.span().col,
-                            })
-                        }
-                    }
-                }
+                self.exec_del(targets, *span)?;
                 Ok(None)
             }
             Stmt::Assert { cond, message, span } => {
                 let v = self.eval_expr(cond)?;
                 if !Self::expect_bool(v, cond.span())? {
-                    let detail = match message {
-                        Some(m) => format!(": {}", self.eval_expr(m)?),
-                        None => String::new(),
-                    };
-                    return Err(RuntimeError {
-                        message: format!("assertion failed{detail}"),
-                        line: span.line,
-                        col: span.col,
-                    });
+                    return Err(self.assertion_failed(message, *span));
+                }
+                Ok(None)
+            }
+            // Registering the layout is all a declaration does; it binds no
+            // runtime value.
+            Stmt::TypeDecl { name, fields, .. } => {
+                let cur = self.current_module();
+                if let Some(m) = self.modules.get_mut(&cur) {
+                    m.types
+                        .insert(name.clone(), fields.iter().map(|f| f.name.clone()).collect());
                 }
                 Ok(None)
             }
@@ -464,30 +355,28 @@ impl Interpreter {
             Stmt::FromImport { module, names, span } => {
                 self.load_module(module, span.line, span.col)?;
                 for (name, alias) in names {
-                    let v = self.module_member(module, name, span.line, span.col)?;
                     let bind = alias.clone().unwrap_or_else(|| name.clone());
+                    // A type imports as an alias, not a value: types are
+                    // constructed, never held, so there is nothing to bind.
+                    if self
+                        .modules
+                        .get(module)
+                        .and_then(|m| m.types.get(name))
+                        .is_some()
+                    {
+                        let cur = self.current_module();
+                        self.type_alias.insert(
+                            (cur, bind),
+                            (module.clone(), (*name).clone()),
+                        );
+                        continue;
+                    }
+                    let v = self.module_member(module, name, span.line, span.col)?;
                     self.assign(&bind, v)?;
                 }
                 Ok(None)
             }
-            Stmt::Return { values, .. } => {
-                // No values is `return`. One value is itself, not a
-                // one-element list, so `return f(x)` and `return x` agree.
-                // Several values become a list, which is what the caller's
-                // `a, b = f()` destructures.
-                let v = match values.len() {
-                    0 => Value::None,
-                    1 => self.eval_expr(&values[0])?,
-                    _ => {
-                        let mut parts = Vec::with_capacity(values.len());
-                        for e in values {
-                            parts.push(self.eval_expr(e)?);
-                        }
-                        Value::List(parts)
-                    }
-                };
-                Ok(Some(Flow::Return(v)))
-            }
+            Stmt::Return { values, .. } => self.exec_return(values),
             Stmt::Break { span } => {
                 let _ = span;
                 Ok(Some(Flow::Break))
@@ -503,6 +392,201 @@ impl Interpreter {
         }
     }
 
+/// Build the value a `return` produces.
+    ///
+    /// No values is `None`. One value is itself, not a one-element list, so
+    /// `return f(x)` and `return x` agree. Several values become a list,
+    /// which is what the caller's `a, b = f()` destructures.
+    fn exec_return(&mut self, values: &[Expr]) -> Result<Option<Flow>, RuntimeError> {
+        let v = match values.len() {
+            0 => Value::None,
+            1 => self.eval_expr(&values[0])?,
+            _ => {
+                let mut parts = Vec::with_capacity(values.len());
+                for e in values {
+                    parts.push(self.eval_expr(e)?);
+                }
+                Value::List(parts)
+            }
+        };
+        Ok(Some(Flow::Return(v)))
+    }
+
+    /// Build the error a failed `assert` raises. Its own function so the
+    /// formatting machinery stays out of `exec_stmt`'s frame.
+    #[cold]
+    #[inline(never)]
+    fn assertion_failed(
+        &mut self,
+        message: &Option<Expr>,
+        span: nx_ast::Span,
+    ) -> RuntimeError {
+        let detail = match message {
+            Some(m) => match self.eval_expr(m) {
+                Ok(v) => format!(": {v}"),
+                Err(e) => return e,
+            },
+            None => String::new(),
+        };
+        RuntimeError {
+            message: format!("assertion failed{detail}"),
+            line: span.line,
+            col: span.col,
+        }
+    }
+
+    /// `a = v`, `a, b = ...`, and `a, b = f()`.
+    ///
+    /// Split out of `exec_stmt` so that function's stack frame stays
+    /// small: a single frame is shared by every arm, so a bulky arm costs
+    /// stack on every recursive call rather than only its own.
+    #[inline(never)]
+    fn exec_assign(
+        &mut self,
+        targets: &[nx_ast::Target],
+        values: &[Expr],
+        span: nx_ast::Span,
+    ) -> Result<(), RuntimeError> {
+        // Several targets against one value destructures: the value is a
+        // tuple or multiple return, carried as a list.
+        if targets.len() > 1 && values.len() == 1 {
+            let v = self.eval_expr(&values[0])?;
+            let parts = match v {
+                Value::List(items) => items,
+                other => {
+                    return Err(RuntimeError {
+                        message: format!("cannot destructure {} into {} targets", other, targets.len()),
+                        line: span.line,
+                        col: span.col,
+                    })
+                }
+            };
+            if parts.len() != targets.len() {
+                return Err(RuntimeError {
+                    message: format!(
+                        "expected {} values to unpack, got {}",
+                        targets.len(),
+                        parts.len()
+                    ),
+                    line: span.line,
+                    col: span.col,
+                });
+            }
+            for (t, p) in targets.iter().zip(parts) {
+                self.store_target(t, p)?;
+            }
+            return Ok(());
+        }
+        if targets.len() != values.len() {
+            return Err(RuntimeError {
+                message: format!("{} targets but {} values", targets.len(), values.len()),
+                line: span.line,
+                col: span.col,
+            });
+        }
+        // Values are evaluated left to right before any is stored, so
+        // `a, b = b, a` swaps rather than clobbering.
+        let mut computed = Vec::with_capacity(values.len());
+        for v in values {
+            computed.push(self.eval_expr(v)?);
+        }
+        for (t, v) in targets.iter().zip(computed) {
+            self.store_target(t, v)?;
+        }
+        Ok(())
+    }
+
+    /// `del a`, `del a[i]`, `del d[k]`, `del p.x`.
+    #[inline(never)]
+    fn exec_del(
+        &mut self,
+        targets: &[nx_ast::Target],
+        span: nx_ast::Span,
+    ) -> Result<(), RuntimeError> {
+        for t in targets {
+            match t {
+                nx_ast::Target::Name(name) => {
+                    if self.lookup(name).is_none() {
+                        return Err(RuntimeError {
+                            message: format!("undefined variable '{name}'"),
+                            line: span.line,
+                            col: span.col,
+                        });
+                    }
+                    self.unbind(name)?;
+                }
+                nx_ast::Target::Index { base, index } => {
+                    let kv = self.eval_expr(index)?;
+                    // A dict is keyed by value, so it is matched before
+                    // the index has to be an Int.
+                    if let nx_ast::Expr::Var(name, _) = base.as_ref() {
+                        if let Some(entries) = self.lookup_mut_dict(name) {
+                            let before = entries.len();
+                            entries.retain(|(k, _)| !values_equal(k, &kv));
+                            if entries.len() == before {
+                                return Err(RuntimeError {
+                                    message: format!("key {kv} not found"),
+                                    line: span.line,
+                                    col: span.col,
+                                });
+                            }
+                            continue;
+                        }
+                    }
+                    let b = self.eval_expr(base)?;
+                    if let Value::Dict(entries) = b {
+                        let before = entries.len();
+                        let kept: Vec<(Value, Value)> = entries
+                            .into_iter()
+                            .filter(|(k, _)| !values_equal(k, &kv))
+                            .collect();
+                        if kept.len() == before {
+                            return Err(RuntimeError {
+                                message: format!("key {kv} not found"),
+                                line: span.line,
+                                col: span.col,
+                            });
+                        }
+                        self.store_expr(base, Value::Dict(kept))?;
+                        continue;
+                    }
+                    let i = Self::as_index(kv, span)?;
+                    match b {
+                        Value::List(mut items) => {
+                            let n = items.len() as i64;
+                            let at = if i < 0 { i + n } else { i };
+                            if at < 0 || at >= n {
+                                return Err(RuntimeError {
+                                    message: format!("index {i} out of range (len {n})"),
+                                    line: span.line,
+                                    col: span.col,
+                                });
+                            }
+                            items.remove(at as usize);
+                            self.store_expr(base, Value::List(items))?;
+                        }
+                        other => {
+                            return Err(RuntimeError {
+                                message: format!("cannot delete an index of {other}"),
+                                line: span.line,
+                                col: span.col,
+                            })
+                        }
+                    }
+                }
+                nx_ast::Target::Attr { base, field } => {
+                    // A record's arity is fixed, so removing a value means
+                    // blanking the field rather than changing the layout.
+                    let t = nx_ast::Target::Attr {
+                        base: base.clone(),
+                        field: field.clone(),
+                    };
+                    self.store_target(&t, Value::None)?;
+                }
+            }
+        }
+        Ok(())
+    }
     fn exec_for(
         &mut self,
         var: &str,
@@ -700,13 +784,14 @@ fn store_target(&mut self, target: &nx_ast::Target, v: Value) -> Result<(), Runt
                 }),
             }
         }
-        nx_ast::Target::Attr { base, field } => Err(RuntimeError {
-            message: format!(
-                "cannot assign field '{field}': fields come from a type declaration"
-            ),
-            line: base.span().line,
-            col: base.span().col,
-        }),
+        nx_ast::Target::Attr { base, field } => {
+            // Shared with `store_expr`'s attribute case: evaluate the
+            // holder, set the field, and write the holder back. Nesting
+            // (`n.at.y = v`) recurses through the same path.
+            let span = base.span();
+            let e = Expr::Attr { base: base.clone(), attr: field.clone(), span };
+            self.store_expr(&e, v)
+        }
     }
 }
 
@@ -750,6 +835,38 @@ fn store_expr(&mut self, e: &Expr, v: Value) -> Result<(), RuntimeError> {
                 }
                 other => Err(RuntimeError {
                     message: format!("cannot index-assign into {other}"),
+                    line: span.line,
+                    col: span.col,
+                }),
+            }
+        }
+        // `n.at.y = v`: evaluate the holder, set the field on the copy,
+        // and write the holder back through the same path recursively.
+        // Copies compose, so each level stays independent.
+        Expr::Attr { base, attr, span } => {
+            let b = self.eval_expr(base)?;
+            let (module, type_name, fields) = match b {
+                Value::Record { module, type_name, fields } => (module, type_name, fields),
+                other => {
+                    return Err(RuntimeError {
+                        message: format!("only types have fields, found {other}"),
+                        line: span.line,
+                        col: span.col,
+                    })
+                }
+            };
+            let layout = self.type_fields(&module, &type_name);
+            match layout.iter().position(|n| n == attr) {
+                Some(i) if i < fields.len() => {
+                    let mut updated = fields;
+                    updated[i] = v;
+                    self.store_expr(
+                        base,
+                        Value::Record { module, type_name, fields: updated },
+                    )
+                }
+                _ => Err(RuntimeError {
+                    message: format!("type '{type_name}' has no field '{attr}'"),
                     line: span.line,
                     col: span.col,
                 }),
@@ -855,7 +972,24 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
     }
 }
 
-fn lookup(&self, name: &str) -> Option<Value> {
+/// Field names of a declared type. The declaring module is tried first,
+    /// so two modules declaring the same type name never collide; the
+    /// global fallback covers values built before an alias was registered.
+    fn type_fields(&self, module: &str, type_name: &str) -> Vec<String> {
+        if let Some(m) = self.modules.get(module) {
+            if let Some(f) = m.types.get(type_name) {
+                return f.clone();
+            }
+        }
+        for m in self.modules.values() {
+            if let Some(f) = m.types.get(type_name) {
+                return f.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    fn lookup(&self, name: &str) -> Option<Value> {
         // Own call frame first, then the defining module's globals.
         // No dynamic fallback into caller frames (v0 scoping rule).
         if let Some(top) = self.frames.last() {
@@ -892,6 +1026,15 @@ fn lookup(&self, name: &str) -> Option<Value> {
         }
         if m.funcs.contains_key(name) {
             return Ok(Value::Func { module: module.to_string(), name: name.to_string() });
+        }
+        // A type is constructed, never held, so using one as a value names
+        // the fix instead of just failing the lookup.
+        if m.types.contains_key(name) {
+            return Err(RuntimeError {
+                message: format!("type '{module}.{name}' cannot be used as a value; construct it"),
+                line,
+                col,
+            });
         }
         Err(RuntimeError {
             message: format!("module '{module}' has no member '{name}'"),
@@ -1108,6 +1251,7 @@ fn lookup(&self, name: &str) -> Option<Value> {
             memo_ok: self.memo_ok.clone(),
             memo_seen: self.memo_seen.clone(),
             memo: self.memo.clone(),
+            type_alias: self.type_alias.clone(),
         }
     }
 
@@ -1142,153 +1286,16 @@ fn lookup(&self, name: &str) -> Option<Value> {
             Expr::Bool(b, _) => Ok(Value::Bool(*b)),
             Expr::Str(s, _) => Ok(Value::Str(s.clone())),
             Expr::NoneLit(_) => Ok(Value::None),
-            Expr::Range { start, end, .. } => {
-                let s = self.eval_expr(start)?;
-                let e = self.eval_expr(end)?;
-                let (Value::Int(a), Value::Int(b)) = (s, e) else {
-                    return Err(RuntimeError {
-                        message: "range bounds must be Int".to_string(),
-                        line: start.span().line,
-                        col: start.span().col,
-                    });
-                };
-                // Ascending and half-open, matching `for i in a..b`. An empty
-                // range is an empty list, so the count never goes negative.
-                let mut items = Vec::new();
-                let mut i = a;
-                while i < b {
-                    items.push(Value::Int(i));
-                    i += 1;
-                }
-                Ok(Value::List(items))
-            }
-            Expr::Dict(pairs, span) => {
-                // Later duplicates of a key overwrite the earlier value but
-                // keep the original position, matching the in-place set
-                // path. Position matters because iteration order is part of
-                // the determinism contract.
-                let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
-                for (k, v) in pairs {
-                    let key = self.eval_expr(k)?;
-                    let val = self.eval_expr(v)?;
-                    match entries.iter_mut().find(|(ek, _)| *ek == key) {
-                        Some(slot) => slot.1 = val,
-                        None => entries.push((key, val)),
-                    }
-                }
-                let _ = span;
-                Ok(Value::Dict(entries))
-            }
-            Expr::Slice { base, from, to, step, span } => {
-                let b = self.eval_expr(base)?;
-                let items = match &b {
-                    Value::List(items) => items.clone(),
-                    Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
-                    other => {
-                        return Err(RuntimeError {
-                            message: format!("cannot slice {other}"),
-                            line: span.line,
-                            col: span.col,
-                        })
-                    }
-                };
-                let n = items.len() as i64;
-                // A slice copies. A view would alias the original and make
-                // `a[1:3] = ...` and later mutations interact in ways that
-                // are hard to reason about; copying is the honest default.
-                let norm = |v: Option<i64>| -> i64 {
-                    match v {
-                        None => 0,
-                        Some(x) if x < 0 => (x + n).max(0),
-                        Some(x) => x.min(n),
-                    }
-                };
-                let start = norm(from.as_ref().map(|e| Self::as_index(self.eval_expr(e)?, e.span())).transpose()?);
-                let stop = match to {
-                    None => n,
-                    Some(e) => {
-                        let raw = Self::as_index(self.eval_expr(e)?, e.span())?;
-                        if raw < 0 {
-                            (raw + n).max(0)
-                        } else {
-                            raw.min(n)
-                        }
-                    }
-                };
-                let step = match step {
-                    None => 1i64,
-                    Some(e) => Self::as_index(self.eval_expr(e)?, e.span())?,
-                };
-                if step <= 0 {
-                    return Err(RuntimeError {
-                        message: format!("slice step must be positive, found {step}"),
-                        line: span.line,
-                        col: span.col,
-                    });
-                }
-                let mut out = Vec::new();
-                let mut i = start;
-                while i < stop {
-                    out.push(items[i as usize].clone());
-                    i += step;
-                }
-                // Slicing a string gives a string, not a list of characters.
-                if matches!(b, Value::Str(_)) {
-                    let s: String = out
-                        .iter()
-                        .map(|v| match v {
-                            Value::Str(s) => s.clone(),
-                            _ => String::new(),
-                        })
-                        .collect();
-                    return Ok(Value::Str(s));
-                }
-                Ok(Value::List(out))
+            Expr::Range { start, end, .. } => self.eval_range(start, end),
+            Expr::Dict(pairs, _) => self.eval_dict(pairs),
+            Expr::Slice { base, from, to, step, .. } => {
+                self.eval_slice(base, from, to, step)
             }
             Expr::IfExpr { cond, then_value, else_value, .. } => {
-                // Only the taken branch is evaluated, so this is safe for
-                // guarding an operation that would otherwise fail.
-                let c = self.eval_expr(cond)?;
-                if Self::expect_bool(c, cond.span())? {
-                    self.eval_expr(then_value)
-                } else {
-                    self.eval_expr(else_value)
-                }
+                self.eval_if_expr(cond, then_value, else_value)
             }
             Expr::Comprehension { element, var, iter, cond, .. } => {
-                let it = self.eval_expr(iter)?;
-                let items = match it {
-                    Value::List(items) => items,
-                    Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
-                    other => {
-                        return Err(RuntimeError {
-                            message: format!("cannot iterate over {other}"),
-                            line: iter.span().line,
-                            col: iter.span().col,
-                        })
-                    }
-                };
-                let mut out = Vec::with_capacity(items.len());
-                // The loop variable is saved and restored so the
-                // comprehension does not leak its binding, and so an inner
-                // comprehension over the same name does not clobber an outer
-                // one's value.
-                let saved = self.lookup(var);
-                for item in items {
-                    self.assign(var, item)?;
-                    if let Some(c) = cond {
-                        let cv = self.eval_expr(c)?;
-                        if !Self::expect_bool(cv, c.span())? {
-                            continue;
-                        }
-                    }
-                    out.push(self.eval_expr(element)?);
-                }
-                match saved {
-                    Some(v) => self.assign(var, v)?,
-                    None => self.unbind(var)?,
-                }
-                Ok(Value::List(out))
+                self.eval_comprehension(element, var, iter, cond)
             }
             Expr::List(items, _) => {
                 let mut vs = Vec::with_capacity(items.len());
@@ -1361,47 +1368,331 @@ fn lookup(&self, name: &str) -> Option<Value> {
                 let r = self.eval_expr(right)?;
                 self.apply_binop(l, *op, r, span.line, span.col)
             }
-            Expr::Attr { base, attr, span } => {
-                let b = self.eval_expr(base)?;
-                match b {
-                    Value::Module(m) => self.module_member(&m, attr, span.line, span.col),
+            Expr::Attr { base, attr, span } => self.eval_attr(base, attr, *span),
+            Expr::Call { callee, args, span } => self.eval_call(callee, args, *span),
+        }
+    }
+
+    /// `a.b`: a module member or a record field. Split out of `eval_expr`
+    /// to keep that function's frame small; see the note below.
+    #[inline(never)]
+    fn eval_attr(
+        &mut self,
+        base: &Expr,
+        attr: &str,
+        span: nx_ast::Span,
+    ) -> Result<Value, RuntimeError> {
+        let b = self.eval_expr(base)?;
+        match b {
+            Value::Module(m) => self.module_member(&m, attr, span.line, span.col),
+            // The field name resolves against the layout of the value's own
+            // type, so a record keeps working after it has moved.
+            Value::Record { module, type_name, fields } => {
+                let layout = self.type_fields(&module, &type_name);
+                match layout.iter().position(|n| n == attr) {
+                    Some(i) if i < fields.len() => Ok(fields[i].clone()),
                     _ => Err(RuntimeError {
-                        message: "only modules support attribute access".to_string(),
+                        message: format!("type '{type_name}' has no field '{attr}'"),
                         line: span.line,
                         col: span.col,
                     }),
                 }
             }
-            Expr::Call { callee, args, span } => {
-                // Builtins stay global: len(...), push(...).
-                if let Expr::Var(name, _) = callee.as_ref() {
-                    if name == "len" || name == "push" {
-                        return self.call_builtin(name, args, span.line, span.col);
-                    }
-                    // Plain `foo(...)`: function defined in the current module.
-                    let cur = self.current_module();
+            other => Err(RuntimeError {
+                message: format!("only modules and types have attributes, found {other}"),
+                line: span.line,
+                col: span.col,
+            }),
+        }
+    }
+
+    /// `start..end` -- ascending, half-open, materialised as a list.
+    ///
+    /// The container-shaped arms of `eval_expr` are all extracted into
+    /// their own functions. `eval_expr` compiles to a single stack frame
+    /// holding every arm's locals, so a bulky arm costs stack on every
+    /// recursive call rather than only its own -- and this interpreter
+    /// recurses once per call frame.
+    #[inline(never)]
+    fn eval_range(
+        &mut self,
+        start: &Expr,
+        end: &Expr,
+    ) -> Result<Value, RuntimeError> {
+        let s = self.eval_expr(start)?;
+        let e = self.eval_expr(end)?;
+        let (Value::Int(a), Value::Int(b)) = (s, e) else {
+            return Err(RuntimeError {
+                message: "range bounds must be Int".to_string(),
+                line: start.span().line,
+                col: start.span().col,
+            });
+        };
+        // An empty or inverted range is an empty list, so the count never
+        // goes negative.
+        let mut items = Vec::new();
+        let mut i = a;
+        while i < b {
+            items.push(Value::Int(i));
+            i += 1;
+        }
+        Ok(Value::List(items))
+    }
+
+    /// `{k: v, ...}`. A later duplicate of a key overwrites the value but
+    /// keeps the original position, so iteration order stays stable.
+    #[inline(never)]
+    fn eval_dict(&mut self, pairs: &[(Expr, Expr)]) -> Result<Value, RuntimeError> {
+        let mut entries: Vec<(Value, Value)> = Vec::with_capacity(pairs.len());
+        for (k, v) in pairs {
+            let key = self.eval_expr(k)?;
+            let val = self.eval_expr(v)?;
+            match entries.iter_mut().find(|(ek, _)| values_equal(ek, &key)) {
+                Some(slot) => slot.1 = val,
+                None => entries.push((key, val)),
+            }
+        }
+        Ok(Value::Dict(entries))
+    }
+
+    /// `base[from:to:step]`. Copies rather than aliases: a view would make
+    /// later mutation of either side surprising.
+    #[inline(never)]
+    fn eval_slice(
+        &mut self,
+        base: &Expr,
+        from: &Option<Box<Expr>>,
+        to: &Option<Box<Expr>>,
+        step: &Option<Box<Expr>>,
+    ) -> Result<Value, RuntimeError> {
+        let span = base.span();
+        let b = self.eval_expr(base)?;
+        let items = match &b {
+            Value::List(items) => items.clone(),
+            Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
+            other => {
+                return Err(RuntimeError {
+                    message: format!("cannot slice {other}"),
+                    line: span.line,
+                    col: span.col,
+                })
+            }
+        };
+        let n = items.len() as i64;
+        let norm = |v: Option<i64>| -> i64 {
+            match v {
+                None => 0,
+                Some(x) if x < 0 => (x + n).max(0),
+                Some(x) => x.min(n),
+            }
+        };
+        let read = |me: &mut Self, e: &Option<Box<Expr>>, absent: i64| -> Result<i64, RuntimeError> {
+            match e {
+                Some(x) => {
+                    let v = me.eval_expr(x)?;
+                    Self::as_index(v, x.span())
+                }
+                None => Ok(absent),
+            }
+        };
+        // An absent `from` means zero and an absent `to` means the length,
+        // which is what `norm` then clamps.
+        let start = norm(Some(read(self, from, 0)?));
+        let stop = match to {
+            None => n,
+            Some(e) => {
+                let raw = read(self, &Some(e.clone()), 0)?;
+                if raw < 0 {
+                    (raw + n).max(0)
+                } else {
+                    raw.min(n)
+                }
+            }
+        };
+        let stride = read(self, step, 1)?;
+        if stride <= 0 {
+            return Err(RuntimeError {
+                message: format!("slice step must be positive, found {stride}"),
+                line: span.line,
+                col: span.col,
+            });
+        }
+        let mut out = Vec::new();
+        let mut i = start;
+        while i < stop {
+            out.push(items[i as usize].clone());
+            i += stride;
+        }
+        // Slicing a string gives a string, not a list of characters.
+        if matches!(b, Value::Str(_)) {
+            let s: String = out
+                .iter()
+                .map(|v| match v {
+                    Value::Str(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .collect();
+            return Ok(Value::Str(s));
+        }
+        Ok(Value::List(out))
+    }
+
+    /// `a if cond else b`. Only the taken branch is evaluated, so this is
+    /// safe for guarding an operation that would otherwise fail.
+    #[inline(never)]
+    fn eval_if_expr(
+        &mut self,
+        cond: &Expr,
+        then_value: &Expr,
+        else_value: &Expr,
+    ) -> Result<Value, RuntimeError> {
+        let c = self.eval_expr(cond)?;
+        if Self::expect_bool(c, cond.span())? {
+            self.eval_expr(then_value)
+        } else {
+            self.eval_expr(else_value)
+        }
+    }
+
+    /// `[expr for var in iter if cond]`. The loop variable is saved and
+    /// restored, so a comprehension neither leaks its binding nor clobbers
+    /// an outer variable of the same name.
+    #[inline(never)]
+    fn eval_comprehension(
+        &mut self,
+        element: &Expr,
+        var: &str,
+        iter: &Expr,
+        cond: &Option<Box<Expr>>,
+    ) -> Result<Value, RuntimeError> {
+        let it = self.eval_expr(iter)?;
+        let items = match it {
+            Value::List(items) => items,
+            Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
+            other => {
+                return Err(RuntimeError {
+                    message: format!("cannot iterate over {other}"),
+                    line: iter.span().line,
+                    col: iter.span().col,
+                })
+            }
+        };
+        let mut out = Vec::with_capacity(items.len());
+        let saved = self.lookup(var);
+        for item in items {
+            self.assign(var, item)?;
+            if let Some(c) = cond {
+                let cv = self.eval_expr(c)?;
+                if !Self::expect_bool(cv, c.span())? {
+                    continue;
+                }
+            }
+            out.push(self.eval_expr(element)?);
+        }
+        match saved {
+            Some(v) => self.assign(var, v)?,
+            None => self.unbind(var)?,
+        }
+        Ok(Value::List(out))
+    }
+
+    /// `f(...)`. Builtins, type constructors and direct calls; anything
+    /// else falls through to calling a function value.
+    #[inline(never)]
+    fn eval_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        span: nx_ast::Span,
+    ) -> Result<Value, RuntimeError> {
+        if let Expr::Var(name, _) = callee {
+            if name == "len" || name == "push" {
+                return self.call_builtin(name, args, span.line, span.col);
+            }
+            let cur = self.current_module();
+            // `from m import T [as U]`: the alias resolves to the
+            // declaring module's layout, exactly as the checker sees it.
+            if let Some((decl, real)) =
+                self.type_alias.get(&(cur.clone(), name.clone())).cloned()
+            {
+                return self.construct(&decl, &real, args, span);
+            }
+            // A declared type is constructed by name, sharing the call
+            // spelling with a function.
+            if self.modules.get(&cur).and_then(|m| m.types.get(name)).is_some() {
+                return self.construct(&cur, name, args, span);
+            }
+            // Plain `foo(...)`: a function in the current module.
+            if self
+                .modules
+                .get(&cur)
+                .map(|m| m.funcs.contains_key(name))
+                .unwrap_or(false)
+            {
+                return self.call_func(&cur, name, args, span.line, span.col);
+            }
+        }
+        // `m.T(...)` through a plain `import m`: the layout lives in the
+        // imported module, not the current one.
+        if let Expr::Attr { base, attr, .. } = callee {
+            if let Expr::Var(m, _) = base.as_ref() {
+                if let Some(Value::Module(modname)) = self.lookup(m) {
                     if self
                         .modules
-                        .get(&cur)
-                        .map(|m| m.funcs.contains_key(name))
-                        .unwrap_or(false)
+                        .get(&modname)
+                        .and_then(|mm| mm.types.get(attr))
+                        .is_some()
                     {
-                        return self.call_func(&cur, name, args, span.line, span.col);
+                        return self.construct(&modname, attr, args, span);
                     }
-                }
-                let target = self.eval_expr(callee)?;
-                match target {
-                    Value::Func { module, name } => {
-                        self.call_func(&module, &name, args, span.line, span.col)
-                    }
-                    _ => Err(RuntimeError {
-                        message: "not callable".to_string(),
-                        line: span.line,
-                        col: span.col,
-                    }),
                 }
             }
         }
+        let target = self.eval_expr(callee)?;
+        match target {
+            Value::Func { module, name } => {
+                self.call_func(&module, &name, args, span.line, span.col)
+            }
+            _ => Err(RuntimeError {
+                message: "not callable".to_string(),
+                line: span.line,
+                col: span.col,
+            }),
+        }
+    }
+
+    /// Build a record of a declared type: exact arity, then positional
+    /// fields. The declaring module is recorded on the value so its
+    /// layout stays resolvable no matter where the value travels.
+    fn construct(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: &[Expr],
+        span: nx_ast::Span,
+    ) -> Result<Value, RuntimeError> {
+        let layout = self.type_fields(module, name);
+        if args.len() != layout.len() {
+            return Err(RuntimeError {
+                message: format!(
+                    "type '{name}' takes {} field{}, got {}",
+                    layout.len(),
+                    if layout.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                line: span.line,
+                col: span.col,
+            });
+        }
+        let mut fields = Vec::with_capacity(args.len());
+        for a in args {
+            fields.push(self.eval_expr(a)?);
+        }
+        Ok(Value::Record {
+            module: module.to_string(),
+            type_name: name.to_string(),
+            fields,
+        })
     }
 
     fn eval_index(
@@ -1905,6 +2196,23 @@ fn values_equal(a: &Value, b: &Value) -> bool {
             m1 == m2 && n1 == n2
         }
         (Value::None, Value::None) => true,
+        // Order-insensitive: `{a: 1, b: 2}` equals `{b: 2, a: 1}`. Same
+        // rule as the runtime's `nx_dicteq`, which is what `==` compiles
+        // to on the native path.
+        (Value::Dict(x), Value::Dict(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(k, v)| {
+                    y.iter().any(|(k2, v2)| values_equal(k, k2) && values_equal(v, v2))
+                })
+        }
+        // Same type name, then field by field. The name comparison is by
+        // string rather than declaration identity so two structurally
+        // identical declarations agree even across modules -- the same
+        // rule as the runtime's `nx_receq`.
+        (
+            Value::Record { type_name: t1, fields: f1, .. },
+            Value::Record { type_name: t2, fields: f2, .. },
+        ) => t1 == t2 && f1.len() == f2.len() && f1.iter().zip(f2.iter()).all(|(a, b)| values_equal(a, b)),
         _ => false,
     }
 }
@@ -2320,6 +2628,168 @@ mod tests {
         assert_eq!(one("print(-2 ** 2)"), "-4");
         // The exponent may itself be signed, as long as it stays a Float.
         assert_eq!(one("print(2.0 ** -1)"), "0.5");
+    }
+
+    // ---- records ----
+
+    #[test]
+    fn record_construction_and_field_read() {
+        assert_eq!(
+            one("type P:\n    x: Int\n    y: Int\np = P(1, 2)\nprint(p)"),
+            "P(1, 2)"
+        );
+        assert_eq!(
+            one("type P:\n    x: Int\n    y: Int\np = P(1, 2)\nprint(p.x + p.y)"),
+            "3"
+        );
+    }
+
+    #[test]
+    fn record_field_write() {
+        assert_eq!(
+            one("type P:\n    x: Int\np = P(1)\np.x = 9\nprint(p.x)"),
+            "9"
+        );
+        assert_eq!(
+            one("type P:\n    x: Int\np = P(1)\np.x += 5\nprint(p)"),
+            "P(6)"
+        );
+    }
+
+    #[test]
+    fn record_constructor_arity_is_exact() {
+        assert!(run_src("type P:\n    x: Int\n    y: Int\np = P(1)\nprint(p)").is_err());
+        assert!(run_src("type P:\n    x: Int\np = P(1, 2)\nprint(p)").is_err());
+    }
+
+    #[test]
+    fn record_unknown_field_errors() {
+        assert!(run_src("type P:\n    x: Int\np = P(1)\nprint(p.z)").is_err());
+        assert!(run_src("type P:\n    x: Int\np = P(1)\np.z = 2").is_err());
+    }
+
+    #[test]
+    fn record_equality_is_structural() {
+        assert_eq!(
+            one("type P:\n    x: Int\n    y: Int\nprint(P(1, 2) == P(1, 2))"),
+            "true"
+        );
+        assert_eq!(
+            one("type P:\n    x: Int\n    y: Int\nprint(P(1, 2) == P(1, 3))"),
+            "false"
+        );
+        // Different types never compare equal, even field-identical ones.
+        assert_eq!(
+            one("type P:\n    x: Int\ntype Q:\n    x: Int\nprint(P(1) == Q(1))"),
+            "false"
+        );
+    }
+
+    #[test]
+    fn dict_equality_is_structural() {
+        assert_eq!(one("print({\"a\": 1} == {\"a\": 1})"), "true");
+        assert_eq!(one("print({\"a\": 1} == {\"a\": 2})"), "false");
+        assert_eq!(one("print({\"a\": 1} == {\"a\": 1, \"b\": 2})"), "false");
+        // Order-insensitive: iteration order is stable, equality is not
+        // order.
+        assert_eq!(one("print({\"a\": 1, \"b\": 2} == {\"b\": 2, \"a\": 1})"), "true");
+    }
+
+    /// Containers have value semantics: binding copies, so a later write
+    /// through the original is invisible through the copy. This is the
+    /// rule the native backend's `nx_clone` implements.
+    #[test]
+    fn assignment_copies_lists_dicts_and_records() {
+        assert_eq!(
+            one("xs = [1, 2]\nys = xs\nxs[0] = 9\nprint(ys)"),
+            "[1, 2]"
+        );
+        assert_eq!(
+            one("a = {\"k\": 1}\nb = a\na[\"k\"] = 9\nprint(b)"),
+            "{k: 1}"
+        );
+        assert_eq!(
+            one("type P:\n    x: Int\np = P(1)\nq = p\np.x = 9\nprint(q)"),
+            "P(1)"
+        );
+        // Nested containers copy all the way down.
+        assert_eq!(
+            one("xs = [[1]]\nys = xs\nxs[0][0] = 9\nprint(ys)"),
+            "[[1]]"
+        );
+    }
+
+    /// Arguments never alias the caller's value: mutating a parameter is
+    /// invisible outside the call.
+    #[test]
+    fn arguments_do_not_alias() {
+        assert_eq!(
+            lines("fn bump(xs):\n    xs[0] = 99\n    return xs[0]\nxs = [1]\nprint(bump(xs))\nprint(xs)"),
+            vec!["99", "[1]"]
+        );
+        assert_eq!(
+            lines("type P:\n    x: Int\nfn bump(p):\n    p.x = 99\n    return p.x\np = P(1)\nprint(bump(p))\nprint(p)"),
+            vec!["99", "P(1)"]
+        );
+        assert_eq!(
+            lines("fn put(d):\n    d[\"k\"] = 99\n    return d[\"k\"]\nd = {\"k\": 1}\nprint(put(d))\nprint(d)"),
+            vec!["99", "{k: 1}"]
+        );
+    }
+
+    #[test]
+    fn dynamic_field_access() {
+        // Through an unresolved parameter the field resolves by name at
+        // runtime -- the same path the native backend's `nx_rec_getn`
+        // takes.
+        assert_eq!(
+            one("type P:\n    x: Int\nfn get(p):\n    return p.x\nprint(get(P(7)))"),
+            "7"
+        );
+        assert_eq!(
+            one("type P:\n    x: Int\nfn bump(p):\n    p.x += 1\n    return p.x\nprint(bump(P(7)))"),
+            "8"
+        );
+        assert!(run_src("type P:\n    x: Int\nfn get(p):\n    return p.z\nprint(get(P(7)))").is_err());
+    }
+
+    #[test]
+    fn record_del_blanks_the_field() {
+        // A record's arity is fixed, so `del` blanks rather than removes.
+        assert_eq!(
+            one("type P:\n    x: Int\n    y: Int\np = P(1, 2)\ndel p.x\nprint(p)"),
+            "P(none, 2)"
+        );
+    }
+
+    #[test]
+    fn records_in_containers() {
+        assert_eq!(
+            one("type P:\n    x: Int\npts = [P(1), P(2)]\nprint(pts[1].x)"),
+            "2"
+        );
+        assert_eq!(
+            one("type P:\n    x: Int\ntype Line:\n    a\n    b\nl = Line(P(1), P(2))\nprint(l.b.x)"),
+            "2"
+        );
+    }
+
+    #[test]
+    fn unresolved_index_accepts_scalar_keys() {
+        // An unresolved base may hold a list or a dict; a scalar key is
+        // accepted for either and dispatches at runtime.
+        assert_eq!(
+            one("fn get(d, k):\n    return d[k]\nprint(get({\"a\": 5}, \"a\"))"),
+            "5"
+        );
+        assert_eq!(
+            one("fn get(xs, k):\n    return xs[k]\nprint(get([10, 20], 1))"),
+            "20"
+        );
+        assert_eq!(
+            one("fn set(d, k, v):\n    d[k] = v\n    return d[k]\nprint(set({\"a\": 1}, \"b\", 2))"),
+            "2"
+        );
     }
 
     #[test]

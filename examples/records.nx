@@ -1,0 +1,76 @@
+# Records: declared types with value semantics.
+#
+# A `type` declares a layout; `Point(...)` constructs a value with fields
+# in declaration order. Field access is `p.x`, field assignment is
+# `p.x = v`. Containers copy on bind, so neither assignment nor argument
+# passing aliases -- mutating through one binding never affects another.
+
+type Point:
+    x: Float
+    y: Float
+
+type Named:
+    name: Str
+    at: Point
+
+# --- construction and printing --------------------------------------
+p = Point(1.0, 2.0)
+print(p)
+print(p.x, p.y)
+
+# --- field writes ----------------------------------------------------
+p.x = 9.0
+p.y += 1.0
+p.x *= 2.0
+print(p)
+
+# --- nested records --------------------------------------------------
+n = Named("origin", Point(0.0, 0.0))
+print(n)
+print(n.at.x, n.name)
+n.at.y = 5.0
+print(n.at)
+
+# --- records in lists ------------------------------------------------
+pts = [Point(1.0, 1.0), Point(2.0, 2.0)]
+print(pts[0].x + pts[1].y)
+pts[0].x = 7.0
+print(pts[0])
+
+# --- equality is structural ------------------------------------------
+print(Point(1.0, 2.0) == Point(1.0, 2.0))
+print(Point(1.0, 2.0) == Point(1.0, 3.0))
+print({"k": 1} == {"k": 1})
+print({"k": 1} == {"k": 2})
+print({"a": 1, "b": 2} == {"b": 2, "a": 1})
+
+# --- value semantics --------------------------------------------------
+# Neither assignment nor calls alias: the copy is independent.
+q = p
+q.x = 0.0
+print(p.x, q.x)
+
+fn bump(r):
+    r.x = r.x + 100.0
+    return r.x
+
+print(bump(p))
+print(p.x)
+
+# --- dynamic field access ---------------------------------------------
+# Through an unresolved parameter the field resolves by name at runtime.
+fn getx(v):
+    return v.x
+
+print(getx(p))
+print(getx(Named("a", Point(3.0, 4.0)).at))
+
+# --- del blanks the field ----------------------------------------------
+# A record's arity is fixed, so `del` blanks rather than removes.
+del p.y
+print(p)
+
+# --- types across modules -----------------------------------------------
+# (Covered by the module tests: `import` brings `m.T(...)`, and
+# `from m import T [as U]` constructs through the alias with the
+# canonical identity, so values built either way compare equal.)

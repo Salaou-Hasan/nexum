@@ -18,6 +18,9 @@
 ; Dict header mirrors a list; entries are (key, value) pairs.
 %NxDict = type { ptr, i64, i64 }
 %NxDictEntry = type { %NxVal, %NxVal }
+%NxRec = type { ptr, i64, ptr }  ; fields, nfields, type descriptor
+%NxDesc = type { ptr, i64, i64, ptr }  ; type-name bytes, type-name len, nfields, field-name table
+%NxRecName = type { i64, ptr } ; name length, name bytes
 
 declare i32 @printf(ptr, ...)
 declare void @exit(i32)
@@ -40,10 +43,12 @@ declare double @llvm.pow.f64(double, double)
 @.fmt.false = private constant [6 x i8] c"false\00"
 @.fmt.none = private constant [5 x i8] c"none\00"
 @.fmt.lb = private constant [2 x i8] c"[\00"
+@.fmt.rb = private constant [2 x i8] c"]\00"
+@.fmt.lparen = private constant [2 x i8] c"(\00"
+@.fmt.rparen = private constant [2 x i8] c")\00"
 @.fmt.brace_l = private constant [2 x i8] c"{\00"
 @.fmt.brace_r = private constant [2 x i8] c"}\00"
 @.fmt.colonsp = private constant [3 x i8] c": \00"
-@.fmt.rb = private constant [2 x i8] c"]\00"
 @.fmt.comma = private constant [3 x i8] c", \00"
 @.fmt.fnopen = private constant [5 x i8] c"<fn \00"
 @.fmt.close = private constant [2 x i8] c">\00"
@@ -233,6 +238,8 @@ entry:
   switch i64 %t, label %done [
     i64 4, label %str
     i64 5, label %list
+    i64 7, label %dict
+    i64 8, label %rec
   ]
 str:
   %p = extractvalue %NxVal %v, 1
@@ -260,6 +267,59 @@ lbody:
 lout:
   call void @free(ptr %data)
   call void @free(ptr %h)
+  ret void
+dict:
+  ; A dict frees each entry's storage the same way a list frees its
+  ; elements: entries hold boxes, and only the entry array and header
+  ; themselves are heap blocks owned here.
+  %dhp = extractvalue %NxVal %v, 1
+  %dh = inttoptr i64 %dhp to ptr
+  %ddp = getelementptr %NxDict, ptr %dh, i64 0, i32 0
+  %ddata = load ptr, ptr %ddp
+  %dlp = getelementptr %NxDict, ptr %dh, i64 0, i32 1
+  %dlen = load i64, ptr %dlp
+  br label %dcond
+dcond:
+  %di = phi i64 [0, %dict], [%di2, %dbody]
+  %dfin = icmp eq i64 %di, %dlen
+  br i1 %dfin, label %dout, label %dbody
+dbody:
+  %dep = getelementptr %NxDictEntry, ptr %ddata, i64 %di
+  %dkp = getelementptr %NxDictEntry, ptr %dep, i64 0, i32 0
+  %dvp = getelementptr %NxDictEntry, ptr %dep, i64 0, i32 1
+  %dk = load %NxVal, ptr %dkp
+  %dv = load %NxVal, ptr %dvp
+  call void @nx_free_val(%NxVal %dk)
+  call void @nx_free_val(%NxVal %dv)
+  %di2 = add i64 %di, 1
+  br label %dcond
+dout:
+  call void @free(ptr %ddata)
+  call void @free(ptr %dh)
+  ret void
+rec:
+  ; Fields are boxes owned by the record; the descriptor is a static
+  ; global and is never freed.
+  %rhp = extractvalue %NxVal %v, 1
+  %rh = inttoptr i64 %rhp to ptr
+  %rfp = getelementptr %NxRec, ptr %rh, i64 0, i32 0
+  %rfields = load ptr, ptr %rfp
+  %rnp = getelementptr %NxRec, ptr %rh, i64 0, i32 1
+  %rn = load i64, ptr %rnp
+  br label %rcond
+rcond:
+  %rri = phi i64 [0, %rec], [%rri2, %rbody]
+  %rfin = icmp eq i64 %rri, %rn
+  br i1 %rfin, label %rout, label %rbody
+rbody:
+  %rep = getelementptr %NxVal, ptr %rfields, i64 %rri
+  %re = load %NxVal, ptr %rep
+  call void @nx_free_val(%NxVal %re)
+  %rri2 = add i64 %rri, 1
+  br label %rcond
+rout:
+  call void @free(ptr %rfields)
+  call void @free(ptr %rh)
   ret void
 done:
   ret void
@@ -341,6 +401,7 @@ entry:
     i64 5, label %list
     i64 6, label %func
     i64 7, label %dict
+    i64 8, label %rec
   ]
 none:
   call i32 (ptr, ...) @printf(ptr @.fmt.none)
@@ -432,6 +493,38 @@ dval:
   br label %dcond
 dend:
   call i32 (ptr, ...) @printf(ptr @.fmt.brace_r)
+  ret void
+; Records print in constructor form -- `Point(1, 2)` -- so the output
+; reads back as the expression that would build the value. The type name
+; comes from the descriptor, which the backend emits per declaration.
+rec:
+  %rd = call ptr @nx_rec_desc(%NxVal %v)
+  %rtp = getelementptr %NxDesc, ptr %rd, i64 0, i32 0
+  %rt = load ptr, ptr %rtp
+  %rlp = getelementptr %NxDesc, ptr %rd, i64 0, i32 1
+  %rl = load i64, ptr %rlp
+  %rl32 = trunc i64 %rl to i32
+  call i32 (ptr, ...) @printf(ptr @.fmt.ss, i32 %rl32, ptr %rt)
+  call i32 (ptr, ...) @printf(ptr @.fmt.lparen)
+  %rn = call i64 @nx_rec_nfields(%NxVal %v)
+  br label %rcond
+rcond:
+  %ri = phi i64 [0, %rec], [%ri2, %rval]
+  %rdone = icmp eq i64 %ri, %rn
+  br i1 %rdone, label %rend, label %rbody
+rbody:
+  %rsp = icmp ne i64 %ri, 0
+  br i1 %rsp, label %rcomma, label %rval
+rcomma:
+  call i32 (ptr, ...) @printf(ptr @.fmt.comma)
+  br label %rval
+rval:
+  %re = call %NxVal @nx_rec_get(%NxVal %v, i64 %ri)
+  call void @nx_print_val(%NxVal %re)
+  %ri2 = add i64 %ri, 1
+  br label %rcond
+rend:
+  call i32 (ptr, ...) @printf(ptr @.fmt.rparen)
   ret void
 func:
   %np = extractvalue %NxVal %v, 2
@@ -708,10 +801,22 @@ strs:
   ret i1 %e4
 c4:
   %five = icmp eq i64 %lt, 5
-  br i1 %five, label %lists, label %rest
+  br i1 %five, label %lists, label %c5
 lists:
   %e5 = call i1 @nx_listeq(%NxVal %l, %NxVal %r)
   ret i1 %e5
+c5:
+  %seven = icmp eq i64 %lt, 7
+  br i1 %seven, label %dicts, label %c6
+dicts:
+  %edict = call i1 @nx_dicteq(%NxVal %l, %NxVal %r)
+  ret i1 %edict
+c6:
+  %eight = icmp eq i64 %lt, 8
+  br i1 %eight, label %recs, label %rest
+recs:
+  %erec = call i1 @nx_receq(%NxVal %l, %NxVal %r)
+  ret i1 %erec
 rest:
   ret i1 true
 mixed:
@@ -1361,6 +1466,7 @@ out:
 @.msg.assert = private constant [17 x i8] c"assertion failed\00"
 @.msg.nokey = private constant [14 x i8] c"key not found\00"
 @.msg.step = private constant [28 x i8] c"slice step must be positive\00"
+@.msg.nofield = private constant [23 x i8] c"type has no such field\00"
 @.msg.negexp = private constant [71 x i8] c"negative exponent on Int; use a Float exponent for a fractional result\00"
 ; --- integral operators -------------------------------------------
 ; `%` and `//` both need floor division, so it is factored out once.
@@ -2281,4 +2387,498 @@ go:
   %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
   %key = load %NxVal, ptr %kv
   ret %NxVal %key
+}
+; --- records -------------------------------------------------------
+; Tag 8 Record: a = header ptr, b = type index. The header holds the
+; field array plus a pointer to a static type descriptor, which is what
+; lets the dynamic path resolve a field name.
+;
+; Fields are boxed %NxVal. Unboxing scalar fields is a separate pass: the
+; layout would have to become type-directed, and the value model here is
+; deliberately uniform so the dynamic path stays simple.
+;
+; Type descriptors are emitted by the backend as globals; the runtime only
+; reads them. %NxDesc = { i64 nfields, ptr names } and names points at
+; { i64 len, ptr bytes } entries, in declaration order.
+
+; Emitted by the backend, one per declared type.
+
+define %NxVal @nx_new_record(i64 %nfields, ptr %desc) {
+entry:
+  %bytes = mul i64 %nfields, 24
+  %fields = call ptr @malloc(i64 %bytes)
+  br label %fill
+fill:
+  ; Zero the fields first so a partially built record is never read: None
+  ; is tag 0, which is what every consumer already handles.
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %done = icmp sge i64 %i, %nfields
+  br i1 %done, label %build, label %body
+body:
+  %ep = getelementptr %NxVal, ptr %fields, i64 %i
+  %zero = insertvalue %NxVal zeroinitializer, i64 0, 0
+  store %NxVal %zero, ptr %ep
+  %i2 = add i64 %i, 1
+  br label %fill
+build:
+  %h = call ptr @malloc(i64 24)
+  %hp0 = getelementptr %NxRec, ptr %h, i64 0, i32 0
+  store ptr %fields, ptr %hp0
+  %hp1 = getelementptr %NxRec, ptr %h, i64 0, i32 1
+  store i64 %nfields, ptr %hp1
+  %hp2 = getelementptr %NxRec, ptr %h, i64 0, i32 2
+  store ptr %desc, ptr %hp2
+  %hi = ptrtoint ptr %h to i64
+  %r0 = insertvalue %NxVal zeroinitializer, i64 8, 0
+  %r1 = insertvalue %NxVal %r0, i64 %hi, 1
+  %r2 = insertvalue %NxVal %r1, i64 %nfields, 2
+  ret %NxVal %r2
+}
+
+define i1 @nx_is_record(%NxVal %v) {
+entry:
+  %t = extractvalue %NxVal %v, 0
+  %r = icmp eq i64 %t, 8
+  ret i1 %r
+}
+
+define i64 @nx_rec_nfields(%NxVal %v) {
+entry:
+  %n = extractvalue %NxVal %v, 2
+  ret i64 %n
+}
+
+define ptr @nx_rec_desc(%NxVal %v) {
+entry:
+  %hp = extractvalue %NxVal %v, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxRec, ptr %h, i64 0, i32 2
+  %d = load ptr, ptr %dp
+  ret ptr %d
+}
+
+define ptr @nx_rec_fields(%NxVal %v) {
+entry:
+  %hp = extractvalue %NxVal %v, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxRec, ptr %h, i64 0, i32 0
+  %f = load ptr, ptr %dp
+  ret ptr %f
+}
+
+; Field at a constant offset. The caller has already checked the index is
+; within the record, so there is no bounds test here.
+define %NxVal @nx_rec_get(%NxVal %v, i64 %i) {
+entry:
+  %f = call ptr @nx_rec_fields(%NxVal %v)
+  %ep = getelementptr %NxVal, ptr %f, i64 %i
+  %e = load %NxVal, ptr %ep
+  ret %NxVal %e
+}
+
+define void @nx_rec_set(%NxVal %v, i64 %i, %NxVal %val) {
+entry:
+  %f = call ptr @nx_rec_fields(%NxVal %v)
+  %ep = getelementptr %NxVal, ptr %f, i64 %i
+  store %NxVal %val, ptr %ep
+  ret void
+}
+
+; Field by name, for the dynamic path where the type is not known. An
+; unknown name is an error rather than a silent None.
+define %NxVal @nx_rec_getn(%NxVal %v, ptr %name, i64 %nlen) {
+entry:
+  %n = call i64 @nx_rec_nfields(%NxVal %v)
+  %d = call ptr @nx_rec_desc(%NxVal %v)
+  %dp = getelementptr %NxDesc, ptr %d, i64 0, i32 3
+  %names = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %adv]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %bad, label %chk
+chk:
+  %np = getelementptr %NxRecName, ptr %names, i64 %i
+  %lp = getelementptr %NxRecName, ptr %np, i64 0, i32 0
+  %ll = load i64, ptr %lp
+  %same = icmp eq i64 %ll, %nlen
+  br i1 %same, label %cmp, label %adv
+cmp:
+  %bp = getelementptr %NxRecName, ptr %np, i64 0, i32 1
+  %bb = load ptr, ptr %bp
+  %c1 = call i32 @memcmp(ptr %name, ptr %bb, i64 %nlen)
+  %eq = icmp eq i32 %c1, 0
+  br i1 %eq, label %hit, label %adv
+hit:
+  %r = call %NxVal @nx_rec_get(%NxVal %v, i64 %i)
+  ret %NxVal %r
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+bad:
+  call void @nx_panic(ptr @.msg.nofield)
+  unreachable
+}
+
+define i1 @nx_rec_hasn(%NxVal %v, ptr %name, i64 %nlen) {
+entry:
+  %n = call i64 @nx_rec_nfields(%NxVal %v)
+  %d = call ptr @nx_rec_desc(%NxVal %v)
+  %dp = getelementptr %NxDesc, ptr %d, i64 0, i32 3
+  %names = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %adv]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %no, label %chk
+chk:
+  %np = getelementptr %NxRecName, ptr %names, i64 %i
+  %lp = getelementptr %NxRecName, ptr %np, i64 0, i32 0
+  %ll = load i64, ptr %lp
+  %same = icmp eq i64 %ll, %nlen
+  br i1 %same, label %cmp, label %adv
+cmp:
+  %bp = getelementptr %NxRecName, ptr %np, i64 0, i32 1
+  %bb = load ptr, ptr %bp
+  %c1 = call i32 @memcmp(ptr %name, ptr %bb, i64 %nlen)
+  %eq = icmp eq i32 %c1, 0
+  br i1 %eq, label %yes, label %adv
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+yes:
+  ret i1 true
+no:
+  ret i1 false
+}
+
+; Field write by name, for the dynamic path. Mirrors `nx_rec_getn`: an
+; unknown name is an error rather than a silent extension, because a
+; record's arity is fixed by its declaration.
+define void @nx_rec_setn(%NxVal %v, ptr %name, i64 %nlen, %NxVal %val) {
+entry:
+  %n = call i64 @nx_rec_nfields(%NxVal %v)
+  %d = call ptr @nx_rec_desc(%NxVal %v)
+  %dp = getelementptr %NxDesc, ptr %d, i64 0, i32 3
+  %names = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %adv]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %bad, label %chk
+chk:
+  %np = getelementptr %NxRecName, ptr %names, i64 %i
+  %lp = getelementptr %NxRecName, ptr %np, i64 0, i32 0
+  %ll = load i64, ptr %lp
+  %same = icmp eq i64 %ll, %nlen
+  br i1 %same, label %cmp, label %adv
+cmp:
+  %bp = getelementptr %NxRecName, ptr %np, i64 0, i32 1
+  %bb = load ptr, ptr %bp
+  %c1 = call i32 @memcmp(ptr %name, ptr %bb, i64 %nlen)
+  %eq = icmp eq i32 %c1, 0
+  br i1 %eq, label %hit, label %adv
+hit:
+  call void @nx_rec_set(%NxVal %v, i64 %i, %NxVal %val)
+  ret void
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+bad:
+  call void @nx_panic(ptr @.msg.nofield)
+  unreachable
+}
+
+; Structural record equality: same type name, then field by field. The
+; name comparison is by bytes rather than descriptor identity, so two
+; structurally identical declarations agree even across modules -- the
+; same rule the interpreter follows.
+define i1 @nx_receq(%NxVal %l, %NxVal %r) {
+entry:
+  %dl = call ptr @nx_rec_desc(%NxVal %l)
+  %dr = call ptr @nx_rec_desc(%NxVal %r)
+  %nl = extractvalue %NxVal %l, 2
+  %nr = extractvalue %NxVal %r, 2
+  %samen = icmp eq i64 %nl, %nr
+  br i1 %samen, label %cmpname, label %no
+cmpname:
+  %tp = getelementptr %NxDesc, ptr %dl, i64 0, i32 0
+  %tn = load ptr, ptr %tp
+  %lp = getelementptr %NxDesc, ptr %dl, i64 0, i32 1
+  %ll = load i64, ptr %lp
+  %up = getelementptr %NxDesc, ptr %dr, i64 0, i32 0
+  %un = load ptr, ptr %up
+  %vp = getelementptr %NxDesc, ptr %dr, i64 0, i32 1
+  %vl = load i64, ptr %vp
+  %samel = icmp eq i64 %ll, %vl
+  br i1 %samel, label %cmpbytes, label %no
+cmpbytes:
+  %c1 = call i32 @memcmp(ptr %tn, ptr %un, i64 %ll)
+  %eq = icmp eq i32 %c1, 0
+  br i1 %eq, label %scan, label %no
+scan:
+  %i = phi i64 [0, %cmpbytes], [%i2, %adv]
+  %done = icmp sge i64 %i, %nl
+  br i1 %done, label %yes, label %chk
+chk:
+  %el = call %NxVal @nx_rec_get(%NxVal %l, i64 %i)
+  %er = call %NxVal @nx_rec_get(%NxVal %r, i64 %i)
+  %same = call i1 @nx_eqb(%NxVal %el, %NxVal %er)
+  br i1 %same, label %adv, label %no
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+yes:
+  ret i1 true
+no:
+  ret i1 false
+}
+
+; Structural dict equality: same size, and every key of the left dict
+; present with an equal value on the right. Order-insensitive, matching
+; the interpreter: `{a: 1, b: 2}` equals `{b: 2, a: 1}`.
+define i1 @nx_dicteq(%NxVal %l, %NxVal %r) {
+entry:
+  ; Hoisted into the entry block: an alloca in the scan loop would
+  ; allocate afresh on every iteration.
+  %out = alloca %NxVal
+  %nl = extractvalue %NxVal %l, 2
+  %nr = extractvalue %NxVal %r, 2
+  %samen = icmp eq i64 %nl, %nr
+  br i1 %samen, label %scan, label %no
+scan:
+  %i = phi i64 [0, %entry], [%i2, %adv]
+  %done = icmp sge i64 %i, %nl
+  br i1 %done, label %yes, label %chk
+chk:
+  %kl = call %NxVal @nx_dictkeyat(%NxVal %l, i64 %i)
+  %found = call i1 @nx_dictfind(%NxVal %r, %NxVal %kl, ptr %out)
+  br i1 %found, label %cmpv, label %no
+cmpv:
+  %vl = call %NxVal @nx_dictget(%NxVal %l, %NxVal %kl)
+  %vr = load %NxVal, ptr %out
+  %same = call i1 @nx_eqb(%NxVal %vl, %NxVal %vr)
+  br i1 %same, label %adv, label %no
+adv:
+  %i2 = add i64 %i, 1
+  br label %scan
+yes:
+  ret i1 true
+no:
+  ret i1 false
+}
+; --- value semantics -------------------------------------------------
+; NX copies containers on bind: `ys = xs` leaves `ys` independent, and a
+; function argument never aliases the caller's value. The interpreter has
+; always behaved this way (every bind clones); the native path matches it
+; through `nx_clone`, called at every store of a non-scalar.
+;
+; Strings are shared, not copied: nothing mutates a string in place, so
+; sharing is observably identical to copying. Only List, Dict and Record
+; (tags 5, 7, 8) duplicate storage.
+
+define %NxVal @nx_clone(%NxVal %v) {
+entry:
+  %t = extractvalue %NxVal %v, 0
+  %isl = icmp eq i64 %t, 5
+  br i1 %isl, label %list, label %c1
+list:
+  %lc = call %NxVal @nx_listclone(%NxVal %v)
+  ret %NxVal %lc
+c1:
+  %isd = icmp eq i64 %t, 7
+  br i1 %isd, label %dict, label %c2
+dict:
+  %dc = call %NxVal @nx_dictclone(%NxVal %v)
+  ret %NxVal %dc
+c2:
+  %isr = icmp eq i64 %t, 8
+  br i1 %isr, label %rec, label %same
+rec:
+  %rc = call %NxVal @nx_recclone(%NxVal %v)
+  ret %NxVal %rc
+same:
+  ret %NxVal %v
+}
+
+define %NxVal @nx_listclone(%NxVal %l) {
+entry:
+  %slot = alloca %NxVal
+  %n = extractvalue %NxVal %l, 2
+  %out = call %NxVal @nx_new_list(i64 %n)
+  store %NxVal %out, ptr %slot
+  %hp = extractvalue %NxVal %l, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %exit, label %body
+body:
+  %ep = getelementptr %NxVal, ptr %data, i64 %i
+  %e = load %NxVal, ptr %ep
+  %ec = call %NxVal @nx_clone(%NxVal %e)
+  call void @nx_listpush(ptr %slot, %NxVal %ec)
+  %i2 = add i64 %i, 1
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+}
+
+define %NxVal @nx_dictclone(%NxVal %d) {
+entry:
+  %slot = alloca %NxVal
+  %n = extractvalue %NxVal %d, 2
+  %out = call %NxVal @nx_new_dict(i64 %n)
+  store %NxVal %out, ptr %slot
+  %hp = extractvalue %NxVal %d, 1
+  %h = inttoptr i64 %hp to ptr
+  %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
+  %data = load ptr, ptr %dp
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %exit, label %body
+body:
+  %ep = getelementptr %NxDictEntry, ptr %data, i64 %i
+  %kv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 0
+  %vv = getelementptr %NxDictEntry, ptr %ep, i64 0, i32 1
+  %key = load %NxVal, ptr %kv
+  %val = load %NxVal, ptr %vv
+  %kc = call %NxVal @nx_clone(%NxVal %key)
+  %vc = call %NxVal @nx_clone(%NxVal %val)
+  call void @nx_dictset(ptr %slot, %NxVal %kc, %NxVal %vc)
+  %i2 = add i64 %i, 1
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+}
+
+define %NxVal @nx_recclone(%NxVal %v) {
+entry:
+  %slot = alloca %NxVal
+  %n = call i64 @nx_rec_nfields(%NxVal %v)
+  %d = call ptr @nx_rec_desc(%NxVal %v)
+  %out = call %NxVal @nx_new_record(i64 %n, ptr %d)
+  store %NxVal %out, ptr %slot
+  br label %scan
+scan:
+  %i = phi i64 [0, %entry], [%i2, %body]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %exit, label %body
+body:
+  %cur = load %NxVal, ptr %slot
+  %e = call %NxVal @nx_rec_get(%NxVal %v, i64 %i)
+  %ec = call %NxVal @nx_clone(%NxVal %e)
+  ; `nx_rec_set` writes through the header, so the slot only needs
+  ; reloading at the end; the header itself never moves.
+  call void @nx_rec_set(%NxVal %cur, i64 %i, %NxVal %ec)
+  %i2 = add i64 %i, 1
+  br label %scan
+exit:
+  %r = load %NxVal, ptr %slot
+  ret %NxVal %r
+}
+
+; --- dynamic container dispatch --------------------------------------
+; When the static type is Unknown, the tag decides. Each of these is the
+; dynamic counterpart of a statically-dispatched operation above; a tag
+; that makes no sense for the operation panics rather than corrupting
+; memory, which is what makes an unresolved type safe to carry.
+
+; `a[k] = v` for an unresolved base: a list takes an Int position, a
+; dict takes any scalar key. Anything else is a deferred type error.
+; Returns the (possibly length-updated) container, so the caller can
+; write it back -- a dict may have grown, which moves its mirrored
+; length the same way `nx_dictset` maintains it.
+define %NxVal @nx_storeindex(%NxVal %b, %NxVal %k, %NxVal %v) {
+entry:
+  ; Hoisted: this alloca serves the dict arm only, but placing it here
+  ; keeps the one-alloca-per-function invariant the hoisting test checks.
+  %slot = alloca %NxVal
+  %t = extractvalue %NxVal %b, 0
+  %isl = icmp eq i64 %t, 5
+  br i1 %isl, label %list, label %c
+list:
+  %kt = extractvalue %NxVal %k, 0
+  %ki = icmp eq i64 %kt, 1
+  br i1 %ki, label %pos, label %bad
+pos:
+  %i = extractvalue %NxVal %k, 1
+  call void @nx_listset(%NxVal %b, i64 %i, %NxVal %v)
+  ret %NxVal %b
+c:
+  %isd = icmp eq i64 %t, 7
+  br i1 %isd, label %dict, label %bad
+dict:
+  store %NxVal %b, ptr %slot
+  call void @nx_dictset(ptr %slot, %NxVal %k, %NxVal %v)
+  %upd = load %NxVal, ptr %slot
+  ret %NxVal %upd
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+}
+
+; `del a[k]` for an unresolved base.
+define %NxVal @nx_delindex(%NxVal %b, %NxVal %k) {
+entry:
+  %t = extractvalue %NxVal %b, 0
+  %isl = icmp eq i64 %t, 5
+  br i1 %isl, label %list, label %c
+list:
+  %kt = extractvalue %NxVal %k, 0
+  %ki = icmp eq i64 %kt, 1
+  br i1 %ki, label %pos, label %bad
+pos:
+  %i = extractvalue %NxVal %k, 1
+  %r = call %NxVal @nx_listdel(%NxVal %b, i64 %i)
+  ret %NxVal %r
+c:
+  %isd = icmp eq i64 %t, 7
+  br i1 %isd, label %dict, label %bad
+dict:
+  %r2 = call %NxVal @nx_dictdel(%NxVal %b, %NxVal %k)
+  ret %NxVal %r2
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+}
+
+; Element `i` of an unresolved iterable: a list yields its element, a
+; string its character, and a dict its `i`-th key in insertion order --
+; which is what makes `for k in d` work when `d` is unresolved.
+define %NxVal @nx_each(%NxVal %v, i64 %i) {
+entry:
+  %t = extractvalue %NxVal %v, 0
+  %isd = icmp eq i64 %t, 7
+  br i1 %isd, label %dict, label %rest
+dict:
+  %k = call %NxVal @nx_dictkeyat(%NxVal %v, i64 %i)
+  ret %NxVal %k
+rest:
+  %ib = call %NxVal @nx_int(i64 %i)
+  %e = call %NxVal @nx_index(%NxVal %v, %NxVal %ib)
+  ret %NxVal %e
+}
+
+; `push(x, v)` for an unresolved `x`. Only a list can be pushed to; a
+; dict takes `d[k] = v` instead, so anything else panics.
+define void @nx_pushdyn(ptr %vp, %NxVal %v) {
+entry:
+  %lv = load %NxVal, ptr %vp
+  %t = extractvalue %NxVal %lv, 0
+  %isl = icmp eq i64 %t, 5
+  br i1 %isl, label %ok, label %bad
+ok:
+  call void @nx_listpush(ptr %vp, %NxVal %v)
+  ret void
+bad:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
 }

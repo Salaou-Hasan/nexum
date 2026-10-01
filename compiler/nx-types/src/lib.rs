@@ -21,6 +21,10 @@ pub enum Ty {
     /// advisory: assigning a different value type widens it rather than
     /// failing, because a dict is how you get heterogeneity on purpose.
     Dict(Box<Ty>),
+    /// A declared `type`. The name identifies the layout, which is what
+    /// lets `p.x` compile to a constant field offset when the type is
+    /// known and fall back to a name lookup when it is not.
+    Record(String),
     Func(Vec<Ty>, Box<Ty>),
     Module(String),
     None,
@@ -36,6 +40,7 @@ impl std::fmt::Display for Ty {
             Ty::Str => write!(f, "Str"),
             Ty::List(t) => write!(f, "List({t})"),
             Ty::Dict(t) => write!(f, "Dict({t})"),
+            Ty::Record(n) => write!(f, "{n}"),
             Ty::Func(p, r) => {
                 let ps: Vec<String> = p.iter().map(|t| t.to_string()).collect();
                 write!(f, "fn({}) -> {r}", ps.join(", "))
@@ -55,6 +60,13 @@ impl Default for Ty {
 
 fn compatible(a: &Ty, b: &Ty) -> bool {
     a == b || matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown)
+}
+
+/// Types that may key a dict. When the base is unresolved, any of these
+/// is accepted: the runtime dispatches on the actual tag, and a scalar
+/// key is valid for every dict while an Int is valid for every list.
+fn is_keyable(t: &Ty) -> bool {
+    matches!(t, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown)
 }
 
 fn is_numeric(t: &Ty) -> bool {
@@ -80,6 +92,10 @@ impl std::error::Error for CheckError {}
 struct ModInfo {
     vars: HashMap<String, Ty>,
     funcs: HashMap<String, (Vec<Ty>, Ty)>,
+    /// Declared types exported by the module, so `from m import T` can
+    /// bring a layout across a module boundary the same way a function
+    /// comes across. Field types stay as written and resolve lazily.
+    types: HashMap<String, Vec<(String, String)>>,
 }
 
 /// Static shape of one function, as the optimizer sees it. Codegen uses
@@ -132,6 +148,37 @@ struct Checker {
     task_bound: HashSet<String>,
     /// Enclosing function's scope (params + assigned), for parallel tasks.
     fn_outer: Option<HashSet<String>>,
+    /// Declared `type` layouts: type name to (field name, field type name
+    /// as written), in declaration order. Field types resolve lazily at
+    /// each use, so a field may name a record declared later in the module
+    /// -- mutually recursive types included. The backend only needs field
+    /// names for offsets; types guide checking.
+    records: HashMap<String, Vec<(String, String)>>,
+    /// Where each type was declared, for field-type validation errors.
+    record_spans: HashMap<String, Span>,
+    /// Imported type aliases: alias to canonical (declared) name, so a
+    /// value built as `U(...)` carries `Ty::Record("T")` and compares
+    /// equal to one built as `T(...)`.
+    type_alias: HashMap<String, String>,
+}
+
+/// Resolve a field type name as written to a `Ty`, against one module's
+/// declarations. Scalars map directly; any other name that matches a
+/// declared type becomes that record; anything else stays Unknown here
+/// and is reported by `validate_records` at the end of the module.
+fn field_ty(
+    tname: &str,
+    records: &HashMap<String, Vec<(String, String)>>,
+) -> Ty {
+    match tname {
+        "Int" => Ty::Int,
+        "Float" => Ty::Float,
+        "Bool" => Ty::Bool,
+        "Str" => Ty::Str,
+        "None" => Ty::None,
+        _ if records.contains_key(tname) => Ty::Record(tname.to_string()),
+        _ => Ty::Unknown,
+    }
 }
 
 impl Checker {
@@ -162,17 +209,27 @@ impl Checker {
             }
             Target::Index { base, index } => {
                 let bt = self.check_expr(base);
-                // Dict keys are values, positions are Ints; which rule
-                // applies follows from the container.
-                if matches!(bt, Ty::Dict(_)) {
+                // Dict keys are values and positional indices are Ints; an
+                // unresolved base may be either, so a scalar key is
+                // accepted and the runtime dispatches. A dict checks only
+                // the key; a list checks the index and the stored value.
+                if matches!(bt, Ty::Dict(_) | Ty::Unknown) {
                     let kt = self.check_expr(index);
-                    if !matches!(kt, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
+                    if !is_keyable(&kt) {
                         self.err(
                             index.span(),
-                            format!("dict key must be Int, Float, Bool or Str, found {kt}"),
+                            format!("index must be Int or a dict key, found {kt}"),
                         );
                     }
-                    return;
+                    if matches!(bt, Ty::Dict(_)) {
+                        return;
+                    }
+                    if !matches!(kt, Ty::Int | Ty::Unknown) {
+                        // A non-Int key on an unresolved base can only mean
+                        // a dict, so there is no positional check and no
+                        // element type to check the value against.
+                        return;
+                    }
                 }
                 let it = self.check_expr(index);
                 if !matches!(it, Ty::Int | Ty::Unknown) {
@@ -193,11 +250,41 @@ impl Checker {
                 }
             }
             Target::Attr { base, field } => {
+                // A field write needs the base's type: it is what says which
+                // layout is being written to, and whether the value fits.
                 let bt = self.check_expr(base);
-                self.err(
-                    base.span(),
-                    format!("cannot assign field '{field}' of {bt}: fields come from a type declaration"),
-                );
+                match bt {
+                    Ty::Record(rt) => {
+                        if let Some(fields) = self.records.get(&rt).cloned() {
+                            let recs = self.records.clone();
+                            match fields.iter().find(|(n, _)| n == field) {
+                                Some((_, ft)) => {
+                                    let fty = field_ty(ft, &recs);
+                                    if fty != Ty::Unknown && !compatible(&fty, &t) {
+                                        self.err(
+                                            span,
+                                            format!(
+                                                "field '{field}' of '{rt}' is {fty}, cannot assign {t}"
+                                            ),
+                                        );
+                                    }
+                                }
+                                None => {
+                                    self.err(
+                                        base.span(),
+                                        format!("type '{rt}' has no field '{field}'"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // A dynamic base is resolved by name at runtime.
+                    Ty::Unknown => {}
+                    other => self.err(
+                        base.span(),
+                        format!("attribute assignment needs a type, found {other}"),
+                    ),
+                }
             }
         }
     }
@@ -216,9 +303,23 @@ impl Checker {
             },
             Target::Index { base, index } => {
                 let bt = self.check_expr(base);
+                // An unresolved base may hold a list or a dict; a scalar
+                // key is accepted for either and the runtime dispatches. A
+                // non-Int key can only mean a dict, so the value has no
+                // element type to check against.
+                if matches!(bt, Ty::Unknown) {
+                    let kt = self.check_expr(index);
+                    if !is_keyable(&kt) {
+                        self.err(
+                            index.span(),
+                            format!("index must be Int or a dict key, found {kt}"),
+                        );
+                    }
+                    return Some(Ty::Unknown);
+                }
                 if matches!(bt, Ty::Dict(_)) {
                     let kt = self.check_expr(index);
-                    if !matches!(kt, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
+                    if !is_keyable(&kt) {
                         self.err(
                             index.span(),
                             format!("dict key must be Int, Float, Bool or Str, found {kt}"),
@@ -241,11 +342,103 @@ impl Checker {
             }
             Target::Attr { base, field } => {
                 let bt = self.check_expr(base);
+                match bt {
+                    Ty::Record(t) => {
+                        if let Some(fields) = self.records.get(&t).cloned() {
+                            let recs = self.records.clone();
+                            match fields.iter().find(|(n, _)| n == field) {
+                                Some((_, ft)) => return Some(field_ty(ft, &recs)),
+                                None => {
+                                    self.err(
+                                        base.span(),
+                                        format!("type '{t}' has no field '{field}'"),
+                                    );
+                                    return None;
+                                }
+                            }
+                        }
+                        Some(Ty::Unknown)
+                    }
+                    Ty::Unknown => Some(Ty::Unknown),
+                    other => {
+                        self.err(
+                            base.span(),
+                            format!("attribute assignment needs a type, found {other}"),
+                        );
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    /// Report field types that name nothing. Runs once the whole module has
+    /// been seen, because a field may name a record declared later --
+    /// including mutually recursive pairs. Scalar names plus `Any`,
+    /// `List` and `Dict` (unresolved containers) are always fine.
+    fn validate_records(&mut self) {
+        let mut bad: Vec<(String, String, String, Span)> = Vec::new();
+        for (tname, fields) in &self.records {
+            for (fname, fty) in fields {
+                match fty.as_str() {
+                    "Int" | "Float" | "Bool" | "Str" | "None" | "Any" | "List" | "Dict" => {}
+                    _ if self.records.contains_key(fty) => {}
+                    _ => {
+                        let span = self
+                            .record_spans
+                            .get(tname)
+                            .cloned()
+                            .unwrap_or(Span { line: 1, col: 1 });
+                        bad.push((tname.clone(), fname.clone(), fty.clone(), span));
+                    }
+                }
+            }
+        }
+        // Sorted so the diagnostics are reproducible run to run.
+        bad.sort_by(|a, b| (&a.0, &a.1, a.3.line, a.3.col).cmp(&(&b.0, &b.1, b.3.line, b.3.col)));
+        for (tname, fname, fty, span) in bad {
+            self.err(
+                span,
+                format!("unknown field type '{fty}' on '{tname}.{fname}'"),
+            );
+        }
+    }
+
+    /// The canonical (declared) name for a possibly-aliased type. Unknown
+    /// names pass through unchanged; the caller reports them.
+    fn canonical_name(&self, name: &str) -> String {
+        self.type_alias.get(name).cloned().unwrap_or_else(|| name.to_string())
+    }
+
+    /// Check constructor arguments against a record layout: exact arity,
+    /// then per-field types. Positional by design -- a partial constructor
+    /// would need a notion of an unset field that the value model does
+    /// not have.
+    fn check_record_args(
+        &mut self,
+        name: &str,
+        fields: &[(String, Ty)],
+        args: &[Expr],
+        span: Span,
+    ) {
+        if args.len() != fields.len() {
+            self.err(
+                span,
+                format!(
+                    "type '{name}' takes {} field{}, got {}",
+                    fields.len(),
+                    if fields.len() == 1 { "" } else { "s" },
+                    args.len()
+                ),
+            );
+        }
+        for (a, (fname, ft)) in args.iter().zip(fields.iter()) {
+            let at = self.check_expr(a);
+            if *ft != Ty::Unknown && !compatible(ft, &at) {
                 self.err(
-                    base.span(),
-                    format!("cannot assign field '{field}' of {bt}: fields come from a type declaration"),
+                    a.span(),
+                    format!("field '{fname}' of '{name}' is {ft}, cannot assign {at}"),
                 );
-                None
             }
         }
     }
@@ -350,6 +543,38 @@ impl Checker {
                     self.bind_target(target, t, value, *span);
                 }
             }
+            Stmt::TypeDecl { name, fields, span } => {
+                // A declaration is a compile-time fact about the module, so
+                // it is only meaningful at module level. Inside a function
+                // it would be a second, incompatible layout for the same
+                // name, which is exactly what a static type system cannot
+                // represent.
+                if self.in_function {
+                    self.err(*span, format!("type '{name}' must be declared at module level"));
+                    return;
+                }
+                if self.records.contains_key(name) {
+                    self.err(*span, format!("type '{name}' already declared"));
+                    return;
+                }
+                if self.funcs.contains_key(name) {
+                    self.err(
+                        *span,
+                        format!("'{name}' is already a function; a type cannot share the name"),
+                    );
+                    return;
+                }
+                // Field types stay as written and resolve lazily at each
+                // use, so a field may name a record declared later --
+                // mutually recursive types included. Unknown names are
+                // reported once the whole module has been seen.
+                let layout: Vec<(String, String)> = fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect();
+                self.records.insert(name.clone(), layout);
+                self.record_spans.insert(name.clone(), *span);
+            }
             Stmt::Del { targets, span } => {
                 for target in targets {
                     match target {
@@ -361,7 +586,14 @@ impl Checker {
                         }
                         Target::Index { base, index } => {
                             let bt = self.check_expr(base);
-                            if matches!(bt, Ty::Dict(_)) {
+                            // An unresolved base may hold a list or a dict,
+                            // so a scalar key is accepted for either.
+                            if matches!(bt, Ty::Unknown) {
+                                let kt = self.check_expr(index);
+                                if !is_keyable(&kt) {
+                                    self.err(index.span(), format!("index must be Int or a dict key, found {kt}"));
+                                }
+                            } else if matches!(bt, Ty::Dict(_)) {
                                 let kt = self.check_expr(index);
                                 if !matches!(kt, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
                                     self.err(index.span(), format!("dict key must be Int, Float, Bool or Str, found {kt}"));
@@ -382,10 +614,26 @@ impl Checker {
                         }
                         Target::Attr { base, field } => {
                             let bt = self.check_expr(base);
-                            self.err(
-                                base.span(),
-                                format!("cannot delete field '{field}' of {bt}: fields come from a type declaration"),
-                            );
+                            match bt {
+                                Ty::Record(t) => {
+                                    // The field has to exist; what it
+                                    // currently holds is irrelevant to
+                                    // whether removing it is meaningful.
+                                    if let Some(fields) = self.records.get(&t) {
+                                        if !fields.iter().any(|(n, _)| n == field) {
+                                            self.err(
+                                                base.span(),
+                                                format!("type '{t}' has no field '{field}'"),
+                                            );
+                                        }
+                                    }
+                                }
+                                Ty::Unknown => {}
+                                other => self.err(
+                                    base.span(),
+                                    format!("cannot delete a field of {other}"),
+                                ),
+                            }
                         }
                     }
                 }
@@ -743,6 +991,18 @@ impl Checker {
                         self.define(&bind, t.clone(), *span);
                     } else if let Some((p, r)) = info.funcs.get(name) {
                         self.define(&bind, Ty::Func(p.clone(), Box::new(r.clone())), *span);
+                    } else if let Some(layout) = info.types.get(name) {
+                        // Importing a type brings its layout, keyed under
+                        // the alias when one is given, so `from m import T
+                        // as U` followed by `U(...)` resolves. The canonical
+                        // name is registered too: `U(...)` constructs
+                        // `Ty::Record("T")`, and field access on the result
+                        // has to find the layout under that name.
+                        self.records.insert(bind.clone(), layout.clone());
+                        self.records.insert(name.clone(), layout.clone());
+                        if bind != *name {
+                            self.type_alias.insert(bind, name.clone());
+                        }
                     } else {
                         self.err(*span, format!("module '{module}' has no member '{name}'"));
                     }
@@ -793,12 +1053,24 @@ impl Checker {
         // Check the submodule with isolated scopes; harvest exports.
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_funcs = std::mem::take(&mut self.funcs);
+        let saved_records = std::mem::take(&mut self.records);
+        let saved_spans = std::mem::take(&mut self.record_spans);
+        let saved_alias = std::mem::take(&mut self.type_alias);
         let saved_base = std::mem::replace(&mut self.base, dir);
         let saved_module = std::mem::replace(&mut self.module_name, name.to_string());
         self.loading.push(name.to_string());
         self.check_block(&prog.stmts);
         self.loading.pop();
-        let info = ModInfo { vars: std::mem::replace(&mut self.vars, saved_vars), funcs: std::mem::replace(&mut self.funcs, saved_funcs) };
+        // Unknown field-type names are reported now that the whole module
+        // has been seen: a field may name a record declared later.
+        self.validate_records();
+        let info = ModInfo {
+            vars: std::mem::replace(&mut self.vars, saved_vars),
+            funcs: std::mem::replace(&mut self.funcs, saved_funcs),
+            types: std::mem::replace(&mut self.records, saved_records),
+        };
+        self.record_spans = saved_spans;
+        self.type_alias = saved_alias;
         self.inferred.insert(
             (name.to_string(), "<top>".to_string()),
             FnInfo { locals: info.vars.clone(), params: Vec::new(), ret: Ty::None },
@@ -980,8 +1252,26 @@ impl Checker {
                             Ty::Unknown
                         }
                     },
+                    // A known record resolves the field statically, which is
+                    // what lets the backend use a constant offset.
+                    Ty::Record(t) => match self.records.get(&t).cloned() {
+                        Some(fields) => {
+                            let recs = self.records.clone();
+                            match fields.iter().find(|(n, _)| n == attr) {
+                                Some((_, ft)) => field_ty(ft, &recs),
+                                None => {
+                                    self.err(*span, format!("type '{t}' has no field '{attr}'"));
+                                    Ty::Unknown
+                                }
+                            }
+                        }
+                        None => Ty::Unknown,
+                    },
+                    // A dynamic base is resolved by name at runtime, so the
+                    // field type is genuinely unknown here.
+                    Ty::Unknown => Ty::Unknown,
                     other => {
-                        self.err(*span, format!("only modules support attribute access, found {other}"));
+                        self.err(*span, format!("attribute access needs a module or a type, found {other}"));
                         Ty::Unknown
                     }
                 }
@@ -989,14 +1279,15 @@ impl Checker {
             Expr::Index { base, index, span } => {
                 let b = self.check_expr(base);
                 // A dict is keyed by value, so its index need not be an Int.
-                // Everything positional does, so the requirement is decided
-                // by the container rather than assumed up front.
-                if matches!(b, Ty::Dict(_)) {
+                // An unresolved base may hold either a list or a dict, so a
+                // scalar key is accepted and the runtime dispatches on the
+                // actual tag; anything else is rejected either way.
+                if matches!(b, Ty::Dict(_) | Ty::Unknown) {
                     let ix = self.check_expr(index);
-                    if !matches!(ix, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Unknown) {
+                    if !is_keyable(&ix) {
                         self.err(
                             index.span(),
-                            format!("dict key must be Int, Float, Bool or Str, found {ix}"),
+                            format!("index must be Int or a dict key, found {ix}"),
                         );
                     }
                     return match b {
@@ -1159,6 +1450,45 @@ impl Checker {
                 }
             }
             Expr::Call { callee, args, span } => {
+                // A declared type shadows nothing, but it does share the
+                // `Name(...)` spelling with a function, so the type case
+                // is resolved first. `m.T(...)` through a module alias
+                // resolves the same way, against the module's exports.
+                //
+                // An alias constructs the canonical name: `from m import T
+                // as U` followed by `U(...)` yields `Ty::Record("T")`, so a
+                // value built through the alias compares equal to one built
+                // through the original name.
+                if let Expr::Var(name, _) = callee.as_ref() {
+                    if let Some(fields) = self.records.get(name).cloned() {
+                        let canon = self.canonical_name(name);
+                        // Field types resolve now, against every declaration
+                        // in the module -- including later ones.
+                        let recs = self.records.clone();
+                        let resolved: Vec<(String, Ty)> = fields
+                            .iter()
+                            .map(|(n, t)| (n.clone(), field_ty(t, &recs)))
+                            .collect();
+                        self.check_record_args(&canon, &resolved, args, *span);
+                        return Ty::Record(canon);
+                    }
+                }
+                if let Expr::Attr { base, attr, .. } = callee.as_ref() {
+                    if let Expr::Var(m, _) = base.as_ref() {
+                        if let Some(info) = self.modules.get(m).cloned() {
+                            if let Some(fields) = info.types.get(attr).cloned() {
+                                // Resolve against the declaring module's own
+                                // table: its field types name its records.
+                                let resolved: Vec<(String, Ty)> = fields
+                                    .iter()
+                                    .map(|(n, t)| (n.clone(), field_ty(t, &info.types)))
+                                    .collect();
+                                self.check_record_args(attr, &resolved, args, *span);
+                                return Ty::Record(attr.clone());
+                            }
+                        }
+                    }
+                }
                 // Builtins.
                 if let Expr::Var(name, _) = callee.as_ref() {
                     if name == "len" {
@@ -1183,7 +1513,19 @@ impl Checker {
                         let lt = self.check_expr(&args[0]);
                         let et = self.check_expr(&args[1]);
                         match lt {
-                            Ty::List(t) if compatible(&t, &et) => {}
+                            Ty::List(t) if compatible(&t, &et) => {
+                                // A push into a `List(?)` pins the element
+                                // type, the same way a literal element
+                                // would. Without this, every list built by
+                                // pushing (the only way to grow one) stays
+                                // unresolved and poisons everything read
+                                // from it back to dynamic.
+                                if *t == Ty::Unknown && et != Ty::Unknown {
+                                    if let Expr::Var(n, _) = &args[0] {
+                                        self.vars.insert(n.clone(), Ty::List(Box::new(et)));
+                                    }
+                                }
+                            }
                             Ty::List(_) => {
                                 self.err(*span, format!("push() element type mismatch"));
                             }
@@ -1274,6 +1616,8 @@ pub fn check_program(prog: &Program, base: &std::path::Path) -> Result<(), Vec<C
     };
     // Checker needs Default for HashMaps/Vecs/bool/usize/String.
     c.check_block(&prog.stmts);
+    // Field types may name records declared anywhere in the module.
+    c.validate_records();
     if c.errors.is_empty() {
         Ok(())
     } else {
@@ -1295,6 +1639,8 @@ pub fn infer_program(
         ..Default::default()
     };
     c.check_block(&prog.stmts);
+    // Field types may name records declared anywhere in the module.
+    c.validate_records();
     if !c.errors.is_empty() {
         return Err(c.errors);
     }
@@ -1330,6 +1676,9 @@ impl Default for Checker {
             parallel_outer: None,
             task_bound: HashSet::new(),
             fn_outer: None,
+            records: HashMap::new(),
+            record_spans: HashMap::new(),
+            type_alias: HashMap::new(),
         }
     }
 }
@@ -1577,6 +1926,19 @@ mod tests {
         assert!(!err("del never_defined\n").is_empty());
     }
 
+    /// A push into a `List(?)` pins the element type, so a list built by
+    /// pushing is as precisely typed as a literal. Without this, the only
+    /// way to grow a list would leave every such list unresolved.
+    #[test]
+    fn push_pins_list_element_type() {
+        ok("xs = []\npush(xs, 1)\ny = xs[0] + 1\n");
+        ok("xs = []\npush(xs, 1.5)\n");
+        // ...but monomorphism still holds: a second, incompatible push is
+        // refused, the same as a mixed literal would be.
+        assert!(!err("xs = []\npush(xs, 1)\npush(xs, \"a\")\n").is_empty());
+        assert!(!err("xs = [1]\npush(xs, \"a\")\n").is_empty());
+    }
+
     #[test]
     fn iterating_a_dict_yields_keys() {
         ok("d = {\"a\": 1}\nfor k in d:\n    print(k)\n");
@@ -1594,15 +1956,78 @@ mod tests {
         assert!(es.iter().any(|e| e.message.contains("immutable")), "{es:?}");
     }
 
+    // ---- records ----
+
     #[test]
-    fn field_assignment_needs_a_type_declaration() {
-        // Records do not exist yet, so the message has to say where they
-        // come from rather than just failing.
-        let es = err("p = {}\np.x = 1\n");
-        assert!(
-            es.iter().any(|e| e.message.contains("type declaration")),
-            "{es:?}"
-        );
+    fn record_declaration_and_use() {
+        ok("type Point:\n    x: Float\n    y: Float\np = Point(1.0, 2.0)\nprint(p.x)\n");
+        // The field type as written is what a read produces.
+        ok("type P:\n    n: Int\np = P(1)\nq = p.n + 1\n");
+        // A field may be left unresolved and pinned by use instead.
+        ok("type P:\n    n\np = P(1)\nq = p.n + 1\n");
+    }
+
+    #[test]
+    fn record_constructor_arity_is_exact() {
+        let es = err("type Point:\n    x: Int\n    y: Int\np = Point(1)\n");
+        assert!(es.iter().any(|e| e.message.contains("takes 2 fields")), "{es:?}");
+        assert!(!err("type Point:\n    x: Int\np = Point(1, 2)\n").is_empty());
+    }
+
+    #[test]
+    fn record_field_types_are_checked() {
+        let es = err("type Point:\n    x: Float\np = Point(1)\n");
+        assert!(es.iter().any(|e| e.message.contains("is Float")), "{es:?}");
+    }
+
+    #[test]
+    fn record_field_access_is_checked() {
+        let es = err("type Point:\n    x: Int\np = Point(1)\nprint(p.z)\n");
+        assert!(es.iter().any(|e| e.message.contains("no field 'z'")), "{es:?}");
+        let es = err("type Point:\n    x: Int\np = Point(1)\np.z = 2\n");
+        assert!(es.iter().any(|e| e.message.contains("no field 'z'")), "{es:?}");
+        // A scalar is not something with fields.
+        assert!(!err("n = 1\nprint(n.x)\n").is_empty());
+    }
+
+    #[test]
+    fn record_field_write_checks_type() {
+        ok("type Point:\n    x: Int\np = Point(1)\np.x = 2\n");
+        let es = err("type Point:\n    x: Int\np = Point(1)\np.x = \"a\"\n");
+        assert!(es.iter().any(|e| e.message.contains("cannot assign")), "{es:?}");
+    }
+
+    #[test]
+    fn record_declaration_rules() {
+        // Module-level only: a second layout for the same name inside a
+        // function is not something a static type can express.
+        assert!(!err("fn f():\n    type P:\n        x: Int\n    return 1\n").is_empty());
+        assert!(!err("type P:\n    x: Int\ntype P:\n    y: Int\n").is_empty());
+        // A type cannot share a name with a function, since both would be
+        // written `P(...)`.
+        assert!(!err("fn P():\n    return 1\ntype P:\n    x: Int\n").is_empty());
+        assert!(!err("type P:\n    x: Nope\n").is_empty());
+        assert!(!err("type P:\n").is_empty());
+    }
+
+    /// Field types resolve lazily, so order does not matter: a field may
+    /// name a record declared later, and mutually recursive pairs work.
+    /// Only genuinely unknown names are reported, once the module has
+    /// been fully seen.
+    #[test]
+    fn record_field_types_resolve_lazily() {
+        ok("type A:\n    b: B\ntype B:\n    n: Int\na = A(B(1))\nprint(a.b.n)\n");
+        ok("type A:\n    b: B\ntype B:\n    a: A\n");
+        ok("type P:\n    xs: List\n    d: Dict\n    u: Any\n");
+        let es = err("type P:\n    x: Nope\n");
+        assert!(es.iter().any(|e| e.message.contains("unknown field type 'Nope'")), "{es:?}");
+    }
+
+    #[test]
+    fn unknown_type_is_an_error() {
+        assert!(!err("p = Nope(1)\n").is_empty());
+        // A function is not a constructor.
+        assert!(!err("fn f():\n    return 1\np = f(1)\n").is_empty());
     }
 
     #[test]
@@ -1743,8 +2168,18 @@ mod tests {
     }
 
     #[test]
-    fn param_int_from_index() {
+    fn param_unpinned_for_unresolved_base() {
+        // An unresolved base may hold a list or a dict, so the index is
+        // left unresolved: pinning Int here would reject `at(d, "k")`
+        // for a dict `d`, which the runtime handles fine.
         let m = infer("fn at(xs, i):\n    return xs[i]\n");
+        assert_eq!(m[&("__main__".into(), "at".into())].locals["i"], Ty::Unknown);
+    }
+
+    #[test]
+    fn param_int_from_known_list_index() {
+        // A statically known list still pins its index to Int.
+        let m = infer("fn at(i):\n    xs = [1, 2, 3]\n    return xs[i]\n");
         assert_eq!(m[&("__main__".into(), "at".into())].locals["i"], Ty::Int);
     }
 

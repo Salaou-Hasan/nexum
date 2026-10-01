@@ -414,6 +414,9 @@ fn escaping_roots(body: &[Stmt], out: &mut HashSet<Root>) {
                     escaping_roots(std::slice::from_ref(t), out);
                 }
             }
+            // A type declaration binds nothing at runtime, so it
+            // contributes no roots.
+            Stmt::TypeDecl { .. } => {}
             Stmt::Fn { .. } => {}
             Stmt::Expr(e) => expr_roots(e, out),
             Stmt::AssignOp { .. } => {}
