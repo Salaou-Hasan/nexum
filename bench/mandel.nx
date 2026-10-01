@@ -21,9 +21,9 @@ rows = 0
 while y < 1.2:
     x = -1.5
     while x < 1.5:
-        total = total + mandel(x, y, 200)
-        x = x + 0.01
-    y = y + 0.01
+        total = total + mandel(x, y, 500)
+        x = x + 0.002
+    y = y + 0.002
     rows = rows + 1
 
 print(total)

@@ -10,5 +10,5 @@ fn fib(n: u64) -> u64 {
 }
 
 fn main() {
-    println!("{}", fib(32));
+    println!("{}", fib(34));
 }

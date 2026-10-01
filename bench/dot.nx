@@ -1,0 +1,24 @@
+# Read-only dot product over two lists. No pushes, no writes to a list, so
+# this isolates the cost of indexing plus arithmetic from the cost of
+# building a list. Rust's version pre-allocates and writes by index, which
+# NX cannot do: there is no indexed assignment (`a[i] = v`).
+#
+# This is the shape where the value representation is the whole story.
+
+n = 2000000
+a = []
+b = []
+i = 0
+while i < n:
+    push(a, i - (i / 3) * 3)
+    push(b, i - (i / 5) * 5)
+    i = i + 1
+
+s = 0.0
+i = 0
+while i < n:
+    s = s + a[i] * b[i]
+    i = i + 1
+
+print(s)
+print(len(a))

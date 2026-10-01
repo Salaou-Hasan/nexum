@@ -67,7 +67,7 @@ Pop-Location
 if (-not $nxDriver) { throw "nx.exe not found" }
 $nx = $nxDriver.FullName
 
-$names = @('fib', 'mandel', 'matmul', 'listsum')
+$names = @('fib', 'mandel', 'matmul', 'listsum', 'dot')
 $results = @()
 
 foreach ($name in $names) {

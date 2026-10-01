@@ -7,7 +7,7 @@
 fn mod(x, m):
     return x - (x / m) * m
 
-n = 400000
+n = 2000000
 xs = []
 i = 0
 while i < n:

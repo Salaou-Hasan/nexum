@@ -14,7 +14,7 @@
 fn mod(x, m):
     return x - (x / m) * m
 
-n = 120
+n = 260
 
 a = []
 b = []

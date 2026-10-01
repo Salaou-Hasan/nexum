@@ -2,7 +2,7 @@
 // identical accumulation order, so the printed values must match exactly.
 
 fn main() {
-    let n: usize = 120;
+    let n: usize = 260;
     let mut a = vec![0.0f64; n * n];
     let mut b = vec![0.0f64; n * n];
     let mut c = vec![0.0f64; n * n];

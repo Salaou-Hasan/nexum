@@ -25,10 +25,10 @@ fn main() {
     while y < 1.2 {
         let mut x = -1.5f64;
         while x < 1.5 {
-            total += mandel(x, y, 200);
-            x += 0.01;
+            total += mandel(x, y, 500);
+            x += 0.002;
         }
-        y += 0.01;
+        y += 0.002;
         rows += 1;
     }
 

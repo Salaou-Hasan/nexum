@@ -3,7 +3,7 @@
 // elements are boxed values reached through a pointer.
 
 fn main() {
-    let n: usize = 400000;
+    let n: usize = 2000000;
     let mut xs: Vec<i64> = Vec::with_capacity(n);
     let mut i = 0usize;
     while i < n {
