@@ -1,5 +1,80 @@
 # Changelog
 
+## v0.4.3
+
+### ARGONE: the architecture stage is planned, gated, and started
+
+`Nexum_Argone_Unified_AOT_Prompt.md` defines ARGONE as a hard stage gate:
+the compiler moves from an AST-heavy, directly-to-textual-LLVM design to a
+layered pipeline with its own HIR and MIR/SSA, a real MLIR dialect, and an
+AOT backend. Stage 4 through Stage 8 do not resume until it is 100%
+complete.
+
+- `docs/ARGONE.md` — the breakdown: 17 tasks (Task 0 plus A-P, the prompt's
+  mandated order), each with deliverables and a checkable gate. A, B and C
+  are independent of the toolchain and can run in parallel; D onward is
+  strictly sequential.
+- `docs/ARGONE-STATUS.md` — the completion checklist. This file *is* the
+  gate.
+- `tools/argone-gate.ps1` — decides whether the stage is complete. Rejects
+  `in progress`, `partial`, `mostly`, `pending` and `blocked` as statuses,
+  because a stage that admits a third state is a stage that gets left
+  halfway. A task may claim `complete` only with every gate item checked
+  *and* an evidence line, which is what makes scaffolding insufficient.
+- `tools/argone-gate-tests.ps1` — ten adversarial tests that try to fool the
+  gate the four ways the prompt names as invalid grounds for declaring
+  success: scaffolding, a partial status, unchecked boxes, and a build that
+  merely compiles. It also proves the gate *opens* on a genuinely complete
+  stage, so the mechanism cannot rot into something that always fails.
+- CI gains an `argone-gate` job that runs the gate's self-tests and prints
+  the stage state.
+
+### Task 0: a prerequisite Argone discovered
+
+Measuring this host before committing to an architecture:
+
+| Check | Result |
+| --- | --- |
+| clang | 23.1.2, installed |
+| MLIR tools (`mlir-opt`, `mlir-translate`, `mlir-tblgen`) | **absent** |
+| `opt`, `llc`, `llvm-config` | **absent** |
+| `static.crates.io` (crate download CDN) | **unreachable** |
+| cached crates binding LLVM/MLIR | none |
+| C++ toolchain (`cl.exe`) | not on PATH |
+
+The LLVM Windows installer ships clang, lldb and lld but not MLIR, so the
+MLIR stages have no toolchain here, and the blocked crate CDN means
+`melior`/`inkwell`/`mlir-sys` cannot be fetched either. Nexum has **zero**
+external crate dependencies and keeps it that way unless the toolchain route
+forces otherwise.
+
+So obtaining an MLIR toolchain is Task 0, an Argone task with its own gate,
+resolved *before* HIR begins. Once HIR exists the lowering strategy is
+committed; discovering MLIR is unobtainable at that point would strand the
+work. If no route is viable, the correct outcome is a documented
+renegotiation with the user — not a quietly narrowed Argone that reports
+success for the easy parts.
+
+### Measured duplication Argone targets
+
+Five crates walk the AST independently, re-deriving the same facts:
+
+| Crate | `Stmt` arms | `Expr` arms |
+| --- | --- | --- |
+| nx-types | 15 | 37 |
+| nx-ir | 23 | 13 |
+| nx-mem | 21 | 18 |
+| nx-interp | 14 | 28 |
+| nx-codegen | 27 | 37 |
+| **total** | **100** | **133** |
+
+Task C's gate is that this number falls measurably. If it does not, the new
+abstraction is not earning its place.
+
+Baseline for comparison: 17,290 Rust lines across 9 crates, 318 tests,
+2,956-line runtime, zero external dependencies, 13 examples with a 3-way
+differential, 5 Rust-referenced benchmarks.
+
 ## v0.4.2
 
 ### The grammar, written down

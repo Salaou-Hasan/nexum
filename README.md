@@ -113,3 +113,27 @@ Point.origin()                  # Point(0, 0)
 
 Containers have value semantics: they copy on bind, so no assignment or
 argument passing aliases. Strings are shared but never mutated in place.
+
+## Architecture stage
+
+`docs/grammar.md` is the language specification. `docs/numeric-audit.md`
+records the numeric representation audit.
+
+**ARGONE is in progress and is a hard gate.** Stage 4 through Stage 8 stay
+locked until it completes.
+
+| Document | What it is |
+| --- | --- |
+| `docs/ARGONE.md` | The task breakdown, one gate per task |
+| `docs/ARGONE-STATUS.md` | The completion checklist — this file *is* the gate |
+| `tools/argone-gate.ps1` | Decides whether the stage is complete |
+| `tools/argone-gate-tests.ps1` | Tries to fool the gate, and fails if it can |
+
+```powershell
+pwsh -File tools\argone-gate.ps1            # where the stage stands
+pwsh -File tools\argone-gate.ps1 -Enforce   # exit 1 unless complete
+pwsh -File tools\argone-gate-tests.ps1      # the gate's own tests
+```
+
+A task is `not started` or `complete`. There is no third state, so a stage
+cannot be *mostly* done and have the gate open anyway.
