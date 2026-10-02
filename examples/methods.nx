@@ -90,7 +90,8 @@ for pt in pts:
     total = total + pt.area()
 print(total)
 
-# A list of records, each moved in turn.
+# A list of records. `pt` is a real variable, so `mut self` writes back
+# into it and the printed record is the moved one.
 for pt in pts:
     pt.moved(10.0, 10.0)
     print(pt)

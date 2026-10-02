@@ -636,7 +636,67 @@ impl Interpreter {
         }
         Ok(())
     }
+    /// A `for` loop, with the loop variable scoped to the loop.
+    ///
+    /// Scoping is the whole reason this is a wrapper. The variable shadows
+    /// whatever the name was bound to before — a loop must be able to reuse
+    /// a name without caring — but the previous binding has to come back
+    /// afterwards. Without that, an inner `for i` destroys an outer `i`:
+    ///
+    /// ```text
+    /// for i in 0..3:
+    ///     for i in 0..2:
+    ///         print("in", i)
+    ///     print("out", i)     # the inner loop's last value, not its own
+    /// ```
+    ///
+    /// The restore happens on every exit — normal, `break`, `continue`,
+    /// `return`, and a runtime error — because a binding that sometimes
+    /// comes back and sometimes does not is worse than one that never does.
     fn exec_for(
+        &mut self,
+        var: &str,
+        iter: &nx_ast::ForIter,
+        body: &[Stmt],
+    ) -> Result<Option<Flow>, RuntimeError> {
+        // The loop variable binds into the innermost frame when there is
+        // one, and into the module's globals at module level (which has no
+        // frame). Both paths have to be saved and restored, or the restore
+        // silently does nothing for top-level loops -- which is exactly the
+        // case the nested-loop example hits.
+        let module = self.current.clone();
+        let saved_frame = self.frames.last().and_then(|f| f.vars.get(var).cloned());
+        let saved_global = if self.frames.last().is_none() {
+            self.modules.get(&module).and_then(|m| m.vars.get(var).cloned())
+        } else {
+            None
+        };
+
+        let result = self.exec_for_inner(var, iter, body);
+
+        if let Some(top) = self.frames.last_mut() {
+            match &saved_frame {
+                Some(v) => {
+                    top.vars.insert(var.to_string(), v.clone());
+                }
+                None => {
+                    top.vars.remove(var);
+                }
+            }
+        } else if let Some(m) = self.modules.get_mut(&module) {
+            match &saved_global {
+                Some(v) => {
+                    m.vars.insert(var.to_string(), v.clone());
+                }
+                None => {
+                    m.vars.remove(var);
+                }
+            }
+        }
+        result
+    }
+
+    fn exec_for_inner(
         &mut self,
         var: &str,
         iter: &nx_ast::ForIter,
@@ -3319,6 +3379,86 @@ mod tests {
     }
 
     // --- impl blocks and methods ------------------------------------
+    /// A loop variable is scoped to its loop: it shadows while the loop runs
+    /// and the previous binding comes back afterwards. An inner `for i`
+    /// inside an outer `for i` used to destroy the outer binding, so
+    /// `print("out", i)` showed the inner loop's last value. Checked at
+    /// module level (which has no frame) and inside a function (which
+    /// does), because those are two different binding paths.
+    #[test]
+    /// A loop variable is scoped to its loop: it shadows while the loop runs
+    /// and the previous binding comes back afterwards. An inner `for i`
+    /// inside an outer `for i` used to destroy the outer binding, so
+    /// `print("out", i)` showed the inner loop's last value on every
+    /// iteration. Checked at module level (which has no frame) and inside a
+    /// function (which does), because those are two different binding paths.
+    #[test]
+    fn a_loop_variable_does_not_outlive_its_loop() {
+        let src = "for i in 0..3:\n    for i in 0..2:\n        print(\"in\", i)\n    print(\"out\", i)\n";
+        // The outer variable must be 0, 1, 2 on the three outer iterations.
+        // It is the *induction* value, not a copy of the inner loop's.
+        let want = vec![
+            "in 0", "in 1", "out 0", //
+            "in 0", "in 1", "out 1", //
+            "in 0", "in 1", "out 2", //
+        ];
+        assert_eq!(lines(src), want, "at module level");
+        // Inside a function the same statements need one more level of
+        // indentation, so shift every line rather than re-indent by hand.
+        let indented: String =
+            src.lines().map(|l| format!("    {l}\n")).collect::<Vec<_>>().concat();
+        assert_eq!(lines(&format!("fn go():\n{indented}go()\n")), want, "inside a function");
+    }
+
+    /// A loop variable must not leak into the enclosing scope at all: after
+    /// the loop the name is unbound, not left holding the last value.
+    #[test]
+    fn a_loop_variable_is_unbound_after_its_loop() {
+        let e = run_src("for i in 0..3:\n    print(i)\nprint(i)\n").unwrap_err();
+        assert!(e.message.contains("undefined variable 'i'"), "{}", e.message);
+    }
+
+    /// The previous binding comes back on every exit, not just a normal one.
+    /// A binding that is sometimes restored and sometimes not is worse than
+    /// one that never is, because the broken case is rare.
+    #[test]
+    fn a_loop_variable_is_restored_on_every_exit() {
+        // `break` and `continue` leave the inner loop early; both must put
+        // the outer `i` back.
+        for tail in ["            break\n", "            continue\n"] {
+            let src = format!(
+                "fn go():\n    i = 99\n    for a in 0..2:\n        for i in 0..2:\n{tail}        print(i)\n    return i\nprint(go())\n"
+            );
+            let out = lines(&src);
+            let out = lines(&src);
+            // Two outer iterations each print once, then `print(go())`
+            // prints the returned value: three lines, all the restored 99.
+            assert_eq!(
+                out,
+                vec!["99", "99", "99"],
+                "tail={tail:?} got {out:?}"
+            );
+        }
+    }
+
+    /// Leaving by `return` from inside the loop is also an exit, and the
+    /// value returned is the one the code returns -- not a stale loop
+    /// variable.
+    #[test]
+    fn returning_from_inside_a_loop_returns_the_right_value() {
+        assert_eq!(one("fn go():\n    i = 7\n    for a in 0..3:\n        for i in 0..3:\n            return i\n    return 0\nprint(go())\n"), "0");
+    }
+
+    /// The loop variable is task-private. Two tasks that both use `i` must
+    /// not see each other's value, or `parallel:` stops being deterministic.
+    #[test]
+    fn parallel_tasks_do_not_share_a_loop_variable() {
+        let out = run_src(
+            "a = 0\nb = 0\nparallel:\n    for i in 0..1000:\n        a = i\n    for i in 0..1000:\n        b = i\nprint(a, b)",
+        )
+        .unwrap();
+        assert_eq!(out, vec!["999 999"]);
+    }
 
     const POINT: &str = "type P:\n    x: Int\n    y: Int\n";
 

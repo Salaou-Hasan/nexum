@@ -260,10 +260,25 @@ entry:
     i64 7, label %dict
     i64 8, label %rec
   ]
+; A string is *not* freed here.
+;
+; `nx_str` does not copy: it stores the caller's pointer, so a string
+; literal's payload points straight into read-only static memory
+; (`@.nxstr.N`). Calling `free` on that address corrupts the heap -- it
+; was reachable from any function whose Unique local held a string, and it
+; aborted with STATUS_HEAP_CORRUPTION.
+;
+; Freeing is consistent with the rest of the model rather than a patch over
+; one crash. Strings are shared and never mutated in place, so sharing one
+; is observationally identical to copying it -- which is why the backend's
+; `needs_clone` never copies a string. A shared object with many owners
+; cannot be freed by any one of them. Only container storage, which is
+; owned and unaliased, is released here.
+;
+; `nx_strcat` and `nx_slice` do allocate, so those leak. That is the
+; documented model for this release: malloc'd memory lives for the process
+; lifetime and the arena story arrives with the memory planner.
 str:
-  %p = extractvalue %NxVal %v, 1
-  %pp = inttoptr i64 %p to ptr
-  call void @free(ptr %pp)
   ret void
 list:
   %hp = extractvalue %NxVal %v, 1

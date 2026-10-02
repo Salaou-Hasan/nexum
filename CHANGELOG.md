@@ -1,5 +1,99 @@
 # Changelog
 
+## v0.4.2
+
+### The grammar, written down
+`docs/grammar.md` documents the whole language, derived from the lexer,
+parser and checker rather than from intent, with every rule naming the
+function that enforces it. Lexical grammar, the full statement and
+expression grammar, a precedence table, the ambient surface, the static
+rules, and a complete program whose output is verified by running it three
+ways.
+
+Writing it turned up **five real bugs**, four of them pre-existing.
+
+### Fixed: `free()` on a read-only string constant
+`nx_str` does not copy -- it stores the caller's pointer, so a string
+literal's payload points straight into read-only static memory. But
+`nx_free_val` called `free` on it. Any function whose Unique local held a
+string aborted with `STATUS_HEAP_CORRUPTION`:
+
+```
+fn f():
+    s = "hi"
+f()
+```
+
+Three lines. Every `fn` with a non-escaping string local hit it.
+
+The fix is consistency rather than a patch: strings are shared, never
+mutated in place, and `needs_clone` never copies one -- so a shared object
+with many owners cannot be freed by any of them. `nx_free_val` no longer
+frees strings. `nx_strcat` and `nx_slice` do allocate, so those now leak,
+which is the documented model for this release.
+
+### Fixed: a loop variable was a module global
+A `for` variable took the `in_init` path and became a module global, so it
+leaked into every later statement and two loops collided on the name.
+Inside a `parallel:` task that collision is a data race, which would break
+the determinism contract outright. Loop variables are now always local
+slots.
+
+### Fixed: a nested loop destroyed the outer loop's variable
+`for i in 0..3:` containing `for i in 0..2:` left the outer `i` holding the
+inner loop's last value. Observable, in both the interpreter and the
+backend:
+
+```
+for i in 0..3:
+    for i in 0..2:
+        print("in", i)
+    print("out", i)     # printed 1 every time, should be 0, 1, 2
+```
+
+A loop variable is now scoped to its loop and the previous binding is
+restored on every exit -- normal, `break`, `continue`, `return` and error
+-- in both the frame path (inside a function) and the globals path (module
+level), which are two different binding paths.
+
+### Fixed: a trailing `parallel:` block emitted invalid LLVM
+```
+x = 0
+parallel:
+    a = 1
+    b = 2
+```
+
+`clang` rejected it with "expected instruction opcode". The globals pass
+only scanned top-level statements, so a name first assigned inside a task
+was discovered *during* emission and its declaration landed between an
+`entry:` label and the next instruction. The pass now walks task bodies.
+
+### Fixed: a `mut self` write-back could be silently dropped
+`store_name` tested `in_init` before checking for a local slot, so a
+write-back to a loop variable went to a module global while the next read
+used the local slot. The update vanished: the code compiled, ran, and
+printed the old value. A name with a local slot is a local, full stop.
+
+Fixing that exposed a latent one: `cur_fn` was never set to `<top>` while
+emitting the module body, so every lookup keyed on the current function --
+unboxing, method dispatch on a local, the memory plan -- missed. Top-level
+code was never unboxed at all, and a method call on a top-level local could
+not resolve. Both now work.
+
+### Known gaps, not fixed here
+- `del p` after a `mut self` write-back on a record fails to compile
+  ("only modules, types and builtins support attribute calls"). Plain
+  `del p`, `del xs[0]` and `del d["a"]` are all fine.
+- `del d["a"]` on a single-key dict makes the checker report `d` as
+  undefined afterwards.
+
+### Verification
+322 tests pass. All 13 examples agree across interpreter / native /
+`NX_NOUNBOX`. All 5 benchmarks match their Rust reference output. The
+grammar's example program runs identically on all three paths and its
+documented output is machine-checked.
+
 ## v0.4.1
 
 ### Numeric representation audit

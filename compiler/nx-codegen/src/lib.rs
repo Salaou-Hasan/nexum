@@ -125,6 +125,87 @@ fn mangle_desc(module: &str, name: &str) -> String {
     format!("nx__d_{}__{module}__{name}", name.len())
 }
 
+/// Names a statement binds at module level, in first-seen order.
+///
+/// Only what becomes a *global*: a plain name bound at the top level, an
+/// import alias, and — the reason this recurses — a name assigned inside
+/// a `parallel:` task. A task is emitted as its own function, so a name it
+/// binds is still module-visible and still needs its global declared up
+/// front, before any function body exists to emit it into.
+///
+/// Loop variables, comprehension variables and function-local bindings are
+/// deliberately not collected: those are slots inside the function that
+/// owns them, not module globals.
+fn collect_module_globals(s: &Stmt, out: &mut Vec<String>) {
+    let mut push = |n: &String| {
+        if !out.contains(n) {
+            out.push(n.clone());
+        }
+    };
+    match s {
+        Stmt::AssignOp { target, .. } => {
+            if let nx_ast::Target::Name(n) = target {
+                push(n);
+            }
+        }
+        Stmt::Assign { targets, .. } => {
+            for t in targets {
+                if let nx_ast::Target::Name(n) = t {
+                    push(n);
+                }
+            }
+        }
+        Stmt::FromImport { names, .. } => {
+            for (name, alias) in names {
+                push(alias.as_ref().unwrap_or(name));
+            }
+        }
+        Stmt::Import { module: m, alias, .. } => {
+            push(alias.as_ref().unwrap_or(m));
+        }
+        // The case this exists for: a task body is outlined into its own
+        // function mid-module, so anything it binds has to be a global that
+        // was already declared. Nested blocks inside a task are followed
+        // too, because `if`/`while`/`for` inside a task still bind module
+        // names.
+        Stmt::Parallel { tasks, .. } => {
+            for t in tasks {
+                collect_module_globals(t, out);
+            }
+        }
+        Stmt::If { then_body, elifs, else_body, .. } => {
+            for t in then_body {
+                collect_module_globals(t, out);
+            }
+            for (_, b) in elifs {
+                for t in b {
+                    collect_module_globals(t, out);
+                }
+            }
+            if let Some(b) = else_body {
+                for t in b {
+                    collect_module_globals(t, out);
+                }
+            }
+        }
+        Stmt::While { body, .. } => {
+            for t in body {
+                collect_module_globals(t, out);
+            }
+        }
+        // A loop's own variable is a slot in the enclosing function, but
+        // assignments in its body still bind module names.
+        Stmt::For { body, .. } => {
+            for t in body {
+                collect_module_globals(t, out);
+            }
+        }
+        // A function or impl body is a separate scope; nothing in it is a
+        // module global.
+        _ => {}
+    }
+}
+
 fn mangle_method(module: &str, type_name: &str, method: &str) -> String {
     // Length-prefixed segments, so `a.B` + `c` can never alias `a` + `B.c`.
     format!("nx__m_{}__{module}__{type_name}__{method}", method.len())
@@ -140,10 +221,20 @@ fn mangle_done(module: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_entry, compile_opts, mangle_fn, mangle_method};
+    use super::{compile_entry, compile_opts, mangle_fn, mangle_global, mangle_method};
 
-    /// Structural invariant: `define` may only appear at brace depth 0.
-    /// (Catches outlined functions emitted mid-body.)
+    /// Structural invariant: `define` may only appear at brace depth 0, and so
+    /// may a global's declaration.
+    ///
+    /// Both halves of this have been violated at different times. An
+    /// outlined function emitted mid-body was the first. The second was a
+    /// global: a name first assigned inside a `parallel:` task is a module
+    /// global, but the task is outlined into its own function, so the name
+    /// was discovered *during* emission and the declaration landed between
+    /// an `entry:` label and the instruction after it -- which clang
+    /// rejects with "expected instruction opcode", long before anything
+    /// could run. A missing top-level statement is a quiet wrong answer;
+    /// this one at least failed loudly.
     fn assert_top_level_defines(ir: &str) {
         let mut depth = 0i32;
         for line in ir.lines() {
@@ -151,9 +242,147 @@ mod tests {
             if t.starts_with("define ") {
                 assert_eq!(depth, 0, "define inside function body: {t}");
             }
+            // A `@name = global` or `@name = constant` line is a module-level
+            // declaration, never an instruction.
+            if t.starts_with('@') && (t.contains(" = global") || t.contains(" = constant")) {
+                assert_eq!(
+                    depth, 0,
+                    "global declared inside a function body: {t}\n{ir}"
+                );
+            }
             depth += line.chars().filter(|&c| c == '{').count() as i32;
             depth -= line.chars().filter(|&c| c == '}').count() as i32;
         }
+    }
+
+    /// A trailing `parallel:` block is the shape that exposed the global
+    /// bug: when the block is last, nothing afterwards re-enters the
+    /// globals section, so a task-bound name declared mid-function has
+    /// nowhere to be fixed up.
+    #[test]
+    fn a_trailing_parallel_block_declares_its_globals_up_front() {
+        for src in [
+            "x = 0\nparallel:\n    a = 1\n    b = 2\n",
+            "x = 0\nparallel:\n    if x > 0:\n        a = 1\n    b = 2\n",
+            "x = 0\nparallel:\n    for i in 0..3:\n        a = i\n    b = 2\n",
+            "x = 0\nparallel:\n    a = 1\n",
+        ] {
+            let ir = compile_entry(src, std::path::Path::new(".")).unwrap();
+            assert_top_level_defines(&ir);
+        }
+    }
+
+    /// A loop variable is scoped to its loop, so it is a local slot and
+    /// never a module global.
+    ///
+    /// It used to be a global at top level, because `store_fresh` takes the
+    /// `in_init` path for anything bound while emitting module-level code.
+    /// That leaked the variable into every later statement and let two
+    /// loops collide on the name -- and inside a `parallel:` task the
+    /// collision is a data race, which breaks the determinism contract.
+    #[test]
+    fn a_loop_variable_is_never_a_global() {
+        for src in [
+            "for i in 0..3:\n    print(i)\n",
+            "for i in 0..3:\n    for j in [1]:\n        print(i)\n",
+            "x = 0\nparallel:\n    for i in 0..3:\n        x = i\n",
+        ] {
+            let ir = compile_entry(src, std::path::Path::new(".")).unwrap();
+            assert!(
+                !ir.contains(&format!("@{} = global", mangle_global("__main__", "i"))),
+                "loop variable leaked into module scope:\n{ir}"
+            );
+            assert_top_level_defines(&ir);
+        }
+    }
+
+    /// A `mut self` call writes back into its receiver. When the receiver
+    /// is a *local* slot rather than a module variable -- a loop variable is
+    /// the case that matters -- the write has to land in the slot.
+    ///
+    /// It used to test `in_init` first and write to a module global instead,
+    /// so the update went somewhere nothing read and the following
+    /// `print` showed the old value. The code compiled, ran, and printed
+    /// the wrong thing, which is the worst shape a bug can have.
+    #[test]
+    fn mut_self_writes_back_into_a_local_receiver() {
+        let ir = compile_entry(
+            &format!(
+                "{POINT}impl P:\n    fn moved(mut self, d):\n        self.x = self.x + d\n        return self\npts = [P(1, 1)]\nfor pt in pts:\n    pt.moved(2)\n    print(pt)\n"
+            ),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        // Match the whole declaration, not just the name: `..._pt` is a
+        // prefix of `..._pts`, and the list really is a module variable.
+        assert!(
+            !top.contains(&format!("@{} = global", mangle_global("__main__", "pt"))),
+            "a loop variable must not be written through module scope:\n{top}"
+        );
+        // The write-back stores the call's result into the loop's own slot.
+        let call_at = top.find(&mangle_method("__main__", "P", "moved")).unwrap();
+        let after = &top[call_at..];
+        assert!(
+            after.contains("store %NxVal"),
+            "the result must be stored after the call:\n{after}"
+        );
+    }
+
+    /// The module body is a function like any other, and its inferred types
+    /// are filed under `<top>`. `cur_fn` has to say so while it is emitted:
+    /// otherwise every lookup that keys on the current function -- unboxing,
+    /// method dispatch on a local, the memory plan -- misses, and top-level
+    /// code silently loses all of its static types.
+    #[test]
+    fn the_module_body_knows_its_own_inference_key() {
+        let ir = compile_entry("t = 0\nfor i in 0..4:\n    t = t + i\nprint(t)\n", std::path::Path::new("."))
+            .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        // A top-level counter whose type is known must get a bare i64 slot,
+        // which is only possible if the `<top>` inference was found.
+        assert!(
+            top.contains("alloca i64"),
+            "top-level locals must unbox:\n{top}"
+        );
+        assert!(
+            top.contains("add i64"),
+            "a top-level `t = t + i` must be raw arithmetic:\n{top}"
+        );
+    }
+
+    /// A nested loop that reuses the outer variable's name must not destroy
+    /// the outer binding. This is observable:
+    ///
+    /// ```text
+    /// for i in 0..3:
+    ///     for i in 0..2:
+    ///         print("in", i)
+    ///     print("out", i)     # must be the outer induction value
+    /// ```
+    ///
+    /// The inner loop rebinds `i` for its own duration, so each outer
+    /// iteration has to restore the slot it started with.
+    #[test]
+    fn a_nested_loop_restores_the_outer_variable() {
+        let ir = compile_entry(
+            "for i in 0..3:\n    for i in 0..2:\n        print(i)\n    print(i)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        // Both loops keep their counter in an i64 slot, so the inner loop's
+        // induction variable and the outer one must be distinct allocas.
+        let slots = functions(&ir)
+            .iter()
+            .flat_map(|(_, body)| {
+                body.lines()
+                    .filter(|l| l.contains(" = alloca i64"))
+                    .map(|l| l.split_whitespace().next().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .count();
+        assert!(slots >= 2, "each loop needs its own counter slot:\n{ir}");
+        assert_top_level_defines(&ir);
     }
 
     /// Every `alloca` must sit in the entry block. One emitted inside a
@@ -1203,11 +1432,46 @@ struct MethodSig {
 }
 
 /// Where a function's allocas have to be spliced back in: the byte offset
+/// Where a function's allocas have to be spliced back in: the byte offset
 /// just past its `entry:` label, and which buffer it is being written to.
 struct AllocFrame {
     to_top: bool,
     at: usize,
     items: Vec<(String, String)>,
+}
+
+/// A loop variable's binding, saved so it can be put back when the loop
+/// ends.
+///
+/// Exists because a loop variable is scoped to its loop. An inner `for i`
+/// inside an outer `for i` used to destroy the outer binding, which was
+/// observable:
+///
+/// ```text
+/// for i in 0..3:
+///     for i in 0..2:
+///         print("in", i)
+///     print("out", i)     # printed the inner loop's last value, not its own
+/// ```
+struct LoopVarScope {
+    name: String,
+    saved_slot: Option<String>,
+    saved_rep: Option<Ty>,
+}
+
+impl LoopVarScope {
+    /// Put the loop's binding back, so the enclosing scope sees exactly
+    /// what it saw before.
+    fn restore(self, g: &mut Gen) {
+        g.locals.remove(&self.name);
+        g.rep.remove(&self.name);
+        if let Some(s) = self.saved_slot {
+            g.locals.insert(self.name.clone(), s);
+        }
+        if let Some(r) = self.saved_rep {
+            g.rep.insert(self.name.clone(), r);
+        }
+    }
 }
 
 impl Gen {
@@ -1843,37 +2107,18 @@ impl Gen {
 
     fn emit_module(&mut self, module: &str, prog: &Program) -> Result<(), CodegenError> {
         self.cur_module = module.to_string();
-        // First pass: module-level variable globals (functions need no globals).
+        // First pass: every name that needs a module-level global, so all of
+        // them can be declared before any function body is emitted.
+        //
+        // This has to reach inside a `parallel:` block. Its tasks are
+        // outlined into their own functions, and a name first assigned
+        // inside a task is still a module global. If the pass only saw
+        // top-level statements, the global would be discovered *during*
+        // emission and appended to `top` in the middle of a function body,
+        // which clang rejects with "expected instruction opcode".
         let mut gvars: Vec<String> = Vec::new();
         for s in &prog.stmts {
-            let mut push = |n: &String| {
-                if !gvars.contains(n) {
-                    gvars.push(n.clone());
-                }
-            };
-            match s {
-                Stmt::AssignOp { target, .. } => {
-                    if let nx_ast::Target::Name(n) = target {
-                        push(n);
-                    }
-                }
-                Stmt::Assign { targets, .. } => {
-                    for t in targets {
-                        if let nx_ast::Target::Name(n) = t {
-                            push(n);
-                        }
-                    }
-                }
-                Stmt::FromImport { names, .. } => {
-                    for (name, alias) in names {
-                        push(alias.as_ref().unwrap_or(name));
-                    }
-                }
-                Stmt::Import { module: m, alias, .. } => {
-                    push(alias.as_ref().unwrap_or(m));
-                }
-                _ => {}
-            }
+            collect_module_globals(s, &mut gvars);
         }
         for v in &gvars {
             self.globals.insert(format!("{module}\0{v}"));
@@ -1899,6 +2144,15 @@ impl Gen {
         // Module init body = top-level statements, guarded for import caching.
         self.in_init = true;
         self.term = None;
+        // The init body is a function like any other, and the checker's
+        // inference for it is filed under `<top>`. Without this, every
+        // type lookup that keys on the current function -- unboxing
+        // decisions, method dispatch on a local, the memory plan -- missed,
+        // because `cur_fn` was still whatever the last emitted function
+        // left behind. Top-level code was therefore never unboxed, and a
+        // method call on a top-level local could not resolve.
+        let saved_fn = self.cur_fn.clone();
+        self.cur_fn = "<top>".to_string();
         let init = mangle_init(module);
         self.w(&format!("define void @{init}() {{"));
         self.w("entry:");
@@ -1930,6 +2184,7 @@ impl Gen {
         self.end_allocs();
         self.in_init = false;
         self.term = None;
+        self.cur_fn = saved_fn;
         Ok(())
     }
 
@@ -2566,7 +2821,7 @@ impl Gen {
                 // length), so there is no second owner to separate from.
                 // Cloning here would deep-copy the container on every
                 // indexed write.
-                if self.in_init {
+                if !self.locals.contains_key(name) && self.in_init {
                     let g = self.ensure_global(&self.cur_module.clone(), name);
                     let b = self.unbox(updated);
                     self.w(&format!("  store %NxVal {b}, ptr {g}"));
@@ -2717,7 +2972,13 @@ impl Gen {
     ) -> Result<(), CodegenError> {
         // Local slot: reuse the scalar path when the variable's
         // representation allows it, so `x += 1` stays unboxed.
-        if !self.in_init && self.rep_of(name).is_some() {
+        //
+        // No `in_init` guard: `rep_of` is Some only for a name that has a
+        // local slot, which is what this is really asking. The old guard
+        // also skipped every top-level compound assignment, so `t += 1` in
+        // module-level code went through the boxed helper even though the
+        // slot was a bare i64 right there.
+        if self.rep_of(name).is_some() {
             let cur = self.load_slot(name);
             if let Some(v) = self.emit_named_binop(&cur, op, rhs) {
                 self.store_slot(name, &v);
@@ -2827,14 +3088,19 @@ impl Gen {
     }
 
     fn store_name(&mut self, name: &str, v: &NV, _span: Span) -> Result<(), CodegenError> {
-        if self.in_init {
-            // Module globals are the boxed boundary: other modules and
-            // parallel tasks reach them by address.
-            let g = self.ensure_global(&self.cur_module.clone(), name);
-            let b = self.store_boxed(v);
-            self.w(&format!("  store %NxVal {b}, ptr {g}"));
-            return Ok(());
-        }
+        // A local slot wins over module scope when one exists.
+        //
+        // The order matters and used to be wrong. A loop variable has a slot
+        // (it is scoped to its loop), but this function used to test
+        // `in_init` first and write to a module global instead -- so a
+        // `mut self` method's write-back landed in module scope while the
+        // read on the next line read the local slot. The update was
+        // silently lost, which is the worst shape a bug can have: the code
+        // compiled, ran, and printed the wrong thing.
+        //
+        // A genuine module variable has no local slot, so it still reaches
+        // the global branch, which other modules and parallel tasks read by
+        // address.
         if self.locals.contains_key(name) {
             // Rebinding a Unique local: release the old buffers first. An
             // unboxed slot holds a bare scalar with nothing to free.
@@ -2845,14 +3111,20 @@ impl Gen {
                 self.w(&format!("  call void @nx_free_val(%NxVal {old})"));
             }
             self.store_slot(name, v);
-        } else {
-            self.new_slot(name, self.unboxed_ty(name));
-            self.store_slot(name, v);
+            return Ok(());
         }
+        if self.in_init {
+            let g = self.ensure_global(&self.cur_module.clone(), name);
+            let b = self.store_boxed(v);
+            self.w(&format!("  store %NxVal {b}, ptr {g}"));
+            return Ok(());
+        }
+        self.new_slot(name, self.unboxed_ty(name));
+        self.store_slot(name, v);
         Ok(())
     }
 
-    /// Always-allocate store (from-imports, loop vars).
+/// Always-allocate store (from-imports, loop vars).
     fn store_fresh(&mut self, name: &str, v: &NV) {
         if self.in_init {
             let g = self.ensure_global(&self.cur_module.clone(), name);
@@ -2866,6 +3138,23 @@ impl Gen {
         self.rep.remove(name);
         self.new_slot(name, self.unboxed_ty(name));
         self.store_slot(name, v);
+    }
+
+    /// Bind a loop variable for the duration of its body, and return the
+    /// scope that puts the previous binding back.
+    ///
+    /// Always a local slot, never a module global — including at top level,
+    /// where `store_fresh` would take the `in_init` path. A loop variable is
+    /// not visible after the loop, so giving it module scope leaks it into
+    /// every later statement and lets two loops collide on the name. Inside
+    /// a `parallel:` task that collision is a data race, which would break
+    /// the determinism contract outright.
+    fn bind_loop_var(&mut self, name: &str, v: &NV) -> LoopVarScope {
+        let saved_slot = self.locals.remove(name);
+        let saved_rep = self.rep.remove(name);
+        self.new_slot(name, self.unboxed_ty(name));
+        self.store_slot(name, v);
+        LoopVarScope { name: name.to_string(), saved_slot, saved_rep }
     }
 
     /// Representation a fresh local should get: the inferred scalar type
@@ -2994,7 +3283,7 @@ impl Gen {
                 self.w(&format!("{bodyl}:"));
                 // The induction variable is statically Int.
                 let iv = NV::raw(Ty::Int, cur.clone());
-                self.store_fresh(var, &iv);
+                let scope = self.bind_loop_var(var, &iv);
                 self.loops.push((condl.clone(), endl.clone()));
                 self.term = None;
                 for st in body {
@@ -3005,6 +3294,9 @@ impl Gen {
                 }
                 let bt = self.term.take();
                 self.loops.pop();
+                // The loop variable's scope ends with the loop, so the
+                // enclosing binding is visible again from here on.
+                scope.restore(self);
                 match bt {
                     Some(Term::Ret) => {
                         self.term = Some(Term::Ret);
@@ -3051,14 +3343,14 @@ impl Gen {
                 self.w(&format!("  br i1 {go}, label %{bodyl}, label %{endl}"));
                 self.w(&format!("{bodyl}:"));
                 let el = self.reg();
-                if is_dict {
+                let scope = if is_dict {
                     // Iterating a dict yields its keys, in insertion order.
                     // The runtime helper reads entry `i`'s key directly,
                     // which avoids building the key list first.
                     self.w(&format!(
                         "  {el} = call %NxVal @nx_dictkeyat(%NxVal {vb}, i64 {i})"
                     ));
-                    self.store_fresh(var, &NV::dyn_boxed(el));
+                    self.bind_loop_var(var, &NV::dyn_boxed(el))
                 } else if matches!(v.ty, Ty::Unknown) {
                     // Unresolved iterable: the tag decides list, string or
                     // dict at runtime. A dict yields its keys, matching the
@@ -3066,25 +3358,25 @@ impl Gen {
                     self.w(&format!(
                         "  {el} = call %NxVal @nx_each(%NxVal {vb}, i64 {i})"
                     ));
-                    self.store_fresh(var, &NV::dyn_boxed(el));
+                    self.bind_loop_var(var, &NV::dyn_boxed(el))
                 } else {
-                let iv = self.reg();
-                let ix = NV::raw(Ty::Int, i.clone());
-                let ivb = self.unbox(&ix);
-                self.w(&format!("  {iv} = call %NxVal @nx_int(i64 {i})"));
-                self.w(&format!("  {el} = call %NxVal @nx_index(%NxVal {vb}, %NxVal {ivb})"));
-                // Element type comes from the list, so a list of scalars
-                // iterates without re-boxing. as_raw declines when
-                // unboxing is off, leaving the box in place.
-                let elem_ty = match &v.ty {
-                    Ty::List(t) => (**t).clone(),
-                    Ty::Str => Ty::Str,
-                    _ => Ty::Unknown,
+                    let iv = self.reg();
+                    let ix = NV::raw(Ty::Int, i.clone());
+                    let ivb = self.unbox(&ix);
+                    self.w(&format!("  {iv} = call %NxVal @nx_int(i64 {i})"));
+                    self.w(&format!("  {el} = call %NxVal @nx_index(%NxVal {vb}, %NxVal {ivb})"));
+                    // Element type comes from the list, so a list of scalars
+                    // iterates without re-boxing. as_raw declines when
+                    // unboxing is off, leaving the box in place.
+                    let elem_ty = match &v.ty {
+                        Ty::List(t) => (**t).clone(),
+                        Ty::Str => Ty::Str,
+                        _ => Ty::Unknown,
+                    };
+                    let boxed_elem = NV::boxed_known(el, elem_ty);
+                    let ev = self.as_raw(&boxed_elem).unwrap_or(boxed_elem);
+                    self.bind_loop_var(var, &ev)
                 };
-                let boxed_elem = NV::boxed_known(el, elem_ty);
-                let ev = self.as_raw(&boxed_elem).unwrap_or(boxed_elem);
-                self.store_fresh(var, &ev);
-                }
                 self.loops.push((condl.clone(), endl.clone()));
                 self.term = None;
                 for st in body {
@@ -3095,6 +3387,9 @@ impl Gen {
                 }
                 let bt = self.term.take();
                 self.loops.pop();
+                // The loop variable's scope ends with the loop, so the
+                // enclosing binding is visible again from here on.
+                scope.restore(self);
                 match bt {
                     Some(Term::Ret) => {
                         self.term = Some(Term::Ret);
