@@ -309,7 +309,7 @@ if (-not $SkipO0) { $modes += 'clang-O0' }
 # ---------------------------------------------------------------------------
 $script:Failures = @()
 
-function Invoke-Mode([string]$prog, [string]$mode, [string]$llPath, [string]$exePath, [string]$objPath, [string]$stampPath) {
+function Invoke-Mode([string]$prog, [string]$mode, [string]$llPath, [string]$exePath, [string]$objPath, [string]$c2Exe, [string]$c0Exe, [string]$stampPath) {
     switch ($mode) {
         'check' {
             return [NxProc]::Run($NxExe, @('check', $prog), $null, $PollMs, $TimeoutSec * 1000)
@@ -337,10 +337,13 @@ function Invoke-Mode([string]$prog, [string]$mode, [string]$llPath, [string]$exe
             return [NxProc]::Run($clangExe, @('-O2', '-c', $llPath, '-o', $objPath), $null, $PollMs, $TimeoutSec * 1000)
         }
         'clang-O2' {
-            return [NxProc]::Run($clangExe, @('-O2', $llPath, '-o', $exePath), $null, $PollMs, $TimeoutSec * 1000)
+            # Distinct output path: prog.exe must stay the artifact `nx build`
+            # produced, otherwise whichever clang mode ran last would be
+            # mistaken for the -O2 build output when its size is recorded.
+            return [NxProc]::Run($clangExe, @('-O2', $llPath, '-o', $c2Exe), $null, $PollMs, $TimeoutSec * 1000)
         }
         'clang-O0' {
-            return [NxProc]::Run($clangExe, @('-O0', $llPath, '-o', $exePath), $null, $PollMs, $TimeoutSec * 1000)
+            return [NxProc]::Run($clangExe, @('-O0', $llPath, '-o', $c0Exe), $null, $PollMs, $TimeoutSec * 1000)
         }
     }
 }
@@ -406,6 +409,8 @@ foreach ($p in $programs) {
     $llPath = Join-Path $d 'prog.ll'
     $exePath = Join-Path $d 'prog.exe'
     $objPath = Join-Path $d 'prog.obj'
+    $c2Exe = Join-Path $d 'clang-O2.exe'
+    $c0Exe = Join-Path $d 'clang-O0.exe'
     $stampPath = "$exePath.nxstamp"
 
     Write-Host ""
@@ -415,7 +420,7 @@ foreach ($p in $programs) {
     # source file and the temp dir are all in cache before sample 1.
     $wu = "  warmup "
     foreach ($m in $modes) {
-        $r = Invoke-Mode $p.FullName $m $llPath $exePath $objPath $stampPath
+        $r = Invoke-Mode $p.FullName $m $llPath $exePath $objPath $c2Exe $c0Exe $stampPath
         $wu += ("{0}={1:N3}s " -f $m, $r.Seconds)
         if ($r.Error) { $wu += "ERR($($r.Error)) " }
         if ($r.ExitCode -ne 0 -and $r.ExitCode -ne -1) { $wu += "EXIT$($r.ExitCode) " }
@@ -442,7 +447,7 @@ foreach ($p in $programs) {
         $repFloor = ($fp | Sort-Object)[0]
         $line = "  rep {0}/{1} floor={2:N1}ms " -f $rep, $Runs, ($repFloor * 1000)
         foreach ($m in $modes) {
-            $r = Invoke-Mode $p.FullName $m $llPath $exePath $objPath $stampPath
+            $r = Invoke-Mode $p.FullName $m $llPath $exePath $objPath $c2Exe $c0Exe $stampPath
             $null = $raw.Add([pscustomobject]@{
                     program    = $p.BaseName
                     mode       = $m
@@ -552,6 +557,10 @@ foreach ($p in $programs) {
     $pkEmit = ($summary | Where-Object { $_.program -eq $p.BaseName -and $_.mode -eq 'emit-ir' }).peak_mb
     $pkBuild = ($summary | Where-Object { $_.program -eq $p.BaseName -and $_.mode -eq 'build' }).peak_mb
     $pkC2 = ($summary | Where-Object { $_.program -eq $p.BaseName -and $_.mode -eq 'clang-O2' }).peak_mb
+    $pkCc = ($summary | Where-Object { $_.program -eq $p.BaseName -and $_.mode -eq 'clangc-O2' }).peak_mb
+    # clangc-O2 is the mode whose memory scales with IR size: clang -O2 -c holds the
+    # whole optimised module, whereas clang -O2 <ll> -o exe spawns the linker as a
+    # child process whose memory never appears in clang's own working set.
     $codegen = if ($null -ne $tEmit -and $null -ne $tCheck) { $tEmit - $tCheck } else { $null }
     $clangEst = if ($null -ne $tBuild -and $null -ne $tEmit) { $tBuild - $tEmit } else { $null }
     # Residual: what build costs that neither our own emit-ir nor clang's
@@ -588,8 +597,10 @@ foreach ($p in $programs) {
         emit_ir_fs_s = $(if ($null -ne $tEmit) { [math]::Round($tEmit - $fNx, 4) })
         clangc_fs_s = $(if ($null -ne $tCc) { [math]::Round($tCc - $fCl, 4) })
         peak_nx_mb = $pkEmit
-        peak_clang_mb = $pkC2
-        peak_pipeline_mb = $(if ($null -ne $pkEmit -and $null -ne $pkC2) { [math]::Round($pkEmit + $pkC2, 2) })
+        peak_llvm_mb = $pkCc
+        peak_clang_link_mb = $pkC2
+        peak_clang_mb = $pkCc
+        peak_pipeline_mb = $(if ($null -ne $pkEmit -and $null -ne $pkCc) { [math]::Round($pkEmit + $pkCc, 2) })
     }
 }
 
@@ -627,7 +638,7 @@ W ("  cmd /c exit     {0,7:N2} ms" -f $floorCmd.med_ms)
 W ("  nx --version    {0,7:N2} ms" -f $floorNx.med_ms)
 W ("  clang --version {0,7:N2} ms" -f $floorClang.med_ms)
 W ""
-W ("{0,-14} {1,9} {2,9} {3,9} {4,9} {5,9} {6,9} {7,9} {8,9} {9,9} {10,9}" -f 'program', 'check_s', 'emit_ir', 'codegen', 'clang-c', 'link+drv', 'build_s', 'll_KB', 'nxPK_MB', 'clPK_MB', 'exe_KB')
+W ("{0,-14} {1,9} {2,9} {3,9} {4,9} {5,9} {6,9} {7,9} {8,9} {9,9} {10,9}" -f 'program', 'check_s', 'emit_ir', 'codegen', 'clang-c', 'link+drv', 'build_s', 'll_KB', 'nxPK_MB', 'llvmPK_MB', 'exe_KB')
 W ('-' * 122)
 foreach ($r in $derived) {
     W ("{0,-14} {1,9:N3} {2,9:N3} {3,9:N3} {4,9:N3} {5,9:N3} {6,9:N3} {7,9:N0} {8,9:N1} {9,9:N1} {10,9:N0}" -f `
@@ -656,7 +667,7 @@ W "context    : $jsPath"
 Set-Content -Path $txtPath -Value $sb.ToString() -Encoding UTF8
 
 Write-Host ""
-Write-Host ("{0,-14} {1,9} {2,9} {3,9} {4,9} {5,9} {6,9} {7,9} {8,9} {9,9} {10,9}" -f 'program', 'check_s', 'emit_ir', 'codegen', 'clang-c', 'link+drv', 'build_s', 'll_KB', 'nxPK_MB', 'clPK_MB', 'exe_KB') -ForegroundColor White
+Write-Host ("{0,-14} {1,9} {2,9} {3,9} {4,9} {5,9} {6,9} {7,9} {8,9} {9,9} {10,9}" -f 'program', 'check_s', 'emit_ir', 'codegen', 'clang-c', 'link+drv', 'build_s', 'll_KB', 'nxPK_MB', 'llvmPK_MB', 'exe_KB') -ForegroundColor White
 Write-Host ('-' * 122)
 foreach ($r in $derived) {
     Write-Host ("{0,-14} {1,9:N3} {2,9:N3} {3,9:N3} {4,9:N3} {5,9:N3} {6,9:N3} {7,9:N0} {8,9:N1} {9,9:N1} {10,9:N0}" -f `

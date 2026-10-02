@@ -118,7 +118,7 @@ Seven modes, run per program:
 | mode | command | what it isolates |
 |------|---------|------------------|
 | `check` | `nx check <f>` | frontend + type check only (`nx_types::check_source`) |
-| `dump-ir` | `nx dump-ir <f>` | effect/summary analysis only (`nx_ir::analyze`) |
+| `dump-ir` | `nx dump-ir <f>` | effect/summary analysis only (`nx_ir::analyze`), no type check |
 | `emit-ir` | `nx build <f> --emit-ir` | check + infer + mem plan + effect analysis + codegen + IR serialisation. **No clang.** |
 | `build` | `nx build <f> -o out.exe` | the whole pipeline |
 | `clangc-O2` | `clang -O2 -c <ll> -o out.obj` | LLVM on our IR, **no link** |
@@ -135,6 +135,15 @@ probe, and clang itself.
 same string `build` writes to `%TEMP%\nxbuild-<pid>.ll` before handing it to
 clang, so the number is the faithful "Nexum's own work" cost rather than a
 pipe cost.
+
+Three bounds fall out of the three cheapest modes:
+
+* `dump-ir` − floor ≈ lex + parse + effect analysis
+* `check` − floor ≈ lex + parse + type check
+* `emit-ir` − floor ≈ all of the above, twice, plus codegen
+
+The lexer, parser and type checker cannot be separated from each other
+through the CLI surface — see "What could not be measured".
 
 ### The clang/Nexum split
 
@@ -202,9 +211,44 @@ a few milliseconds there is no peak-memory sample.** `peak_sampled` in the
 summary CSV records whether any sample was taken.
 
 **`nx` spawns clang as a child process, so `nx`'s peak working set does not
-include clang.** The pipeline peak is therefore reported as two columns
-(`peak_nx_mb`, `peak_clang_mb`) and their sum (`peak_pipeline_mb`), never as
-one number.
+include clang.** Measured directly: `nx build` peaks at almost exactly the
+same value as `nx build --emit-ir` does, on every program. The pipeline peak
+is therefore reported as two columns and their sum, never as one number:
+`peak_nx_mb` (our process) and `peak_llvm_mb` (clang `-O2 -c`), plus
+`peak_pipeline_mb`.
+
+Use `peak_llvm_mb` — from `clang -O2 -c` — rather than the peak of
+`clang -O2 <ll> -o exe`, when you want to know how LLVM's memory scales with
+IR size. With a link in the command, the linker is a *child* of clang and its
+memory is outside clang's working set, so the `clang-O2` peak is both
+smaller and not the quantity of interest.
+
+### Three Windows traps this harness had to be written around
+
+Recorded because each one produced a confidently wrong number before it was
+found, and each would do the same to the next person.
+
+**1. `$null` from PowerShell is `""` in C#.** Binding PowerShell's `$null`
+to a C# `string` parameter yields `String.Empty`, not `null`. A drain helper
+that tested `stdoutPath == null` therefore took the *file* branch and called
+`new FileStream("")`, which throws. The exception was raised **inside the
+drain thread's `catch {}`**, so the thread died silently, and the child then
+blocked forever writing to a full stdout pipe (Windows anonymous pipes carry
+4 KB, not 64 KB). Symptom: `nx dump-ir` appeared to hang for the full
+120 s timeout, 19 times out of 20 — while standalone it takes **0.05 s**. The
+real tell was in the child's own stderr, which Rust prints to the harness
+console: `failed printing to stdout: The pipe is being closed. (os error
+232)`. Fixed by testing `string.IsNullOrEmpty`, opening the sink *before*
+`Process.Start`, and reporting a drain failure instead of swallowing it.
+
+**2. `PeakWorkingSet64` is zero after exit.** Covered above. It is the
+difference between a memory column that means something and one that reads
+`0`.
+
+**3. Each clang mode must have its own `-o` path.** All of `nx build`,
+`clang -O2` and `clang -O0` writing to `prog.exe` means whichever ran last
+defines the recorded "output binary size". `prog.exe`,
+`clang-O2.exe` and `clang-O0.exe` are now distinct.
 
 ### Warm-up
 
@@ -284,11 +328,18 @@ superlinear in function count, so it stops being a usable oracle. See
 |------|----------|
 | `compiler-<tag>-raw.csv` | one row per (program, mode, repeat): `seconds`, `peak`, `polls`, `rep_floor_ms`, `exit`. Every sample, including dropped ones. |
 | `compiler-<tag>-summary.csv` | one row per (program, mode): `n`, `n_dropped`, `med_s`, `min_s`, `max_s`, `mean_s`, `sd_s`, `cv_pct`, `peak_mb`, and the sorted sample list |
-| `compiler-<tag>-derived.csv` | the phase split per program: check, emit-ir, codegen, clang-c, link+driver, build, `.ll` and `.exe` bytes, peaks, percentages, floor-subtracted columns |
+| `compiler-<tag>-derived.csv` | the phase split per program: check, emit-ir, codegen, clang-c, link/driver, build, `.ll` and `.exe` bytes, peaks, percentages, floor-subtracted columns |
 | `compiler-<tag>-context.json` | machine, tool versions, floor measurements, load factor, per-repeat floors |
 | `compiler-<tag>-report.txt` | the human-readable tables |
 
 `<tag>` defaults to a timestamp; pass `-Tag` to make it stable.
+
+`n_error` in the summary CSV counts runs that timed out or exited non-zero.
+Those are **excluded** from every statistic: a single 120 s timeout among
+seven 0.05 s runs would otherwise become the median. They remain in the raw
+CSV, and any (program, mode) pair with no valid run left is listed in the
+report under `ERRORED` and omitted from the derived table rather than
+reported as a number.
 
 ---
 
@@ -303,3 +354,37 @@ The compiler under test is pinned by path, not by `PATH`: `-NxExe` defaults
 to `C:\nexum\target\release\nx.exe`. **The `nx` on `PATH` is v0.3.0 and is
 two minor versions behind the tree** — using it would silently measure
 different code.
+
+### How long a full run takes
+
+`-Runs 7` over the 11 committed programs, 7 modes, plus the correctness gate
+and the floor probes, is roughly 10-20 minutes on this box — the spread is
+the box, not the harness. `-Runs 3 -SkipO0` is about 40% of that. The
+correctness gate builds every program twice, which is why a `-Runs 1` run is
+not instant.
+
+---
+
+## 7. What this harness does NOT measure
+
+* **Lexer / parser / type-checker individually.** The CLI exposes `--lex` and
+  `--parse`, but both *print* their result — `--parse` dumps the whole AST
+  with `{:#?}`, which costs far more than parsing does. There is no
+  "parse only, print nothing" mode, and adding one would mean changing the
+  driver, which is out of scope here. `check` and `dump-ir` give upper and
+  lower bounds on the frontend as a group instead.
+* **Per-module cost.** Every generated program is a single module. The
+  loader, `analyze_map` and `nx_mem::plan` all iterate `HashMap<String,
+  Program>`, so multi-module scaling is untested.
+* **Peak memory *including* the linker.** `nx` spawns `clang`, which spawns
+  the native linker. `nx`'s and clang's peaks are reported separately; the
+  linker's are not captured at all. `peak_pipeline_mb` is `nx + LLVM`, which
+  is a lower bound on the true whole-pipeline peak.
+* **Anything about the generated program's speed.** That is `bench/run.ps1`.
+* **In-process compilation.** Every number is a whole-process measurement and
+  therefore includes the ~17-25 ms process-launch floor. Nothing here
+  measures a library API, because there is no library API — the driver is a
+  binary and the crates expose `check_source` / `compile_entry` directly.
+* **Incremental / warm builds.** `up_to_date()` is deliberately defeated
+  before every timed build, so the "nothing changed" path is never measured.
+* **The `nx` on `PATH`.** See above; it is two minor versions stale.
