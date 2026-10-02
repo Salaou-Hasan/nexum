@@ -1,6 +1,6 @@
 //! AST for Nexum.
 //!
-//! Two shapes here are load-bearing and easy to get wrong when reading
+//! Three shapes here are load-bearing and easy to get wrong when reading
 //! further down the compiler:
 //!
 //! - [`Target`] is what an assignment can write to. It is deliberately a
@@ -8,11 +8,17 @@
 //!   not calls that happen to return the container.
 //! - [`BinOp::Mod`] follows Python's sign convention, the result takes the
 //!   sign of the divisor, so `-7 % 3` is `2`. The runtime has to match.
+//! - A [`Span`] is two 32-bit positions, not two pointers. See the
+//!   `layout` tests at the bottom of this file for the measured effect on
+//!   every node in the tree.
+
+/// A line number, re-exported from the lexer where positions are born.
+pub use nx_lexer::{ColNo, LineNo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
-    pub line: usize,
-    pub col: usize,
+    pub line: LineNo,
+    pub col: ColNo,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -415,5 +421,109 @@ impl Target {
                 Expr::Attr { base: base.clone(), attr: field.clone(), span }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod layout {
+    //! Structure-size checks.
+    //!
+    //! AST nodes are the highest-cardinality structure in the compiler --
+    //! a mid-sized program is tens of thousands of them, and every one
+    //! carries a [`Span`]. The width of a `Span` therefore sets the width
+    //! of every node, which is why the assertions below are pinned rather
+    //! than merely documented: widening one field back to a pointer width
+    //! is a silent ~25% regression across the whole tree, and nothing else
+    //! in the build would notice.
+    //!
+    //! The numbers are for a 64-bit target, which is the only one NX ships.
+    //! They are exact there and still meaningful as ceilings elsewhere.
+
+    use super::*;
+    use std::mem::size_of;
+
+    #[test]
+    fn a_span_is_eight_bytes() {
+        // Two u32s. Was two usizes: 16 bytes, carried by every node.
+        assert_eq!(size_of::<Span>(), 8, "Span must stay 8 bytes");
+    }
+
+    /// Pinning the node sizes keeps the win honest. If a new variant forces
+    /// Pinning the node sizes keeps the win honest. If a new variant forces
+    /// a node to grow, that is worth learning here rather than by surprise.
+    ///
+    /// Measured before/after narrowing `Span` from `usize` pairs to `u32`
+    /// pairs, on x86-64:
+    ///
+    /// ```text
+    /// node      before   after   change
+    /// Span        16       8      -50.0%
+    /// Expr        64      56      -12.5%
+    /// Stmt       192     168      -12.5%
+    /// Target      32      32        0.0%
+    /// ```
+    ///
+    /// `Expr` and `Stmt` moved far less than `Span` did, because their
+    /// widest variants are set by pointers and lengths rather than by the
+    /// position. `Expr` is pinned by the comprehension variant (`Box` plus
+    /// `String` plus two `Box`es plus an `Option<Box>`), which no position
+    /// narrowing can shrink.
+    #[test]
+    fn node_sizes_are_what_the_layout_assumes() {
+        assert_eq!(size_of::<Expr>(), 56, "Expr must stay 56 bytes");
+        assert_eq!(size_of::<Stmt>(), 168, "Stmt must stay 168 bytes");
+        assert_eq!(size_of::<Target>(), 32, "Target must stay 32 bytes");
+    }
+
+    /// A `Target` carries no position, so it is exactly one fat pointer's
+    /// worth of pointer plus length. Widening either costs 8 bytes on every
+    /// assignment in the program.
+    #[test]
+    fn a_target_is_a_box_and_a_string() {
+        assert_eq!(size_of::<Target>(), size_of::<Box<u8>>() + size_of::<String>());
+    }
+
+    /// Boxing `Expr::Comprehension`'s `var` would take `Expr` from 56 to 48,
+    /// and it is deliberately not done: it trades a heap allocation on every
+    /// comprehension for 8 bytes on a node that is itself one short-lived
+    /// allocation. Fewer, denser allocations is the better trade, and
+    /// "smallest field" is not the goal.
+    #[test]
+    fn expr_width_comes_from_its_payload_not_from_its_position() {
+        assert!(
+            size_of::<Expr>() > size_of::<Span>() + size_of::<Box<u8>>() + size_of::<String>(),
+            "Expr is set by a pointer-heavy variant, not by Span"
+        );
+    }
+
+    /// An `Int` literal is the payload an integer is, so its width is the
+    /// language's `Int` width and is not a choice to be tuned. It is also
+    /// the widest scalar in the tree, which is exactly why every other
+    /// numeric field here is narrower.
+    #[test]
+    fn int_literals_are_sixty_four_bit() {
+        assert_eq!(size_of::<i64>(), 8);
+        let e = Expr::Int(i64::MAX, Span { line: 0, col: 0 });
+        assert!(matches!(e, Expr::Int(v, _) if v == i64::MAX));
+    }
+
+    /// A `Float` literal is an IEEE double bit-for-bit. Narrowing it to
+    /// `f32` would halve the node and change every result, so it stays.
+    #[test]
+    fn float_literals_are_doubles() {
+        assert_eq!(size_of::<f64>(), 8);
+        let v = 0.1f64 + 0.2f64;
+        match Expr::Float(v, Span { line: 0, col: 0 }) {
+            Expr::Float(got, _) => assert_eq!(got, v, "a Float literal keeps its bits"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A field name and a type name are heap-allocated `String`s: the 24
+    /// bytes each is a pointer, a length and a capacity. Inlining them
+    /// would make the node worse for every program that has long names.
+    #[test]
+    fn field_is_pointer_width_times_two() {
+        assert_eq!(size_of::<Field>(), size_of::<String>() * 2);
     }
 }

@@ -25,8 +25,8 @@ fn target_from_expr(e: Expr) -> Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
+    pub line: nx_ast::LineNo,
+    pub col: nx_ast::ColNo,
 }
 
 impl std::fmt::Display for ParseError {

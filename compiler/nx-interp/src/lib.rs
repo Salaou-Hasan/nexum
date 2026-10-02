@@ -85,8 +85,8 @@ fn fmt_float(v: f64) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
+    pub line: nx_ast::LineNo,
+    pub col: nx_ast::ColNo,
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -1062,8 +1062,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         &self,
         module: &str,
         name: &str,
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         let m = self.modules.get(module).ok_or(RuntimeError {
             message: format!("unknown module '{module}'"),
@@ -1109,7 +1109,7 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
             .find(|p| p.is_file())
     }
 
-    fn load_module(&mut self, name: &str, line: usize, col: usize) -> Result<(), RuntimeError> {
+    fn load_module(&mut self, name: &str, line: nx_ast::LineNo, col: nx_ast::ColNo) -> Result<(), RuntimeError> {
         if self.loading.contains(&name.to_string()) {
             return Err(RuntimeError {
                 message: format!("circular import of '{name}'"),
@@ -1957,8 +1957,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         &mut self,
         base: Value,
         index: Value,
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         let err = |msg: &str| RuntimeError { message: msg.to_string(), line, col };
         // A dict is keyed by value, not position, so it is matched before
@@ -1999,8 +1999,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         &mut self,
         func: &str,
         args: &[Expr],
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         // Builtins first.
         if func == "len" {
@@ -2076,8 +2076,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         module: &str,
         func: &str,
         args: &[Expr],
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         let f = self
             .modules
@@ -2185,8 +2185,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         l: Value,
         op: BinOp,
         r: Value,
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         let err = |msg: &str| RuntimeError { message: msg.to_string(), line, col };
         match op {
@@ -2231,8 +2231,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         l: Value,
         op: BinOp,
         r: Value,
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         let err = |msg: String| RuntimeError { message: msg, line, col };
         let mismatch = || {
@@ -2294,8 +2294,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         l: Value,
         op: BinOp,
         r: Value,
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         let err = |msg: &str| RuntimeError { message: msg.to_string(), line, col };
         match (l, r) {
@@ -2382,8 +2382,8 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
         l: Value,
         op: BinOp,
         r: Value,
-        line: usize,
-        col: usize,
+        line: nx_ast::LineNo,
+        col: nx_ast::ColNo,
     ) -> Result<Value, RuntimeError> {
         let err = |msg: &str| RuntimeError { message: msg.to_string(), line, col };
         let ord = match (&l, &r) {

@@ -76,8 +76,8 @@ fn is_numeric(t: &Ty) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
+    pub line: nx_ast::LineNo,
+    pub col: nx_ast::ColNo,
 }
 
 impl std::fmt::Display for CheckError {

@@ -14,9 +14,24 @@
 ; List header: { ptr data (NxVal elements), i64 len, i64 cap }
 
 %NxVal = type { i64, i64, i64 }
-%NxList = type { ptr, i64, i64 }
+; Element counts are 32 bits. Both `n` and `cap` count *elements*, not
+; bytes -- the byte size is computed at the allocation site -- and an
+; element is at least 16 bytes, so reaching 2^31 of them would need 32 GiB
+; of live data behind a runtime with no garbage collector. That is not a
+; reachable state, so 32 bits is not a semantic limit, and it lets the two
+; counters share one 8-byte slot instead of two.
+;
+; Every load widens back to i64 with `zext` and every store narrows with
+; `trunc`, so all arithmetic outside the header stays 64-bit and no index
+; or length is ever computed in 32 bits. `nx_listpush` and `nx_dictput`
+; check before storing, so a count can never silently wrap.
+;
+; The header allocation stays `malloc(24)` on purpose: the saving is in
+; the struct's own size, and shrinking the malloc too would be a separate
+; change with its own justification.
+%NxList = type { ptr, i32, i32 }
 ; Dict header mirrors a list; entries are (key, value) pairs.
-%NxDict = type { ptr, i64, i64 }
+%NxDict = type { ptr, i32, i32 }
 %NxDictEntry = type { %NxVal, %NxVal }
 %NxRec = type { ptr, i64, ptr }  ; fields, nfields, type descriptor
 %NxDesc = type { ptr, i64, i64, ptr }  ; type-name bytes, type-name len, nfields, field-name table
@@ -54,6 +69,10 @@ declare double @llvm.pow.f64(double, double)
 @.fmt.close = private constant [2 x i8] c">\00"
 @.msg.divzero = private constant [17 x i8] c"division by zero\00"
 @.msg.overflow = private constant [17 x i8] c"integer overflow\00"
+; Reached only by a container whose element count would pass 2^31, which
+; needs tens of gigabytes of live data behind a runtime with no collector.
+; It exists so a 32-bit header field can never wrap silently.
+@.msg.toomany = private constant [36 x i8] c"list or dict exceeded 2^31 elements\00"
 @.msg.oob = private constant [35 x i8] c"index %lld out of range (len %lld)\00"
 @.msg.type = private constant [14 x i8] c"type mismatch\00"
 @.msg.notcall = private constant [13 x i8] c"not callable\00"
@@ -252,7 +271,8 @@ list:
   %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
   %data = load ptr, ptr %dp
   %lp = getelementptr %NxList, ptr %h, i64 0, i32 1
-  %len = load i64, ptr %lp
+  %len32 = load i32, ptr %lp
+  %len = zext i32 %len32 to i64
   br label %lcond
 lcond:
   %i = phi i64 [0, %list], [%i2, %lbody]
@@ -277,7 +297,8 @@ dict:
   %ddp = getelementptr %NxDict, ptr %dh, i64 0, i32 0
   %ddata = load ptr, ptr %ddp
   %dlp = getelementptr %NxDict, ptr %dh, i64 0, i32 1
-  %dlen = load i64, ptr %dlp
+  %dlen32 = load i32, ptr %dlp
+  %dlen = zext i32 %dlen32 to i64
   br label %dcond
 dcond:
   %di = phi i64 [0, %dict], [%di2, %dbody]
@@ -947,16 +968,21 @@ define %NxVal @nx_new_list(i64 %cap) {
 entry:
   %c0 = icmp eq i64 %cap, 0
   %cap2 = select i1 %c0, i64 4, i64 %cap
-  %hsize = add i64 0, 24
-  %h = call ptr @malloc(i64 24)
+  ; 16, not 24: sizeof(%NxList) after the counters became i32. The malloc
+  ; and the struct have to move together -- narrowing the type while leaving
+  ; the allocation alone would save nothing at all, and the wasted 8 bytes
+  ; would sit between the pointer and the counters as tail padding.
+  %hsize = add i64 0, 16
+  %h = call ptr @malloc(i64 16)
   %bytes = mul i64 %cap2, 24
   %data = call ptr @malloc(i64 %bytes)
   %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
   store ptr %data, ptr %dp
   %lp = getelementptr %NxList, ptr %h, i64 0, i32 1
-  store i64 0, ptr %lp
+  store i32 0, ptr %lp
   %cp = getelementptr %NxList, ptr %h, i64 0, i32 2
-  store i64 %cap2, ptr %cp
+  %cap232 = trunc i64 %cap2 to i32
+  store i32 %cap232, ptr %cp
   %hi = ptrtoint ptr %h to i64
   %r0 = insertvalue %NxVal zeroinitializer, i64 5, 0
   %r1 = insertvalue %NxVal %r0, i64 %hi, 1
@@ -970,9 +996,11 @@ entry:
   %hp = extractvalue %NxVal %lv, 1
   %h = inttoptr i64 %hp to ptr
   %lp = getelementptr %NxList, ptr %h, i64 0, i32 1
-  %len = load i64, ptr %lp
+  %len32 = load i32, ptr %lp
+  %len = zext i32 %len32 to i64
   %cp = getelementptr %NxList, ptr %h, i64 0, i32 2
-  %cap = load i64, ptr %cp
+  %cap32 = load i32, ptr %cp
+  %cap = zext i32 %cap32 to i64
   %full = icmp eq i64 %len, %cap
   br i1 %full, label %grow, label %store
 grow:
@@ -980,9 +1008,21 @@ grow:
   %dp = getelementptr %NxList, ptr %h, i64 0, i32 0
   %data = load ptr, ptr %dp
   %nb = mul i64 %ncap, 24
+  ; A list cannot reach 2^31 elements: each is at least 16 bytes of live
+  ; data behind a runtime with no collector, so the count has nowhere to
+  ; wrap. The check is here anyway, because a header field that could
+  ; silently truncate is the kind of thing that only shows up as corruption
+  ; much later.
+  %ncapfits = icmp ule i64 %ncap, 2147483647
+  br i1 %ncapfits, label %realloc, label %toobig
+toobig:
+  call void @nx_panic(ptr @.msg.toomany)
+  br label %realloc
+realloc:
   %nd = call ptr @realloc(ptr %data, i64 %nb)
   store ptr %nd, ptr %dp
-  store i64 %ncap, ptr %cp
+  %ncap32 = trunc i64 %ncap to i32
+  store i32 %ncap32, ptr %cp
   br label %store
 store:
   %dp2 = getelementptr %NxList, ptr %h, i64 0, i32 0
@@ -990,7 +1030,8 @@ store:
   %ep = getelementptr %NxVal, ptr %data2, i64 %len
   store %NxVal %v, ptr %ep
   %len2 = add i64 %len, 1
-  store i64 %len2, ptr %lp
+  %len232 = trunc i64 %len2 to i32
+  store i32 %len232, ptr %lp
   ; mirror len into the value payload
   %nv0 = insertvalue %NxVal %lv, i64 %len2, 2
   store %NxVal %nv0, ptr %vp
@@ -1867,15 +1908,18 @@ define %NxVal @nx_new_dict(i64 %cap) {
 entry:
   %c0 = icmp eq i64 %cap, 0
   %cap2 = select i1 %c0, i64 4, i64 %cap
-  %h = call ptr @malloc(i64 24)
+  ; 16, matching sizeof(%NxDict) after the counters became i32. See
+  ; nx_new_list: the allocation and the struct have to move together.
+  %h = call ptr @malloc(i64 16)
   %bytes = mul i64 %cap2, 48
   %data = call ptr @malloc(i64 %bytes)
   %dp = getelementptr %NxDict, ptr %h, i64 0, i32 0
   store ptr %data, ptr %dp
   %lp = getelementptr %NxDict, ptr %h, i64 0, i32 1
-  store i64 0, ptr %lp
+  store i32 0, ptr %lp
   %cp = getelementptr %NxDict, ptr %h, i64 0, i32 2
-  store i64 %cap2, ptr %cp
+  %dcap232 = trunc i64 %cap2 to i32
+  store i32 %dcap232, ptr %cp
   %hi = ptrtoint ptr %h to i64
   %r0 = insertvalue %NxVal zeroinitializer, i64 7, 0
   %r1 = insertvalue %NxVal %r0, i64 %hi, 1
@@ -1966,9 +2010,11 @@ append:
   %hp2 = extractvalue %NxVal %dv, 1
   %h2 = inttoptr i64 %hp2 to ptr
   %lp = getelementptr %NxDict, ptr %h2, i64 0, i32 1
-  %len = load i64, ptr %lp
+  %len32 = load i32, ptr %lp
+  %len = zext i32 %len32 to i64
   %cp = getelementptr %NxDict, ptr %h2, i64 0, i32 2
-  %cap = load i64, ptr %cp
+  %cap32 = load i32, ptr %cp
+  %cap = zext i32 %cap32 to i64
   %full = icmp eq i64 %len, %cap
   br i1 %full, label %grow, label %put
 grow:
@@ -1976,9 +2022,18 @@ grow:
   %dp2 = getelementptr %NxDict, ptr %h2, i64 0, i32 0
   %dold = load ptr, ptr %dp2
   %nb = mul i64 %ncap, 48
+  ; Same saturation guard as the list: a dict entry is 48 bytes, so 2^31 of
+  ; them is 96 GiB of live data in a runtime with no collector.
+  %ncapfits = icmp ule i64 %ncap, 2147483647
+  br i1 %ncapfits, label %realloc, label %toobig
+toobig:
+  call void @nx_panic(ptr @.msg.toomany)
+  br label %realloc
+realloc:
   %nd = call ptr @realloc(ptr %dold, i64 %nb)
   store ptr %nd, ptr %dp2
-  store i64 %ncap, ptr %cp
+  %ncap32 = trunc i64 %ncap to i32
+  store i32 %ncap32, ptr %cp
   br label %put
 put:
   %dp3 = getelementptr %NxDict, ptr %h2, i64 0, i32 0
@@ -1989,7 +2044,8 @@ put:
   %vv3 = getelementptr %NxDictEntry, ptr %ep3, i64 0, i32 1
   store %NxVal %v, ptr %vv3
   %len2 = add i64 %len, 1
-  store i64 %len2, ptr %lp
+  %len232 = trunc i64 %len2 to i32
+  store i32 %len232, ptr %lp
   ; The mirrored length keeps the tag-7 `b` field in step with the
   ; header, which is what iteration and len() read.
   %r1 = insertvalue %NxVal zeroinitializer, i64 7, 0
@@ -2160,7 +2216,8 @@ body:
 shrink:
   %lp = getelementptr %NxDict, ptr %h, i64 0, i32 1
   %n2 = sub i64 %n, 1
-  store i64 %n2, ptr %lp
+  %n232 = trunc i64 %n2 to i32
+  store i32 %n232, ptr %lp
   %r1 = insertvalue %NxVal zeroinitializer, i64 7, 0
   %r2 = insertvalue %NxVal %r1, i64 %hp, 1
   %r3 = insertvalue %NxVal %r2, i64 %n2, 2

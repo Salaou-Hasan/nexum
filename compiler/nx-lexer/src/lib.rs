@@ -124,19 +124,37 @@ fn keyword_kind(lexeme: &str) -> Option<TokenKind> {
     }
 }
 
+/// A line number in a source file.
+///
+/// This is the root of the whole position pipeline -- the lexer produces
+/// the first positions, and every crate downstream carries them -- so the
+/// type lives here rather than in any one consumer.
+///
+/// It is deliberately 32 bits while the token stream index beside it is a
+/// `usize`. A position is bounded by the file it describes: 4 billion
+/// lines is far more than any source file holds, and an editor exhausts
+/// address space long before that. Nothing does arithmetic on a position;
+/// they are read, compared and printed. Making them pointer-width instead
+/// costs 8 bytes on every token *and* on every AST node, for a range no
+/// input can reach.
+pub type LineNo = u32;
+
+/// A column number in a source line. Same reasoning as [`LineNo`].
+pub type ColNo = u32;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
     pub lexeme: String,
-    pub line: usize,
-    pub col: usize,
+    pub line: LineNo,
+    pub col: ColNo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LexError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
+    pub line: LineNo,
+    pub col: ColNo,
 }
 
 impl std::fmt::Display for LexError {
@@ -149,9 +167,11 @@ impl std::error::Error for LexError {}
 
 struct Lexer {
     chars: Vec<char>,
+    /// Index into `chars`. Pointer-width on purpose: it indexes a Vec and
+    /// is compared against `chars.len()`.
     pos: usize,
-    line: usize,
-    col: usize,
+    line: LineNo,
+    col: ColNo,
 }
 
 impl Lexer {

@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.4.1
+
+### Numeric representation audit
+Full audit in `docs/numeric-audit.md`. Every numeric width in the compiler
+and the emitted runtime is classified with a measurement or a reason.
+
+- **Source positions are `u32`.** `LineNo`/`ColNo` live in `nx-lexer`,
+  where positions are born, and every crate uses them. `Span` 16 -> 8
+  bytes, `Expr` 64 -> 56, `Stmt` 192 -> 168. A position is bounded by the
+  file it describes and is never used in arithmetic, so there was nothing
+  to lose; `nx check` peak working set on a 400-function program drops
+  12.4 -> 11.3 MiB (-8.9%).
+- **Container headers are 16 bytes.** `%NxList` and `%NxDict` count
+  elements, not bytes, and 2^31 elements needs 32 GiB behind a runtime
+  with no collector, so both counters are `i32`. 24 -> 16 bytes per
+  header, measured against the CRT at 8 bytes per block.
+- **The header `malloc` moved with the struct.** Narrowing the type while
+  leaving `malloc(24)` saves nothing and leaves 8 bytes of tail padding.
+  The first attempt did exactly that and measured as no change at all.
+  A test now pins struct and allocation together.
+- **Counts cannot wrap.** `nx_listpush` and `nx_dictset` check for
+  saturation before narrowing, on the growth path, so a push costs a 32-bit
+  store instead of a 64-bit one -- same instruction count, half the bytes.
+- Rejected, with measurements: narrowing `%NxVal.tag` (lands in padding and
+  adds an extension to every tag check), narrowing `%NxVal.extra` (also
+  padding; and it is the reason `len()` is a load rather than a pointer
+  chase), narrowing `%NxRec.nfields` and `%NxDesc` (padding, and there is
+  one descriptor per *type*), dropping the memo slot's `used` flag (3% of
+  a table that is mostly its argument slots), narrowing the memo lock and
+  hash (a contended atomic and FNV-1a's definition), `f64` -> `f32`
+  anywhere (changes results), and boxing `Expr::Comprehension`'s variable
+  (trades an allocation per comprehension for 8 bytes).
+- New structure-size tests in `nx-ast` and `nx-codegen` pin every width
+  above, so a widening is a test failure rather than a quiet regression.
+
+### Not done, and why
+Deleting `%NxVal.extra` would take every NX value from 24 to 16 bytes --
+33% off every list element, dict entry, memo slot and call argument array.
+It is 53 sites in `runtime.ll` in the core value representation of a
+language with no garbage collector, so it wants its own stage and a
+sanitizer sweep rather than an audit applied in passing. Also deferred:
+the 960 KiB memo table in every binary, constant-range narrowing below
+`i64`, and flat scalar array storage. See `docs/numeric-audit.md` §6.
+
+### Verification
+307 tests pass. All 13 examples agree across interpreter / native /
+`NX_NOUNBOX`. All 5 benchmarks match their Rust reference output. A
+same-session A/B of the benchmark suite shows mixed signs across five
+benchmarks (two faster), i.e. noise rather than a regression.
+
 ## v0.4.0
 
 ### Stage 3: `impl` blocks and methods

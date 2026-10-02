@@ -95,8 +95,8 @@ fn fmt_double(x: f64) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodegenError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
+    pub line: nx_ast::LineNo,
+    pub col: nx_ast::ColNo,
 }
 
 impl std::fmt::Display for CodegenError {
@@ -334,6 +334,128 @@ mod tests {
         let rest = &ir[start..];
         let end = rest[1..].find("\ndefine ").map(|i| i + 1).unwrap_or(rest.len());
         rest[..end].to_string()
+    }
+
+    // --- runtime structure layouts ------------------------------------
+    //
+    // Every NX value is a `%NxVal`, so its width is the single largest
+    // lever on NX program memory: a million-element list is a million of
+    // them. These assertions exist so a widening is a test failure rather
+    // than a quiet 50% regression in every compiled program.
+    //
+    // The numbers are x86-64 layouts, verified against the CRT's own
+    // `_msize` so they are the real cost and not a model of it.
+
+    /// A value is `{ tag, payload, extra }`. Three i64s = 24 bytes.
+    ///
+    /// Narrowing `extra` to i32 does *not* help: `{i64, i64, i32}` still
+    /// pads out to 24. The only way down is to delete the field, and
+    /// `extra` is not deletable -- for an aggregate it caches the length so
+    /// `len()` is one load instead of a pointer chase. That trade is
+    /// documented in the runtime rather than taken, because it is worth
+    /// 8 bytes *per value* and costs a dependent load on every length read.
+    #[test]
+    fn a_value_is_twenty_four_bytes() {
+        let ir = compile_entry("print(1)\n", std::path::Path::new(".")).unwrap();
+        assert!(
+            ir.contains("%NxVal = type { i64, i64, i64 }"),
+            "%NxVal changed width:\n{ir}"
+        );
+    }
+
+    /// A container header is `{ data, n, cap }` with both counters 32 bits,
+    /// so 16 bytes rather than 24. The allocation is `malloc(16)` to match:
+    /// narrowing the type while leaving the malloc alone saves nothing at
+    /// all, and the wasted 8 bytes would sit in tail padding.
+    #[test]
+    fn a_container_header_is_sixteen_bytes() {
+        let ir = compile_entry(
+            "xs = [1]\nxs.push(2)\nd = {}\nd[\"k\"] = 1\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        assert!(
+            ir.contains("%NxList = type { ptr, i32, i32 }"),
+            "%NxList changed:\n{ir}"
+        );
+        assert!(
+            ir.contains("%NxDict = type { ptr, i32, i32 }"),
+            "%NxDict changed:\n{ir}"
+        );
+        // The allocation has to match the struct. Narrowing the type while
+        // leaving the malloc alone saves nothing and leaves 8 bytes of tail
+        // padding, which is the trap this assertion exists to catch.
+        let list = body_of(&ir, "nx_new_list");
+        assert!(
+            list.contains("malloc(i64 16)"),
+            "list header allocation must be 16:\n{list}"
+        );
+        let dict = body_of(&ir, "nx_new_dict");
+        assert!(
+            dict.contains("malloc(i64 16)"),
+            "dict header allocation must be 16:\n{dict}"
+        );
+    }
+
+    /// Counts are element counts, not byte sizes, and every load widens
+    /// back to i64 with `zext`. No index or length is computed in 32 bits,
+    /// so a large list cannot be mis-indexed by a truncated count.
+    #[test]
+    fn container_counts_widen_on_load() {
+        let ir = compile_entry("xs = [1]\nxs.push(2)\n", std::path::Path::new(".")).unwrap();
+        let body = void_body_of(&ir, "nx_listpush");
+        assert!(body.contains("load i32"), "count must load as i32:\n{body}");
+        assert!(body.contains("zext i32"), "count must widen to i64:\n{body}");
+        assert!(body.contains("trunc i64"), "count must narrow on store:\n{body}");
+    }
+
+    /// A count can never silently wrap: growth past 2^31 elements is a
+    /// panic, not a truncated store. Unreachable in practice -- 2^31
+    /// elements is tens of gigabytes behind a runtime with no collector --
+    /// but a header field that could wrap is the kind of bug that only
+    /// shows up as corruption much later.
+    #[test]
+    fn container_growth_checks_for_saturation() {
+        let ir = compile_entry(
+            "xs = [1]\nd = {}\nd[\"k\"] = 1\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let list = void_body_of(&ir, "nx_listpush");
+        assert!(
+            list.contains("icmp ule i64") && list.contains("@.msg.toomany"),
+            "list growth must check before narrowing:\n{list}"
+        );
+        let dict = void_body_of(&ir, "nx_dictset");
+        assert!(
+            dict.contains("icmp ule i64") && dict.contains("@.msg.toomany"),
+            "dict growth must check before narrowing:\n{dict}"
+        );
+    }
+
+    /// Record and descriptor headers keep 64-bit counts. Their layout is
+    /// already at the alignment floor -- `{ptr, i64, ptr}` and
+    /// `{ptr, i64, i64, ptr}` are 24 and 32 bytes, and no narrowing of the
+    /// scalar fields shrinks either, because two pointer-width fields
+    /// already fill the space. Reordering and narrowing together would be
+    /// needed, and it buys 0 bytes for the record and 8 for the
+    /// descriptor, of which there is one per type rather than one per
+    /// value. Not worth the churn.
+    #[test]
+    fn record_and_descriptor_headers_keep_their_width() {
+        let ir = compile_entry(
+            "type P:\n    x: Int\np = P(1)\nprint(p)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        assert!(
+            ir.contains("%NxRec = type { ptr, i64, ptr }"),
+            "%NxRec changed:\n{ir}"
+        );
+        assert!(
+            ir.contains("%NxDesc = type { ptr, i64, i64, ptr }"),
+            "%NxDesc changed:\n{ir}"
+        );
     }
 
     // --- impl blocks and methods ------------------------------------
