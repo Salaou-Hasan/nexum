@@ -140,6 +140,17 @@ struct Function {
     body: Vec<Stmt>,
 }
 
+/// A method as the interpreter sees it. Parameters exclude the receiver;
+/// `receiver` governs the write-back in `call_method`.
+#[derive(Debug, Clone)]
+struct MethodDef {
+    name: String,
+    params: Vec<String>,
+    body: Vec<Stmt>,
+    module: String,
+    receiver: nx_ast::ReceiverKind,
+}
+
 #[derive(Debug, Clone, Default)]
 struct Module {
     vars: HashMap<String, Value>,
@@ -191,6 +202,10 @@ pub struct Interpreter {
     /// (declaring module, type). Types are constructed, never held, so an
     /// imported type registers an alias here rather than a value binding.
     type_alias: HashMap<(String, String), (String, String)>,
+    /// Methods by (canonical type, method). The declaring module travels
+    /// with each definition so a method keeps resolving after crossing an
+    /// `import` boundary.
+    methods: HashMap<(String, String), HashMap<String, MethodDef>>,
     /// Shared memo cache (across parallel tasks). None when NX_NOMEMO=1.
     memo: Option<std::sync::Arc<std::sync::Mutex<Memo>>>,
 }
@@ -281,6 +296,40 @@ impl Interpreter {
                 if let Some(m) = self.modules.get_mut(&cur) {
                     m.types
                         .insert(name.clone(), fields.iter().map(|f| f.name.clone()).collect());
+                }
+                Ok(None)
+            }
+            Stmt::Impl { type_name, methods, span } => {
+                // Registering the methods is all an impl block does. The
+                // type must be declared in this module: anything else is an
+                // orphan impl, rejected statically and mistyped dynamically
+                // alike. (Imported types resolve through the alias map at
+                // each call site instead.)
+                let cur = self.current_module();
+                let known = self
+                    .modules
+                    .get(&cur)
+                    .map(|m| m.types.contains_key(type_name))
+                    .unwrap_or(false);
+                if !known {
+                    return Err(RuntimeError {
+                        message: format!("unknown type '{type_name}'"),
+                        line: span.line,
+                        col: span.col,
+                    });
+                }
+                let entry = self
+                    .methods
+                    .entry((cur.clone(), type_name.clone()))
+                    .or_default();
+                for m in methods {
+                    entry.insert(m.name.clone(), MethodDef {
+                        name: m.name.clone(),
+                        params: m.params.clone(),
+                        body: m.body.clone(),
+                        module: cur.clone(),
+                        receiver: m.receiver,
+                    });
                 }
                 Ok(None)
             }
@@ -1252,6 +1301,7 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
             memo_seen: self.memo_seen.clone(),
             memo: self.memo.clone(),
             type_alias: self.type_alias.clone(),
+            methods: self.methods.clone(),
         }
     }
 
@@ -1648,6 +1698,14 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
                 }
             }
         }
+        // Attribute callees never evaluate as values first: `p.m` alone is
+        // not a value (methods are called, not referenced), so resolving
+        // the call directly is what keeps `p.m(...)` working.
+        // Module calls and `m.T(...)` construction returned above; what
+        // reaches here is methods and sugar.
+        if let Expr::Attr { base, attr, .. } = callee {
+            return self.eval_attr_call(base, attr, args, span);
+        }
         let target = self.eval_expr(callee)?;
         match target {
             Value::Func { module, name } => {
@@ -1659,6 +1717,206 @@ fn as_index(v: Value, span: nx_ast::Span) -> Result<i64, RuntimeError> {
                 col: span.col,
             }),
         }
+    }
+
+    /// `base.attr(...)`: a module member, a type's associated function, an
+    /// impl method on a record value, or builtin sugar. Split out of
+    /// `eval_call` to keep that function's frame small; see the note there.
+    ///
+    /// Resolution order matches the checker exactly: modules, associated
+    /// functions, methods on records, then sugar. Anything else is a
+    /// runtime error naming what was actually found.
+    #[inline(never)]
+    fn eval_attr_call(
+        &mut self,
+        base: &Expr,
+        attr: &str,
+        args: &[Expr],
+        span: nx_ast::Span,
+    ) -> Result<Value, RuntimeError> {
+        // A module base calls into the module, sharing the value path:
+        // a function member becomes a function value, anything else fails
+        // the same way a bare attribute read would.
+        if let Expr::Var(m, _) = base {
+            if let Some(Value::Module(modname)) = self.lookup(m) {
+                let member = self.module_member(&modname, attr, span.line, span.col)?;
+                if let Value::Func { module, name } = member {
+                    return self.call_func(&module, &name, args, span.line, span.col);
+                }
+                return Err(RuntimeError {
+                    message: format!("'{attr}' of module '{modname}' is not callable"),
+                    line: span.line,
+                    col: span.col,
+                });
+            }
+            // `T.m(...)` where T names a type: an associated function. No
+            // sugar fallback here -- the base is not a value at all.
+            let cur = self.current_module();
+            if let Some((decl, real)) = self.resolve_type_name(&cur, m) {
+                if let Some(def) = self
+                    .methods
+                    .get(&(decl.clone(), real.clone()))
+                    .and_then(|mm| mm.get(attr))
+                    .cloned()
+                {
+                    if def.receiver != nx_ast::ReceiverKind::None {
+                        return Err(RuntimeError {
+                            message: format!(
+                                "method '{attr}' needs a receiver; call it on a '{real}' value"
+                            ),
+                            line: span.line,
+                            col: span.col,
+                        });
+                    }
+                    return self.call_method(&def, None, args, span);
+                }
+                return Err(RuntimeError {
+                    message: format!("type '{real}' has no associated function '{attr}'"),
+                    line: span.line,
+                    col: span.col,
+                });
+            }
+        }
+        let b = self.eval_expr(base)?;
+        // A record value dispatches to its type's method table.
+        if let Value::Record { module, type_name, .. } = &b {
+            if let Some(def) = self
+                .methods
+                .get(&(module.clone(), type_name.clone()))
+                .and_then(|mm| mm.get(attr))
+                .cloned()
+            {
+                return self.call_method(&def, Some((base, b)), args, span);
+            }
+            // Records without the method fall through to sugar below, so
+            // `p.keys()`-style builtin calls keep working on them only when
+            // the builtin accepts a record -- otherwise the builtin's own
+            // error names the mismatch.
+            if nx_types::builtin_arity(attr).is_none() {
+                return Err(RuntimeError {
+                    message: format!("type '{type_name}' has no method '{attr}'"),
+                    line: span.line,
+                    col: span.col,
+                });
+            }
+        }
+        // Builtin sugar: `xs.push(1)` for `push(xs, 1)`. The base
+        // expression is prepended and routed through the identical builtin
+        // path as a direct call.
+        if nx_types::builtin_arity(attr).is_some() {
+            return self.call_builtin_sugar(attr, base, args, span);
+        }
+        Err(RuntimeError {
+            message: format!("'{attr}' is not callable on {b}"),
+            line: span.line,
+            col: span.col,
+        })
+    }
+
+    /// Resolve a possibly-aliased type name in a module to its declaring
+    /// module and canonical name. Mirrors the checker's rule: a local
+    /// declaration wins, then an import alias.
+    fn resolve_type_name(&self, cur: &str, name: &str) -> Option<(String, String)> {
+        if let Some(m) = self.modules.get(cur) {
+            if m.types.contains_key(name) {
+                return Some((cur.to_string(), name.to_string()));
+            }
+        }
+        if let Some((decl, real)) = self.type_alias.get(&(cur.to_string(), name.to_string())) {
+            return Some((decl.clone(), real.clone()));
+        }
+        None
+    }
+
+    /// Call a method definition. `receiver` is the base expression plus its
+    /// evaluated record for methods with one; associated functions pass
+    /// none. A `mut self` result is written back into the receiver target,
+    /// which is what makes the mutation caller-visible.
+    fn call_method(
+        &mut self,
+        def: &MethodDef,
+        receiver: Option<(&Expr, Value)>,
+        args: &[Expr],
+        span: nx_ast::Span,
+    ) -> Result<Value, RuntimeError> {
+        if args.len() != def.params.len() {
+            return Err(RuntimeError {
+                message: format!(
+                    "method '{}' expects {} args, got {}",
+                    def.name,
+                    def.params.len(),
+                    args.len()
+                ),
+                line: span.line,
+                col: span.col,
+            });
+        }
+        let mut vals = Vec::with_capacity(args.len() + 1);
+        for a in args {
+            vals.push(self.eval_expr(a)?);
+        }
+        if self.call_depth >= CALL_LIMIT {
+            return Err(RuntimeError {
+                message: "call stack overflow (possible infinite recursion)".to_string(),
+                line: span.line,
+                col: span.col,
+            });
+        }
+        self.call_depth += 1;
+        self.frames.push(Frame { module: def.module.clone(), ..Default::default() });
+        // `self` binds the receiver's (already owned) value; the rest bind
+        // positionally like function parameters. The base expression is
+        // borrowed, not moved: the write-back below needs it afterwards.
+        let mut names: Vec<String> = Vec::with_capacity(vals.len() + 1);
+        if let Some((_, rec)) = &receiver {
+            names.push("self".to_string());
+            if let Some(top) = self.frames.last_mut() {
+                top.vars.insert("self".to_string(), rec.clone());
+            }
+        }
+        for (p, v) in def.params.iter().zip(vals) {
+            names.push(p.clone());
+            if let Some(top) = self.frames.last_mut() {
+                top.vars.insert(p.clone(), v);
+            }
+        }
+        let ret = self.exec_block(&def.body)?;
+        self.frames.pop();
+        self.call_depth -= 1;
+        let out = match ret {
+            None | Some(Flow::Continue) | Some(Flow::Break) => Ok(Value::None),
+            Some(Flow::Return(v)) => Ok(v),
+        }?;
+        // Write-back for `mut self`: the result returns into the receiver's
+        // storage when the receiver has any. A temporary base -- a call
+        // result, a literal -- has nowhere to write, so the call simply
+        // evaluates to its result, which is what makes a chain like
+        // `q.moved(1, 1).moved(2, 2)` read as one expression.
+        if def.receiver == nx_ast::ReceiverKind::Mut {
+            if let Some((base, _)) = receiver {
+                if let Some(t) = target_of_expr(base) {
+                    self.store_target(&t, out.clone())?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `xs.push(1)` for `push(xs, 1)`: prepend the base expression and
+    /// route through the identical builtin path as a direct call --
+    /// including the variable-target checks mutating builtins need. One
+    /// implementation serves both spellings by construction.
+    fn call_builtin_sugar(
+        &mut self,
+        name: &str,
+        base: &Expr,
+        args: &[Expr],
+        span: nx_ast::Span,
+    ) -> Result<Value, RuntimeError> {
+        let mut combined: Vec<Expr> = Vec::with_capacity(args.len() + 1);
+        combined.push(base.clone());
+        combined.extend(args.iter().cloned());
+        self.call_builtin(name, &combined, span.line, span.col)
     }
 
     /// Build a record of a declared type: exact arity, then positional
@@ -2164,6 +2422,24 @@ fn floor_div(a: i64, b: i64) -> Option<i64> {
         q.checked_sub(1)
     } else {
         Some(q)
+    }
+}
+
+/// Reinterpret a call receiver as an assignment target, for `mut self`
+/// write-back. Only shapes with storage qualify; anything else means the
+/// update would be lost, so the caller reports it instead.
+fn target_of_expr(e: &Expr) -> Option<nx_ast::Target> {
+    match e {
+        Expr::Var(name, _) => Some(nx_ast::Target::Name(name.clone())),
+        Expr::Index { base, index, .. } => Some(nx_ast::Target::Index {
+            base: base.clone(),
+            index: index.clone(),
+        }),
+        Expr::Attr { base, attr, .. } => Some(nx_ast::Target::Attr {
+            base: base.clone(),
+            field: attr.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -3040,5 +3316,120 @@ mod tests {
     fn parallel_fn_tasks() {
         let out = run_src("fn one():\n    return 1\nfn two():\n    return 2\nparallel:\n    a = one()\n    b = two()\nprint(a + b)").unwrap();
         assert_eq!(out, vec!["3"]);
+    }
+
+    // --- impl blocks and methods ------------------------------------
+
+    const POINT: &str = "type P:\n    x: Int\n    y: Int\n";
+
+    #[test]
+    fn method_reads_self() {
+        assert_eq!(
+            one(&format!("{POINT}impl P:\n    fn sum(self):\n        return self.x + self.y\np = P(3, 4)\nprint(p.sum())\n")),
+            "7"
+        );
+    }
+
+    /// `mut self` writes its result back into the receiver, which is what
+    /// makes the change visible to the caller.
+    #[test]
+    fn mut_self_writes_back_into_the_receiver() {
+        let out = lines(&format!(
+            "{POINT}impl P:\n    fn moved(mut self, d):\n        self.x = self.x + d\n        self.y = self.y + d\n        return self\np = P(1, 1)\np.moved(2)\nprint(p)\n"
+        ));
+        assert_eq!(out, vec!["P(3, 3)"]);
+    }
+
+    /// A `mut self` method also evaluates to its result, so it works in an
+    /// expression.
+    #[test]
+    fn mut_self_evaluates_to_its_result() {
+        assert_eq!(
+            one(&format!("{POINT}impl P:\n    fn plus(mut self, d):\n        self.x = self.x + d\n        return self\np = P(1, 1)\nprint(p.plus(9).x)\n")),
+            "10"
+        );
+    }
+
+    /// With no storage on the base there is nowhere to write back, so the
+    /// call still evaluates -- and a chain reads as one expression.
+    #[test]
+    fn mut_self_chain_writes_back_only_where_there_is_storage() {
+        let out = lines(&format!(
+            "{POINT}impl P:\n    fn plus(mut self, d):\n        self.x = self.x + d\n        self.y = self.y + d\n        return self\np = P(0, 0)\nprint(p.plus(1).plus(1))\nprint(p)\n"
+        ));
+        // The inner call sees a variable, so it writes back once: (1, 1).
+        // The outer call sits on a call result, so it adds without writing.
+        assert_eq!(out, vec!["P(2, 2)", "P(1, 1)"]);
+    }
+
+    #[test]
+    fn associated_function_needs_no_receiver() {
+        let out = lines(&format!(
+            "{POINT}impl P:\n    fn zero():\n        return P(0, 0)\nprint(P.zero())\n"
+        ));
+        assert_eq!(out, vec!["P(0, 0)"]);
+    }
+
+    #[test]
+    fn methods_resolve_on_a_record_held_in_a_list() {
+        let out = lines(&format!(
+            "{POINT}impl P:\n    fn sum(self):\n        return self.x + self.y\nps = [P(1, 2), P(3, 4)]\nt = 0\nfor p in ps:\n    t = t + p.sum()\nprint(t)\n"
+        ));
+        assert_eq!(out, vec!["10"]);
+    }
+
+    /// Methods resolve before builtin sugar, so a type may define its own
+    /// `push`.
+    #[test]
+    fn a_method_may_shadow_a_builtin() {
+        assert_eq!(
+            one(&format!(
+                "{POINT}impl P:\n    fn push(self, v):\n        return self.x + v\np = P(1, 0)\nprint(p.push(41))\n"
+            )),
+            "42"
+        );
+        // And the sugar still works on a plain list.
+        assert_eq!(one("xs = [1]\nxs.push(2)\nprint(xs)\n"), "[1, 2]");
+    }
+
+    #[test]
+    fn unknown_method_names_the_type() {
+        let e = run_src(&format!("{POINT}p = P(1, 2)\nprint(p.nope())\n")).unwrap_err();
+        assert!(e.message.contains("has no method 'nope'"), "{}", e.message);
+    }
+
+    #[test]
+    fn impl_of_unknown_type_is_a_runtime_error() {
+        let e = run_src("impl Nope:\n    fn a(self):\n        return 1\n").unwrap_err();
+        assert!(e.message.contains("unknown type 'Nope'"), "{}", e.message);
+    }
+
+    #[test]
+    fn method_recursion_calls_itself() {
+        assert_eq!(
+            one(&format!(
+                "{POINT}impl P:\n    fn up(mut self, n):\n        if n <= 0:\n            return self\n        self.x = self.x + 1\n        return self.up(n - 1)\np = P(0, 0)\nprint(p.up(5).x)\n"
+            )),
+            "5"
+        );
+    }
+
+    #[test]
+    fn method_recursion_terminates_on_the_depth_limit() {
+        // The limit is checked per call, so runaway recursion is a clean
+        // error rather than an unbounded native stack. The body recurses
+        // through several native frames per level, so the check runs on a
+        // thread with room to spare: what is under test is the limit, not
+        // the host's stack size.
+        let src = format!(
+            "{POINT}impl P:\n    fn down(mut self, n):\n        if n <= 0:\n            return self\n        return self.down(n - 1)\np = P(0, 0)\nprint(p.down(100000))\n"
+        );
+        let msg = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || run_src(&src).unwrap_err().message)
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(msg.contains("call stack overflow"), "{msg}");
     }
 }

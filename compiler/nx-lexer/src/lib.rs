@@ -78,6 +78,16 @@ pub enum TokenKind {
     /// cannot be read as a call to a function named `type`, which would
     /// make `type(x: Int)` ambiguous with a parameter list.
     Type,
+    /// `impl` -- a method block. Keyword for the same reason as `type`.
+    Impl,
+    /// `self` -- a method receiver. A full keyword: it can only ever
+    /// mean the receiver, so `self = 5` is refused rather than creating
+    /// a variable that shadows it confusingly.
+    Self_,
+    /// `mut` / `own` -- receiver and (from Stage 6) binding modifiers.
+    /// Reserved now so Stage 6 needs no lexer change.
+    Mut,
+    Own,
     Eof,
 }
 
@@ -103,6 +113,10 @@ fn keyword_kind(lexeme: &str) -> Option<TokenKind> {
         "del" => Some(TokenKind::Del),
         "assert" => Some(TokenKind::Assert),
         "type" => Some(TokenKind::Type),
+        "impl" => Some(TokenKind::Impl),
+        "self" => Some(TokenKind::Self_),
+        "mut" => Some(TokenKind::Mut),
+        "own" => Some(TokenKind::Own),
         "and" => Some(TokenKind::And),
         "or" => Some(TokenKind::Or),
         "not" => Some(TokenKind::Not),
@@ -961,5 +975,72 @@ mod tests {
     #[test]
     fn tab_indent_errors() {
         assert!(lex("if x:\n\tprint(x)").is_err());
+    }
+
+    /// `impl`, `self`, `mut` and `own` are keywords, so a receiver can be
+    /// spelled. They must not lex as identifiers: `self` in particular is
+    /// promoted to a variable by the parser, and a program that declares
+    /// `self = 1` should be a type error rather than a shadow.
+    #[test]
+    fn receiver_keywords_lex_as_keywords() {
+        assert_eq!(
+            kinds("impl T:\n    fn m(mut self):\n        return self"),
+            vec![
+                TokenKind::Impl,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::Newline,
+                TokenKind::Indent,
+                TokenKind::Fn,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::Mut,
+                TokenKind::Self_,
+                TokenKind::RParen,
+                TokenKind::Colon,
+                TokenKind::Newline,
+                TokenKind::Indent,
+                TokenKind::Return,
+                TokenKind::Self_,
+                TokenKind::Dedent,
+                TokenKind::Dedent,
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn own_self_is_a_receiver_spelling() {
+        assert_eq!(
+            kinds("fn m(own self)"),
+            vec![
+                TokenKind::Fn,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::Own,
+                TokenKind::Self_,
+                TokenKind::RParen,
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    /// `selfish` and `mutable` are ordinary names: keyword matching is
+    /// whole-word, not a prefix test.
+    #[test]
+    fn keyword_prefixes_stay_identifiers() {
+        assert_eq!(
+            kinds("selfish = 1\nmutate = 2"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::Equals,
+                TokenKind::Int,
+                TokenKind::Newline,
+                TokenKind::Ident,
+                TokenKind::Equals,
+                TokenKind::Int,
+                TokenKind::Eof
+            ]
+        );
     }
 }

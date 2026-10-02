@@ -226,6 +226,21 @@ fn index_fns(
                 out.insert((module.to_string(), name.clone()), (params.clone(), body.clone()));
                 index_fns(module, body, out);
             }
+            // Methods plan like functions under `Type.method` keys. `self`
+            // is a real parameter (it may be retained by `return self`),
+            // so it joins the param list; associated functions have none.
+            Stmt::Impl { type_name, methods, .. } => {
+                for m in methods {
+                    let key = (module.to_string(), format!("{type_name}.{}", m.name));
+                    let mut ps = Vec::new();
+                    if m.receiver != nx_ast::ReceiverKind::None {
+                        ps.push("self".to_string());
+                    }
+                    ps.extend(m.params.clone());
+                    out.insert(key, (ps, m.body.clone()));
+                    index_fns(module, &m.body, out);
+                }
+            }
             Stmt::If { then_body, elifs, else_body, .. } => {
                 index_fns(module, then_body, out);
                 for (_, b) in elifs {
@@ -417,7 +432,9 @@ fn escaping_roots(body: &[Stmt], out: &mut HashSet<Root>) {
             // A type declaration binds nothing at runtime, so it
             // contributes no roots.
             Stmt::TypeDecl { .. } => {}
-            Stmt::Fn { .. } => {}
+            // Functions and methods are planned under their own keys, not
+            // as part of the enclosing body.
+            Stmt::Fn { .. } | Stmt::Impl { .. } => {}
             Stmt::Expr(e) => expr_roots(e, out),
             Stmt::AssignOp { .. } => {}
             Stmt::Print { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}

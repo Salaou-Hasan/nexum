@@ -71,8 +71,45 @@ flag flip rebuilds instead of silently reusing a stale binary.
 - `compiler/nx-parser/` — recursive descent
 - `compiler/nx-types/` — static checker (`nx check`)
 - `compiler/nx-interp/` — tree-walk interpreter (`nx file.nx`)
+- `compiler/nx-ir/` — effect summaries (reads/writes/prints per function)
+- `compiler/nx-mem/` — memory planning (Unique/Shared per local)
 - `compiler/nx-codegen/` — LLVM IR backend (`nx build`)
 - `compiler/nx-driver/` — `nx` CLI
 - `editors/vscode-nexum/` — VS Code extension
 - `wix/` — Windows MSI installer
+- `tools/verify.ps1` — every example, three ways, diffed
+- `bench/run.ps1` — Nexum vs Rust, correctness-gated
 - `examples/` — `.nx` samples
+
+## Types and behavior
+
+`type` is state, `impl` is behavior. No inheritance: a type's fields are
+its own, and behavior is attached to it explicitly.
+
+```
+type Point:
+    x: Float
+    y: Float
+
+impl Point:
+    fn area(self):
+        return self.x * self.y
+
+    # `mut self` writes its result back into the receiver:
+    # p.moved(1, 2) means p = moved(p, 1, 2)
+    fn moved(mut self, dx, dy):
+        self.x = self.x + dx
+        self.y = self.y + dy
+        return self
+
+    fn origin():                 # no receiver: an associated function
+        return Point(0.0, 0.0)
+
+p = Point(3.0, 4.0)
+p.area()                        # 12.0
+p.moved(1.0, -2.0)              # p is now Point(4, 2)
+Point.origin()                  # Point(0, 0)
+```
+
+Containers have value semantics: they copy on bind, so no assignment or
+argument passing aliases. Strings are shared but never mutated in place.

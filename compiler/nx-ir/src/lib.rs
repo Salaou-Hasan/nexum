@@ -106,7 +106,7 @@ pub fn analyze_map(programs: HashMap<String, Program>) -> Result<Ir, IrError> {
         let top: Vec<Stmt> = prog
             .stmts
             .iter()
-            .filter(|s| !matches!(s, Stmt::Fn { .. }))
+            .filter(|s| !matches!(s, Stmt::Fn { .. } | Stmt::Impl { .. }))
             .cloned()
             .collect();
         params.insert((module.clone(), "<top>".to_string()), Vec::new());
@@ -205,6 +205,25 @@ fn index_fns(
                 params.insert((module.to_string(), name.clone()), ps.clone());
                 bodies.insert((module.to_string(), name.clone()), body.clone());
                 index_fns(module, body, params, bodies);
+            }
+            // Methods are their own analysis scope, keyed `Type.method` so
+            // they never collide with plain functions. `self` is seeded as
+            // a local (it always reads the receiver); nested functions
+            // inside a body are indexed the same as anywhere else.
+            Stmt::Impl { type_name, methods, .. } => {
+                for m in methods {
+                    let key = (module.to_string(), format!("{type_name}.{}", m.name));
+                    // Only methods with a receiver bind `self`; associated
+                    // functions have no receiver to seed.
+                    let mut ps = Vec::new();
+                    if m.receiver != nx_ast::ReceiverKind::None {
+                        ps.push("self".to_string());
+                    }
+                    ps.extend(m.params.clone());
+                    params.insert(key.clone(), ps);
+                    bodies.insert(key, m.body.clone());
+                    index_fns(module, &m.body, params, bodies);
+                }
             }
             Stmt::If { then_body, elifs, else_body, .. } => {
                 index_fns(module, then_body, params, bodies);
@@ -452,7 +471,9 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
         }
         // A declaration is compile-time only: no reads, no writes.
         Stmt::TypeDecl { .. } => {}
-        Stmt::Fn { .. } => {}
+        // Functions and methods are analyzed under their own places, not
+        // as part of the enclosing body.
+        Stmt::Fn { .. } | Stmt::Impl { .. } => {}
         Stmt::Return { values, .. } => {
             for e in values {
                 expr(scope, e, out);
@@ -704,6 +725,25 @@ fn call(scope: &Scope, callee: &Expr, out: &mut Summary) {
                     return;
                 }
             }
+        }
+        // A method call merges every indexed method with this method name,
+        // across types and modules. A union is the safe direction: when the
+        // name is unique the merge is precise, and when several types share
+        // it the caller simply serializes more. This needs no type info,
+        // which keeps the effect layer independent of the checker. Merge
+        // order does not matter (unions commute), so no sorting.
+        let mut found = false;
+        for place in scope.cx.sums.keys() {
+            if place.1.contains('.') && place.1.rsplit('.').next() == Some(attr.as_str()) {
+                if let Some(s) = scope.cx.sums.get(place) {
+                    let s = s.clone();
+                    out.merge(&s);
+                    found = true;
+                }
+            }
+        }
+        if found {
+            return;
         }
         out.opaque = true;
         return;

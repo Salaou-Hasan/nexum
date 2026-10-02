@@ -96,6 +96,19 @@ struct ModInfo {
     /// bring a layout across a module boundary the same way a function
     /// comes across. Field types stay as written and resolve lazily.
     types: HashMap<String, Vec<(String, String)>>,
+    /// Methods exported by the module, keyed by (canonical type, method).
+    /// `from m import T` brings T's methods along with its layout.
+    methods: HashMap<(String, String), MethodInfo>,
+}
+
+/// A method as the checker sees it. Parameters exclude the receiver;
+/// arity at a call site counts only the explicit arguments.
+#[derive(Debug, Clone)]
+pub struct MethodInfo {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub receiver: nx_ast::ReceiverKind,
+    pub module: String,
 }
 
 /// Static shape of one function, as the optimizer sees it. Codegen uses
@@ -160,6 +173,14 @@ struct Checker {
     /// value built as `U(...)` carries `Ty::Record("T")` and compares
     /// equal to one built as `T(...)`.
     type_alias: HashMap<String, String>,
+    /// Methods declared by `impl` blocks: (canonical type, method) to
+    /// info. Shared across the module; imported types bring their methods
+    /// along (see FromImport).
+    methods: HashMap<(String, String), MethodInfo>,
+    /// The `self` parameter of the method body being checked, with its
+    /// receiver kind. Present only inside a method: field writes through
+    /// a read-only `self` are rejected against it.
+    self_param: Option<(String, nx_ast::ReceiverKind)>,
 }
 
 /// Resolve a field type name as written to a `Ty`, against one module's
@@ -181,9 +202,47 @@ fn field_ty(
     }
 }
 
+/// Arity of an ambient builtin, if `name` is one. The method-call sugar
+/// (`xs.push(1)` for `push(xs, 1)`) consults this: an attribute name with
+/// a known arity rewrites to the builtin call, so sugar needs no separate
+/// table to drift out of sync. Free function (not a method) so the
+/// interpreter and backend crates can share the gate.
+pub fn builtin_arity(name: &str) -> Option<usize> {
+    match name {
+        // The full Stage 3 set lives in `check_builtin`; this gate stays
+        // beside it so the two cannot disagree.
+        "len" => Some(1),
+        "push" => Some(2),
+        _ => None,
+    }
+}
+
 impl Checker {
     fn err(&mut self, span: Span, msg: String) {
         self.errors.push(CheckError { message: msg, line: span.line, col: span.col });
+    }
+
+    /// Whether an expression is rooted at the current method's `self`
+    /// with a receiver that forbids mutation. Only a `mut self` method may
+    /// write through `self` -- through a field, an element, or a nested
+    /// path like `self.pos.x`. Anything else mutates at most a local copy,
+    /// so the checker refuses it rather than letting it look meaningful.
+    fn self_root_denied(&self, e: &Expr) -> bool {
+        let (sname, kind) = match &self.self_param {
+            Some(v) => v,
+            None => return false,
+        };
+        if *kind == nx_ast::ReceiverKind::Mut {
+            return false;
+        }
+        let mut cur = e;
+        loop {
+            match cur {
+                Expr::Var(n, _) => return n == sname,
+                Expr::Index { base, .. } | Expr::Attr { base, .. } => cur = base,
+                _ => return false,
+            }
+        }
     }
 
     /// Bind one assignment target. A name follows the usual monomorphic
@@ -208,6 +267,15 @@ impl Checker {
                 self.define(name, t, span);
             }
             Target::Index { base, index } => {
+                // A write through read-only `self` is refused even though
+                // it would only touch a local copy.
+                if self.self_root_denied(base) {
+                    self.err(
+                        base.span(),
+                        "cannot mutate through read-only 'self' (use `mut self`)".to_string(),
+                    );
+                    return;
+                }
                 let bt = self.check_expr(base);
                 // Dict keys are values and positional indices are Ints; an
                 // unresolved base may be either, so a scalar key is
@@ -252,6 +320,15 @@ impl Checker {
             Target::Attr { base, field } => {
                 // A field write needs the base's type: it is what says which
                 // layout is being written to, and whether the value fits.
+                // A write through read-only `self` is refused even though
+                // it would only touch a local copy.
+                if self.self_root_denied(base) {
+                    self.err(
+                        base.span(),
+                        "cannot mutate through read-only 'self' (use `mut self`)".to_string(),
+                    );
+                    return;
+                }
                 let bt = self.check_expr(base);
                 match bt {
                     Ty::Record(rt) => {
@@ -302,6 +379,13 @@ impl Checker {
                 Some(t) => Some(t),
             },
             Target::Index { base, index } => {
+                if self.self_root_denied(base) {
+                    self.err(
+                        base.span(),
+                        "cannot mutate through read-only 'self' (use `mut self`)".to_string(),
+                    );
+                    return None;
+                }
                 let bt = self.check_expr(base);
                 // An unresolved base may hold a list or a dict; a scalar
                 // key is accepted for either and the runtime dispatches. A
@@ -341,6 +425,13 @@ impl Checker {
                 }
             }
             Target::Attr { base, field } => {
+                if self.self_root_denied(base) {
+                    self.err(
+                        base.span(),
+                        "cannot mutate through read-only 'self' (use `mut self`)".to_string(),
+                    );
+                    return None;
+                }
                 let bt = self.check_expr(base);
                 match bt {
                     Ty::Record(t) => {
@@ -404,6 +495,97 @@ impl Checker {
         }
     }
 
+    /// Check call arguments against parameter types: exact arity, then
+    /// per-argument compatibility with parameter narrowing. Shared by
+    /// plain calls, module calls, and method calls so all three agree.
+    fn check_call_args(&mut self, params: &[Ty], args: &[Expr], span: Span) {
+        if params.len() != args.len() {
+            self.err(span, format!("expects {} args, got {}", params.len(), args.len()));
+        }
+        for (p, a) in params.iter().zip(args.iter()) {
+            let at = self.check_expr(a);
+            if !compatible(p, &at) {
+                self.err(a.span(), format!("argument must be {p}, found {at}"));
+            }
+            if p != &Ty::Unknown {
+                self.expect_param(a, p.clone());
+            }
+        }
+    }
+
+    /// Check a builtin call by name. Every ambient builtin lives here, so
+    /// direct calls (`push(xs, 1)`) and sugar calls (`xs.push(1)`) share
+    /// one implementation and one set of diagnostics.
+    fn check_builtin(&mut self, name: &str, args: &[Expr], span: Span) -> Ty {
+        match name {
+            "len" => {
+                if args.len() != 1 {
+                    self.err(span, "len() expects 1 argument".to_string());
+                    return Ty::Unknown;
+                }
+                let t = self.check_expr(&args[0]);
+                if !matches!(t, Ty::List(_) | Ty::Str | Ty::Dict(_) | Ty::Unknown) {
+                    self.err(span, format!("len() only supports lists, strings and dicts, found {t}"));
+                }
+                Ty::Int
+            }
+            "push" => {
+                if args.len() != 2 {
+                    self.err(span, "push() expects 2 arguments".to_string());
+                    return Ty::Unknown;
+                }
+                // The target must be a variable: pushing into a temporary
+                // would drop the result, and the backend writes through
+                // the variable's slot.
+                if !matches!(&args[0], Expr::Var(..)) {
+                    self.err(span, "push() first argument must be a list variable".to_string());
+                }
+                let lt = self.check_expr(&args[0]);
+                let et = self.check_expr(&args[1]);
+                match lt {
+                    Ty::List(t) if compatible(&t, &et) => {
+                        // A push into a `List(?)` pins the element
+                        // type, the same way a literal element
+                        // would. Without this, every list built by
+                        // pushing (the only way to grow one) stays
+                        // unresolved and poisons everything read
+                        // from it back to dynamic.
+                        if *t == Ty::Unknown && et != Ty::Unknown {
+                            if let Expr::Var(n, _) = &args[0] {
+                                self.vars.insert(n.clone(), Ty::List(Box::new(et)));
+                            }
+                        }
+                    }
+                    Ty::List(_) => {
+                        self.err(span, "push() element type mismatch".to_string());
+                    }
+                    Ty::Unknown => {}
+                    other => {
+                        self.err(span, format!("push() needs a list, found {other}"));
+                    }
+                }
+                Ty::None
+            }
+            _ => {
+                self.err(span, format!("unknown builtin '{name}'"));
+                Ty::Unknown
+            }
+        }
+    }
+
+    /// Whether `base` in `base.method(...)` has storage a `mut self`
+    /// result can be written back into: a plain variable, an index, or a
+    /// field. Used by the backends to decide whether to write back; a
+    /// `mut self` call on anything else still evaluates normally, it just
+    /// has nowhere to put the update.
+    #[allow(dead_code)]
+    fn writable_receiver(base: &Expr) -> bool {
+        matches!(
+            base,
+            Expr::Var(..) | Expr::Index { .. } | Expr::Attr { .. }
+        )
+    }
+
     /// The canonical (declared) name for a possibly-aliased type. Unknown
     /// names pass through unchanged; the caller reports them.
     fn canonical_name(&self, name: &str) -> String {
@@ -443,7 +625,184 @@ impl Checker {
         }
     }
 
+    /// Check a function or method body with the shared two-pass inference.
+    /// Returns the parameter types (excluding an implicit `self`), the
+    /// return type, and the body's inferred locals for the backend.
+    ///
+    /// The enclosing scope is restored before returning, so a caller reads
+    /// the locals out of the result rather than out of `self.vars`.
+    ///
+    /// `receiver` is the canonical type plus kind for a method, which
+    /// pre-binds `self` to the record and arms the read-only-`self` rule
+    /// for the duration of the body.
+    fn check_fn_like(
+        &mut self,
+        params: &[String],
+        body: &[Stmt],
+        span: Span,
+        receiver: Option<(String, nx_ast::ReceiverKind)>,
+    ) -> (Vec<Ty>, Ty, HashMap<String, Ty>) {
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_in_fn = self.in_function;
+        let saved_returns = std::mem::take(&mut self.returns);
+        let saved_outer = self.fn_outer.take();
+        let saved_params = std::mem::take(&mut self.param_names);
+        let saved_self = self.self_param.take();
+        self.in_function = true;
+        // `self` narrows like a parameter for inference purposes, but its
+        // type is fixed by the receiver rather than discovered.
+        let mut all_params: Vec<String> = Vec::with_capacity(params.len() + 1);
+        let mut self_ty: Option<Ty> = None;
+        if let Some((canon, kind)) = &receiver {
+            all_params.push("self".to_string());
+            self_ty = Some(Ty::Record(canon.clone()));
+            self.self_param = Some(("self".to_string(), *kind));
+        }
+        all_params.extend(params.iter().cloned());
+        self.param_names = all_params.clone();
+        // Outer scope for parallel tasks: params + all assigned names.
+        let mut outer: HashSet<String> = all_params.iter().cloned().collect();
+        collect_assigned(body, &mut outer);
+        self.fn_outer = Some(outer);
+        // Two passes. A parameter's type comes from how the body
+        // uses it, so pass one discovers the types and pass two
+        // checks the body with them already known. Without the
+        // second pass everything derived from a parameter would
+        // come out unresolved: `t = n * 2` is only Int if `n` is.
+        let mut rets: Vec<Ty>;
+        let mut ret: Ty;
+        // What we have learned about each parameter so far, fed
+        // back in on the next pass. Seeding the types is what makes
+        // the second pass useful: with `n` already Int, `t = n * 2`
+        // types `t` instead of widening it to unresolved.
+        let mut known: HashMap<String, Ty> = HashMap::new();
+        let mut passes = 0;
+        loop {
+            self.copies.clear();
+            self.saw_float = false;
+            self.vars.clear();
+            self.returns.clear();
+            // A function body sees the module's own variables, the
+            // same ones codegen resolves to globals. Seeding the
+            // scope with them is what lets a function read a
+            // top-level constant instead of reporting it undefined.
+            for (name, ty) in &saved_vars {
+                self.vars.insert(name.clone(), ty.clone());
+            }
+            if let Some(t) = &self_ty {
+                self.vars.insert("self".to_string(), t.clone());
+            }
+            for p in params {
+                self.vars
+                    .insert(p.clone(), known.get(p).cloned().unwrap_or(Ty::Unknown));
+            }
+            let entry_vars = self.vars.clone();
+            // Only the final pass's diagnostics are reported: an
+            // earlier pass sees types that later passes refine, so
+            // its complaints can be spurious. They are still
+            // carried here and dropped by the truncate at the top
+            // of the next iteration.
+            let nerr = self.errors.len();
+            self.check_block(body);
+            let pass_errors: Vec<CheckError> = self.errors.drain(nerr..).collect();
+            // A numeric parameter nothing else pinned defaults to
+            // Int, but only in a function that never touches a
+            // Float. With no float in the body there is nothing a
+            // Float argument could mean, so Int is the only reading
+            // left and the caller gets a real signature to check.
+            //
+            // With a Float present, leaving the parameter dynamic is
+            // the honest answer: `zr - zi + cx` and `x / 2.0` are
+            // well-typed whatever cx and x are, and pinning them
+            // made `fn mandel(cx, cy, maxiter)` come out as
+            // `(Int, Int, Int)` and reject Float arguments outright.
+            if !self.saw_float {
+                for p in std::mem::take(&mut self.numeric_params) {
+                    if p != "self" && self.vars.get(&p) == Some(&Ty::Unknown) {
+                        self.vars.insert(p, Ty::Int);
+                    }
+                }
+            } else {
+                self.numeric_params.clear();
+                self.saw_float = false;
+            }
+            // A plain copy makes both ends the same type; take it
+            // from whichever end this pass managed to type.
+            for (local, p) in std::mem::take(&mut self.copies) {
+                let from_local = self.vars.get(&local).cloned();
+                let from_param = self.vars.get(&p).cloned();
+                // Take the type from whichever end is known, or
+                // accept it when both already agree. Anything else
+                // (both unresolved, or a real disagreement) stays
+                // unresolved and is reported by define.
+                let resolved = match (from_local, from_param) {
+                    (Some(Ty::Unknown), Some(t)) => Some(t),
+                    (Some(t), Some(Ty::Unknown)) => Some(t),
+                    (Some(l), Some(p)) if l == p => Some(l),
+                    _ => None,
+                };
+                if let Some(t) = resolved {
+                    self.vars.insert(local, t.clone());
+                    self.vars.insert(p, t);
+                }
+            }
+            let snapshot = self.vars.clone();
+            for p in params {
+                if let Some(t) = snapshot.get(p) {
+                    if *t != Ty::Unknown {
+                        known.insert(p.clone(), t.clone());
+                    }
+                }
+            }
+            rets = std::mem::take(&mut self.returns);
+            ret = Ty::None;
+            for t in &rets {
+                if ret == Ty::None {
+                    ret = t.clone();
+                } else if compatible(&ret, t) {
+                    if ret == Ty::Unknown {
+                        ret = t.clone();
+                    }
+                } else {
+                    let r = ret.clone();
+                    self.err(span, format!("inconsistent return types: {r} vs {t}"));
+                }
+            }
+            passes += 1;
+            // Keep going while a pass still teaches us something.
+            // Bounded because each pass can only remove Unknowns.
+            let converged = self.vars == entry_vars || passes >= 4;
+            if converged {
+                // Report the last pass, which had the best types.
+                self.errors.extend(pass_errors);
+            }
+            if converged {
+                break;
+            }
+        }
+        let fn_locals = self.vars.clone();
+        let param_tys: Vec<Ty> =
+            params.iter().map(|p| fn_locals.get(p).cloned().unwrap_or(Ty::Unknown)).collect();
+        // The enclosing scope goes back exactly as it was found: a function
+        // body must not consume the module's variables, or every statement
+        // after the first `fn` would see an empty module.
+        self.vars = saved_vars;
+        self.in_function = saved_in_fn;
+        self.returns = saved_returns;
+        self.fn_outer = saved_outer;
+        self.param_names = saved_params;
+        self.self_param = saved_self;
+        (param_tys, ret, fn_locals)
+    }
+
     fn define(&mut self, name: &str, ty: Ty, span: Span) {
+        // A variable may not share a type's name: `Point = 5` would make
+        // `Point(...)` unresolvable, and the same holds for loop variables
+        // and imports, which all bind through here.
+        if self.records.contains_key(name) {
+            self.err(span, format!("'{name}' is already a type; a variable cannot share the name"));
+            return;
+        }
         match self.vars.get(name) {
             None => {
                 self.vars.insert(name.to_string(), ty);
@@ -739,7 +1098,11 @@ impl Checker {
                 // Loop var follows the same monomorphic rule.
                 match self.vars.get(var).cloned() {
                     None => {
-                        self.vars.insert(var.clone(), elem);
+                        if self.records.contains_key(var) {
+                            self.err(*span, format!("'{var}' is already a type; a variable cannot share the name"));
+                        } else {
+                            self.vars.insert(var.clone(), elem);
+                        }
                     }
                     Some(old) if compatible(&old, &elem) => {}
                     Some(old) => self.err(*span, format!("loop variable '{var}' is {old}, cannot iterate {elem}")),
@@ -755,151 +1118,107 @@ impl Checker {
                     self.err(*span, format!("function '{name}' already defined"));
                     return;
                 }
+                if self.records.contains_key(name) {
+                    self.err(*span, format!("'{name}' is already a type; a function cannot share the name"));
+                    return;
+                }
+                // A parameter shadowing a type would silently change what
+                // `T(...)` means inside the body, so it is refused up front.
+                for p in params {
+                    if self.records.contains_key(p) {
+                        self.err(*span, format!("parameter '{p}' shadows type '{p}'"));
+                    }
+                }
                 // Stub first so the body can call itself recursively.
                 self.funcs.insert(
                     name.clone(),
                     (vec![Ty::Unknown; params.len()], Ty::Unknown),
                 );
-                let saved_vars = std::mem::take(&mut self.vars);
-                let saved_in_fn = self.in_function;
-                let saved_returns = std::mem::take(&mut self.returns);
-                let saved_outer = self.fn_outer.take();
-                let saved_params = std::mem::take(&mut self.param_names);
-                self.in_function = true;
-                self.param_names = params.clone();
-                // Outer scope for parallel tasks: params + all assigned names.
-                let mut outer: HashSet<String> = params.iter().cloned().collect();
-                collect_assigned(body, &mut outer);
-                self.fn_outer = Some(outer);
-                // Two passes. A parameter's type comes from how the body
-                // uses it, so pass one discovers the types and pass two
-                // checks the body with them already known. Without the
-                // second pass everything derived from a parameter would
-                // come out unresolved: `t = n * 2` is only Int if `n` is.
-                let mut rets: Vec<Ty>;
-                let mut ret: Ty;
-                // What we have learned about each parameter so far, fed
-                // back in on the next pass. Seeding the types is what makes
-                // the second pass useful: with `n` already Int, `t = n * 2`
-                // types `t` instead of widening it to unresolved.
-                let mut known: HashMap<String, Ty> = HashMap::new();
-                let mut passes = 0;
-                loop {
-                    self.copies.clear();
-                    self.saw_float = false;
-                    self.vars.clear();
-                    self.returns.clear();
-                    // A function body sees the module's own variables, the
-                    // same ones codegen resolves to globals. Seeding the
-                    // scope with them is what lets a function read a
-                    // top-level constant instead of reporting it undefined.
-                    for (name, ty) in &saved_vars {
-                        self.vars.insert(name.clone(), ty.clone());
-                    }
-                    for p in params {
-                        self.vars
-                            .insert(p.clone(), known.get(p).cloned().unwrap_or(Ty::Unknown));
-                    }
-                    let entry_vars = self.vars.clone();
-                    // Only the final pass's diagnostics are reported: an
-                    // earlier pass sees types that later passes refine, so
-                    // its complaints can be spurious. They are still
-                    // carried here and dropped by the truncate at the top
-                    // of the next iteration.
-                    let nerr = self.errors.len();
-                    self.check_block(body);
-                    let pass_errors: Vec<CheckError> = self.errors.drain(nerr..).collect();
-                    // A numeric parameter nothing else pinned defaults to
-                    // Int, but only in a function that never touches a
-                    // Float. With no float in the body there is nothing a
-                    // Float argument could mean, so Int is the only reading
-                    // left and the caller gets a real signature to check.
-                    //
-                    // With a Float present, leaving the parameter dynamic is
-                    // the honest answer: `zr - zi + cx` and `x / 2.0` are
-                    // well-typed whatever cx and x are, and pinning them
-                    // made `fn mandel(cx, cy, maxiter)` come out as
-                    // `(Int, Int, Int)` and reject Float arguments outright.
-                    if !self.saw_float {
-                        for p in std::mem::take(&mut self.numeric_params) {
-                            if self.vars.get(&p) == Some(&Ty::Unknown) {
-                                self.vars.insert(p, Ty::Int);
-                            }
-                        }
-                    } else {
-                        self.numeric_params.clear();
-                        self.saw_float = false;
-                    }
-                    // A plain copy makes both ends the same type; take it
-                    // from whichever end this pass managed to type.
-                    for (local, p) in std::mem::take(&mut self.copies) {
-                        let from_local = self.vars.get(&local).cloned();
-                        let from_param = self.vars.get(&p).cloned();
-                        // Take the type from whichever end is known, or
-                        // accept it when both already agree. Anything else
-                        // (both unresolved, or a real disagreement) stays
-                        // unresolved and is reported by define.
-                        let resolved = match (from_local, from_param) {
-                            (Some(Ty::Unknown), Some(t)) => Some(t),
-                            (Some(t), Some(Ty::Unknown)) => Some(t),
-                            (Some(l), Some(p)) if l == p => Some(l),
-                            _ => None,
-                        };
-                        if let Some(t) = resolved {
-                            self.vars.insert(local, t.clone());
-                            self.vars.insert(p, t);
-                        }
-                    }
-                    let snapshot = self.vars.clone();
-                    for p in params {
-                        if let Some(t) = snapshot.get(p) {
-                            if *t != Ty::Unknown {
-                                known.insert(p.clone(), t.clone());
-                            }
-                        }
-                    }
-                    rets = std::mem::take(&mut self.returns);
-                    ret = Ty::None;
-                    for t in &rets {
-                        if ret == Ty::None {
-                            ret = t.clone();
-                        } else if compatible(&ret, t) {
-                            if ret == Ty::Unknown {
-                                ret = t.clone();
-                            }
-                        } else {
-                            let r = ret.clone();
-                            self.err(*span, format!("inconsistent return types: {r} vs {t}"));
-                        }
-                    }
-                    passes += 1;
-                    // Keep going while a pass still teaches us something.
-                    // Bounded because each pass can only remove Unknowns.
-                    let converged = self.vars == entry_vars || passes >= 4;
-                    if converged {
-                        // Report the last pass, which had the best types.
-                        self.errors.extend(pass_errors);
-                    }
-                    if converged {
-                        break;
-                    }
-                }
-                let fn_locals = self.vars.clone();
-                let param_tys: Vec<Ty> =
-                    params.iter().map(|p| fn_locals.get(p).cloned().unwrap_or(Ty::Unknown)).collect();
-                self.vars = saved_vars;
-                self.in_function = saved_in_fn;
-                self.returns = saved_returns;
-                self.fn_outer = saved_outer;
-                self.param_names = saved_params;
+                let (param_tys, ret, fn_locals) = self.check_fn_like(params, body, *span, None);
+                let module = self.module_name.clone();
                 self.inferred.insert(
-                    (self.module_name.clone(), name.clone()),
+                    (module, name.clone()),
                     FnInfo { locals: fn_locals, params: params.clone(), ret: ret.clone() },
                 );
                 self.funcs.insert(
                     name.clone(),
                     (param_tys, ret),
                 );
+            }
+            Stmt::Impl { type_name, methods, span } => {
+                if self.in_function {
+                    self.err(*span, "impl blocks must be at module level".to_string());
+                    return;
+                }
+                // The orphan rule: an impl lives with its type. Imported
+                // types carry no declaration span, which is what tells them
+                // apart from types declared here.
+                if !self.records.contains_key(type_name) {
+                    self.err(*span, format!("unknown type '{type_name}'"));
+                    return;
+                }
+                if !self.record_spans.contains_key(type_name) {
+                    self.err(*span, format!("cannot implement type '{type_name}' from another module"));
+                    return;
+                }
+                let canon = self.canonical_name(type_name);
+                for m in methods {
+                    let key = (canon.clone(), m.name.clone());
+                    if self.methods.contains_key(&key) {
+                        self.err(m.span, format!("method '{}' already defined for type '{canon}'", m.name));
+                        continue;
+                    }
+                    for p in &m.params {
+                        if self.records.contains_key(p) {
+                            self.err(m.span, format!("parameter '{p}' shadows type '{p}'"));
+                        }
+                    }
+                    // Stub first so the body can call itself recursively.
+                    self.methods.insert(key.clone(), MethodInfo {
+                        params: vec![Ty::Unknown; m.params.len()],
+                        ret: Ty::Unknown,
+                        receiver: m.receiver,
+                        module: self.module_name.clone(),
+                    });
+                    let recv = match m.receiver {
+                        nx_ast::ReceiverKind::None => None,
+                        kind => Some((canon.clone(), kind)),
+                    };
+                    let (param_tys, ret, fn_locals) =
+                        self.check_fn_like(&m.params, &m.body, m.span, recv);
+                    // A `mut self` method writes its result back into the
+                    // receiver (`p = m(p, ...)`), so it must return the
+                    // record: anything else would clobber the receiver with
+                    // the wrong type.
+                    if m.receiver == nx_ast::ReceiverKind::Mut
+                        && ret != Ty::Record(canon.clone())
+                    {
+                        self.err(
+                            m.span,
+                            format!(
+                                "mut method '{}' must return '{canon}', found {ret}",
+                                m.name
+                            ),
+                        );
+                    }
+                    let info = MethodInfo {
+                        params: param_tys,
+                        ret: ret.clone(),
+                        receiver: m.receiver,
+                        module: self.module_name.clone(),
+                    };
+                    self.methods.insert(key.clone(), info.clone());
+                    let module = self.module_name.clone();
+                    self.inferred.insert(
+                        (module, format!("{canon}.{}", m.name)),
+                        FnInfo {
+                            locals: fn_locals,
+                            params: m.params.clone(),
+                            ret,
+                        },
+                    );
+                }
+                let _ = span;
             }
             Stmt::Return { values, span } => {
                 if !self.in_function {
@@ -964,6 +1283,10 @@ impl Checker {
             Stmt::Import { module, alias, span } => {
                 if self.check_module(module, *span) {
                     let bind = alias.clone().unwrap_or_else(|| module.clone());
+                    if self.records.contains_key(&bind) {
+                        self.err(*span, format!("'{bind}' is already a type; a variable cannot share the name"));
+                        return;
+                    }
                     if let Some(outer) = &self.parallel_outer {
                         if outer.contains(&bind) && !self.task_bound.contains(&bind) {
                             self.err(*span, format!("cannot assign to outer local '{bind}' inside parallel (use a module global)"));
@@ -997,11 +1320,17 @@ impl Checker {
                         // as U` followed by `U(...)` resolves. The canonical
                         // name is registered too: `U(...)` constructs
                         // `Ty::Record("T")`, and field access on the result
-                        // has to find the layout under that name.
+                        // has to find the layout under that name. The
+                        // type's methods come along the same way.
                         self.records.insert(bind.clone(), layout.clone());
                         self.records.insert(name.clone(), layout.clone());
                         if bind != *name {
                             self.type_alias.insert(bind, name.clone());
+                        }
+                        for ((t, m), minfo) in &info.methods {
+                            if t == name {
+                                self.methods.insert((t.clone(), m.clone()), minfo.clone());
+                            }
                         }
                     } else {
                         self.err(*span, format!("module '{module}' has no member '{name}'"));
@@ -1056,6 +1385,7 @@ impl Checker {
         let saved_records = std::mem::take(&mut self.records);
         let saved_spans = std::mem::take(&mut self.record_spans);
         let saved_alias = std::mem::take(&mut self.type_alias);
+        let saved_methods = std::mem::take(&mut self.methods);
         let saved_base = std::mem::replace(&mut self.base, dir);
         let saved_module = std::mem::replace(&mut self.module_name, name.to_string());
         self.loading.push(name.to_string());
@@ -1068,6 +1398,7 @@ impl Checker {
             vars: std::mem::replace(&mut self.vars, saved_vars),
             funcs: std::mem::replace(&mut self.funcs, saved_funcs),
             types: std::mem::replace(&mut self.records, saved_records),
+            methods: std::mem::replace(&mut self.methods, saved_methods),
         };
         self.record_spans = saved_spans;
         self.type_alias = saved_alias;
@@ -1191,7 +1522,11 @@ impl Checker {
                 // bound here and restored after rather than leaking out and
                 // colliding with a same-named variable elsewhere.
                 let saved = self.vars.get(var).cloned();
-                self.vars.insert(var.clone(), elem);
+                if saved.is_none() && self.records.contains_key(var) {
+                    self.err(iter.span(), format!("'{var}' is already a type; a variable cannot share the name"));
+                } else {
+                    self.vars.insert(var.clone(), elem);
+                }
                 if let Some(c) = cond {
                     let ct = self.check_expr(c);
                     if !matches!(ct, Ty::Bool | Ty::Unknown) {
@@ -1489,69 +1824,112 @@ impl Checker {
                         }
                     }
                 }
+                // Method, associated-function, and builtin-sugar calls through
+                // `base.attr(...)`. Resolution order is load-bearing:
+                // modules first (a module never means a value), then
+                // associated functions on a type name, then impl methods on
+                // a statically known record, and finally builtin sugar
+                // (`xs.push(1)` for `push(xs, 1)`), which also covers
+                // unresolved bases. Dynamic method dispatch is Stage 4.
+                if let Expr::Attr { base, attr, .. } = callee.as_ref() {
+                    // `T.m(...)` where T names a type: an associated
+                    // function. Tested before the base is evaluated as a
+                    // value, because a type name is not a binding -- asking
+                    // `check_expr` about one would report it undefined. No
+                    // sugar fallback either: the base is not a value, so
+                    // anything else is meaningless.
+                    if let Expr::Var(n, _) = base.as_ref() {
+                        if self.records.contains_key(n) {
+                            let canon = self.canonical_name(n);
+                            if let Some(info) = self.methods.get(&(canon.clone(), attr.clone())).cloned() {
+                                if info.receiver != nx_ast::ReceiverKind::None {
+                                    self.err(
+                                        *span,
+                                        format!("method '{attr}' needs a receiver; call it on a '{canon}' value"),
+                                    );
+                                    return Ty::Unknown;
+                                }
+                                self.check_call_args(&info.params, args, *span);
+                                return info.ret;
+                            }
+                            self.err(*span, format!("type '{canon}' has no associated function '{attr}'"));
+                            return Ty::Unknown;
+                        }
+                    }
+                    // A module base is a module function, checked like a
+                    // plain call against the module's signature.
+                    if let Ty::Module(m) = self.check_expr(base) {
+                        if let Some(info) = self.modules.get(&m).cloned() {
+                            if let Some((p, r)) = info.funcs.get(attr) {
+                                let (p, r) = (p.clone(), r.clone());
+                                self.check_call_args(&p, args, *span);
+                                return r;
+                            }
+                        }
+                        // A module variable is not callable, same as calling
+                        // any other non-function value.
+                        for a in args {
+                            self.check_expr(a);
+                        }
+                        self.err(*span, format!("module '{m}' has no function '{attr}'"));
+                        return Ty::Unknown;
+                    }
+                    // `v.m(...)` on a statically known record: an impl
+                    // method. Anything less than a record falls through to
+                    // builtin sugar below.
+                    let bt = self.check_expr(base);
+                    if let Ty::Record(t) = bt {
+                        if let Some(info) = self.methods.get(&(t.clone(), attr.clone())).cloned() {
+                            // A `mut self` call writes its result back into the
+                            // receiver when the receiver has storage. With no
+                            // storage -- a call result, a literal, anything
+                            // temporary -- there is nowhere to write, and the
+                            // call still evaluates to the modified record.
+                            // That is what lets a chain read as a single
+                            // expression: `q.moved(1, 1).moved(2, 2)`.
+                            if info.receiver == nx_ast::ReceiverKind::Mut
+                                && self.self_root_denied(base)
+                            {
+                                self.err(
+                                    *span,
+                                    "cannot call mut method through read-only 'self'".to_string(),
+                                );
+                            }
+                            self.check_call_args(&info.params, args, *span);
+                            return info.ret;
+                        }
+                        self.err(*span, format!("type '{t}' has no method '{attr}'"));
+                        return Ty::Unknown;
+                    }
+                    // Builtin sugar: `xs.push(1)` for `push(xs, 1)`. Reached
+                    // only when the base is neither a module, a type, nor a
+                    // record -- including unresolved bases, which is what
+                    // keeps `x.push(1)` working on dynamic values.
+                    if crate::builtin_arity(attr).is_some() {
+                        let mut sugared: Vec<Expr> = vec![(**base).clone()];
+                        sugared.extend(args.iter().cloned());
+                        return self.check_builtin(attr, &sugared, *span);
+                    }
+                    if matches!(bt, Ty::Unknown) {
+                        self.err(
+                            *span,
+                            format!("cannot resolve method '{attr}' on unresolved value (dynamic dispatch arrives in Stage 4)"),
+                        );
+                    } else {
+                        self.err(*span, format!("'{attr}' is not a method; only modules, types and builtins support attribute calls"));
+                    }
+                    return Ty::Unknown;
+                }
                 // Builtins.
                 if let Expr::Var(name, _) = callee.as_ref() {
-                    if name == "len" {
-                        if args.len() != 1 {
-                            self.err(*span, "len() expects 1 argument".to_string());
-                            return Ty::Unknown;
-                        }
-                        let t = self.check_expr(&args[0]);
-                        if !matches!(t, Ty::List(_) | Ty::Str | Ty::Dict(_) | Ty::Unknown) {
-                            self.err(*span, format!("len() only supports lists, strings and dicts, found {t}"));
-                        }
-                        return Ty::Int;
-                    }
-                    if name == "push" {
-                        if args.len() != 2 {
-                            self.err(*span, "push() expects 2 arguments".to_string());
-                            return Ty::Unknown;
-                        }
-                        if !matches!(&args[0], Expr::Var(..)) {
-                            self.err(*span, "push() first argument must be a list variable".to_string());
-                        }
-                        let lt = self.check_expr(&args[0]);
-                        let et = self.check_expr(&args[1]);
-                        match lt {
-                            Ty::List(t) if compatible(&t, &et) => {
-                                // A push into a `List(?)` pins the element
-                                // type, the same way a literal element
-                                // would. Without this, every list built by
-                                // pushing (the only way to grow one) stays
-                                // unresolved and poisons everything read
-                                // from it back to dynamic.
-                                if *t == Ty::Unknown && et != Ty::Unknown {
-                                    if let Expr::Var(n, _) = &args[0] {
-                                        self.vars.insert(n.clone(), Ty::List(Box::new(et)));
-                                    }
-                                }
-                            }
-                            Ty::List(_) => {
-                                self.err(*span, format!("push() element type mismatch"));
-                            }
-                            Ty::Unknown => {}
-                            other => {
-                                self.err(*span, format!("push() needs a list, found {other}"));
-                            }
-                        }
-                        return Ty::None;
+                    if crate::builtin_arity(name).is_some() {
+                        return self.check_builtin(name, args, *span);
                     }
                 }
                 let f = self.check_expr(callee);
                 match f {
                     Ty::Func(params, ret) => {
-                        if params.len() != args.len() {
-                            self.err(*span, format!("expects {} args, got {}", params.len(), args.len()));
-                        }
-                        for (p, a) in params.iter().zip(args.iter()) {
-                            let at = self.check_expr(a);
-                            if !compatible(p, &at) {
-                                self.err(a.span(), format!("argument must be {p}, found {at}"));
-                            }
-                            if p != &Ty::Unknown {
-                                self.expect_param(a, p.clone());
-                            }
-                        }
+                        self.check_call_args(&params, args, *span);
                         *ret
                     }
                     Ty::Unknown => {
@@ -1679,6 +2057,8 @@ impl Default for Checker {
             records: HashMap::new(),
             record_spans: HashMap::new(),
             type_alias: HashMap::new(),
+            methods: HashMap::new(),
+            self_param: None,
         }
     }
 }
@@ -2218,6 +2598,177 @@ mod tests {
         // Once widened, a later known assignment must not re-narrow.
         let m = infer("fn f(xs):\n    t = 0\n    for x in xs:\n        t = t + x\n    t = 5\n    return t\n");
         assert_eq!(m[&("__main__".into(), "f".into())].locals["t"], Ty::Unknown);
+    }
+
+    // --- impl blocks and methods ------------------------------------
+
+    const POINT: &str = "type P:\n    x: Int\n    y: Int\n";
+
+    #[test]
+    fn method_return_types_are_inferred() {
+        let m = infer(&format!(
+            "{POINT}impl P:\n    fn area(self):\n        return self.x * self.y\n    fn zero():\n        return P(0, 0)\n"
+        ));
+        // Methods report under `Type.method`, matching what codegen looks
+        // up, so the two can never disagree about which name a body has.
+        assert_eq!(m[&("__main__".into(), "P.area".into())].ret, Ty::Int);
+        assert_eq!(m[&("__main__".into(), "P.zero".into())].ret, Ty::Record("P".into()));
+    }
+
+    #[test]
+    fn mut_self_binds_self_to_the_record() {
+        let m = infer(&format!(
+            "{POINT}impl P:\n    fn moved(mut self, d):\n        self.x = self.x + d\n        return self\n"
+        ));
+        let f = &m[&("__main__".into(), "P.moved".into())];
+        assert_eq!(f.locals["self"], Ty::Record("P".into()));
+        // `d` is Int: the body only ever adds it to an Int field.
+        assert_eq!(f.params, vec!["d".to_string()]);
+    }
+
+    #[test]
+    fn writing_through_read_only_self_is_an_error() {
+        // `self` is a copy, so a write through it would be discarded. The
+        // compiler says so rather than letting it look meaningful.
+        let e = err(&format!(
+            "{POINT}impl P:\n    fn bad(self):\n        self.x = 1\n        return self\n"
+        ));
+        assert!(
+            e.iter().any(|m| m.message.contains("read-only 'self'")),
+            "expected a read-only self error, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn writing_through_mut_self_is_allowed() {
+        ok(&format!(
+            "{POINT}impl P:\n    fn ok(mut self):\n        self.x = 1\n        return self\n"
+        ));
+    }
+
+    #[test]
+    fn mut_self_must_return_the_record() {
+        // The result is written back into the receiver, so anything other
+        // than the record would clobber it with the wrong type.
+        let e = err(&format!(
+            "{POINT}impl P:\n    fn bad(mut self):\n        self.x = 1\n        return 7\n"
+        ));
+        assert!(
+            e.iter().any(|m| m.message.contains("must return 'P'")),
+            "expected a return-type error, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn impl_of_unknown_type_is_an_error() {
+        let e = err("impl Nope:\n    fn a(self):\n        return 1\n");
+        assert!(
+            e.iter().any(|m| m.message.contains("unknown type 'Nope'")),
+            "expected an unknown-type error, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_method_is_an_error() {
+        let e = err(&format!(
+            "{POINT}impl P:\n    fn a(self):\n        return 1\n    fn a(self):\n        return 2\n"
+        ));
+        assert!(
+            e.iter().any(|m| m.message.contains("duplicate method")),
+            "expected a duplicate error, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_method_on_a_known_record_is_an_error() {
+        let e = err(&format!("{POINT}p = P(1, 2)\nprint(p.nope())\n"));
+        assert!(
+            e.iter().any(|m| m.message.contains("has no method 'nope'")),
+            "expected an unknown-method error, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn method_needs_a_receiver_but_associated_function_does_not() {
+        // A method on the type name is a mistake worth naming.
+        let e = err(&format!(
+            "{POINT}impl P:\n    fn area(self):\n        return self.x\np = P(1, 2)\nprint(P.area())\n"
+        ));
+        assert!(
+            e.iter().any(|m| m.message.contains("needs a receiver")),
+            "expected a needs-a-receiver error, got {e:?}"
+        );
+        // An associated function takes no receiver, so a value of the type
+        // is as good a base as the type itself: there is nothing to read
+        // off it, and refusing the call would only add a rule.
+        ok(&format!(
+            "{POINT}impl P:\n    fn zero():\n        return P(0, 0)\np = P(1, 2)\nprint(p.zero())\nprint(P.zero())\n"
+        ));
+    }
+
+    /// A type may define a method whose name shadows an ambient builtin.
+    /// Methods resolve before sugar, so the type's meaning wins.
+    #[test]
+    fn a_method_may_shadow_a_builtin() {
+        ok(&format!(
+            "{POINT}impl P:\n    fn push(self, v):\n        return self.x + v\np = P(1, 2)\nprint(p.push(4))\n"
+        ));
+    }
+
+    #[test]
+    fn method_arity_is_checked() {
+        let e = err(&format!(
+            "{POINT}impl P:\n    fn scaled(self, k):\n        return self.x * k\np = P(1, 2)\nprint(p.scaled())\n"
+        ));
+        assert!(!e.is_empty(), "expected an arity error, got none");
+    }
+
+    /// A method on a type this module imported is an orphan impl: the
+    /// layout belongs to another module, so the two could disagree about
+    /// what the fields mean.
+    #[test]
+    fn impl_on_an_imported_type_is_refused() {
+        let dir = std::env::temp_dir().join("nx_orphan_impl");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shapes.nx"), "type Sq:\n    side: Int\n").unwrap();
+        let src = dir.join("main.nx");
+        std::fs::write(&src, "from shapes import Sq\nimpl Sq:\n    fn area(self):\n        return self.side\n").unwrap();
+        let toks = nx_lexer::lex(&std::fs::read_to_string(&src).unwrap()).unwrap();
+        let prog = nx_parser::parse(toks).unwrap();
+        let e = check_program(&prog, &dir).unwrap_err();
+        assert!(
+            e.iter().any(|m| m.message.contains("another module")),
+            "expected an orphan-impl error, got {e:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `xs.push(1)` is sugar for `push(xs, 1)`, so an element type pinned
+    /// by one spelling is pinned by the other -- and a mismatch is caught
+    /// through the sugar exactly as it is through the direct call.
+    #[test]
+    fn builtin_sugar_pins_the_element_type() {
+        let m = infer("xs = []\nxs.push(1)\nxs.push(2)\n");
+        let top = &m[&("__main__".into(), "<top>".into())];
+        assert_eq!(
+            top.locals["xs"],
+            Ty::List(Box::new(Ty::Int)),
+            "the first push pins the element type"
+        );
+        let e = err("xs = []\nxs.push(1)\nxs.push(\"s\")\n");
+        assert!(
+            e.iter().any(|m| m.message.contains("element type mismatch")),
+            "expected a pinned-element error, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_sugar_rejects_a_non_list_base() {
+        let e = err("x = 5\nx.push(1)\n");
+        assert!(
+            e.iter().any(|m| m.message.contains("push() needs a list")),
+            "expected a push type error, got {e:?}"
+        );
     }
 }
 

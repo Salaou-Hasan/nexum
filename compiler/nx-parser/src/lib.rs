@@ -135,6 +135,7 @@ impl Parser {
             TokenKind::Del => self.parse_del(),
             TokenKind::Assert => self.parse_assert(),
             TokenKind::Type => self.parse_type_decl(),
+            TokenKind::Impl => self.parse_impl(),
             _ => self.parse_simple_stmt(),
         }
     }
@@ -163,6 +164,129 @@ impl Parser {
             None
         };
         Ok(Stmt::Assert { cond, message, span })
+    }
+
+    /// `impl Point:` then an indented block of `fn` definitions. Each
+    /// method's first parameter may be a receiver (`self`, `mut self`,
+    /// `own self`); anything else must be a plain name. A `self` anywhere
+    /// but first is refused -- it can only ever mean the receiver.
+    fn parse_impl(&mut self) -> Result<Stmt, ParseError> {
+        let kw = self.next(); // impl
+        let span = Span { line: kw.line, col: kw.col };
+        let name = self.expect(TokenKind::Ident, "type name")?.lexeme;
+        self.expect(TokenKind::Colon, "':' after type name")?;
+        self.expect(TokenKind::Newline, "newline before impl body")?;
+        self.expect(TokenKind::Indent, "indented impl body")?;
+        let mut methods = Vec::new();
+        loop {
+            if *self.peek_kind() == TokenKind::Dedent || *self.peek_kind() == TokenKind::Eof {
+                break;
+            }
+            // Only `fn` definitions live in an impl block. Anything else
+            // (an assignment, a stray expression) is a clear error rather
+            // than a silently ignored line.
+            if *self.peek_kind() != TokenKind::Fn {
+                let t = self.peek().clone();
+                return Err(ParseError {
+                    message: format!(
+                        "only `fn` definitions allowed in impl block, found {:?} {:?}",
+                        t.kind, t.lexeme
+                    ),
+                    line: t.line,
+                    col: t.col,
+                });
+            }
+            methods.push(self.parse_method()?);
+        }
+        if *self.peek_kind() == TokenKind::Dedent {
+            self.next();
+        }
+        if methods.is_empty() {
+            return Err(ParseError {
+                message: format!("impl '{name}' has no methods"),
+                line: kw.line,
+                col: kw.col,
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        for m in &methods {
+            if !seen.insert(m.name.clone()) {
+                return Err(ParseError {
+                    message: format!("duplicate method '{}' in impl '{name}'", m.name),
+                    line: m.span.line,
+                    col: m.span.col,
+                });
+            }
+        }
+        Ok(Stmt::Impl { type_name: name, methods, span })
+    }
+
+    fn parse_method(&mut self) -> Result<nx_ast::Method, ParseError> {
+        let kw = self.next(); // fn
+        let span = Span { line: kw.line, col: kw.col };
+        let name = self.expect(TokenKind::Ident, "method name")?.lexeme;
+        self.expect(TokenKind::LParen, "'('")?;
+        let mut receiver = nx_ast::ReceiverKind::None;
+        let mut params = Vec::new();
+        self.skip_newlines();
+        if *self.peek_kind() != TokenKind::RParen {
+            // First parameter position: a receiver or a plain name.
+            match self.peek_kind() {
+                TokenKind::Self_ => {
+                    self.next();
+                    receiver = nx_ast::ReceiverKind::Read;
+                }
+                TokenKind::Mut => {
+                    self.next();
+                    self.expect(TokenKind::Self_, "'self' after 'mut'")?;
+                    receiver = nx_ast::ReceiverKind::Mut;
+                }
+                TokenKind::Own => {
+                    self.next();
+                    self.expect(TokenKind::Self_, "'self' after 'own'")?;
+                    receiver = nx_ast::ReceiverKind::Own;
+                }
+                _ => {
+                    let p = self.expect(TokenKind::Ident, "parameter")?;
+                    params.push(p.lexeme);
+                }
+            }
+            // A receiver consumes the first position: what follows must be
+            // `,` + more params or `)`.
+            self.skip_newlines();
+            if *self.peek_kind() == TokenKind::Comma {
+                self.next();
+                self.skip_newlines();
+            }
+            loop {
+                match self.peek_kind() {
+                    TokenKind::RParen => break,
+                    TokenKind::Self_ | TokenKind::Mut | TokenKind::Own => {
+                        let t = self.peek().clone();
+                        return Err(ParseError {
+                            message: "'self' is only allowed as the first parameter".to_string(),
+                            line: t.line,
+                            col: t.col,
+                        });
+                    }
+                    _ => {
+                        let p = self.expect(TokenKind::Ident, "parameter")?;
+                        params.push(p.lexeme);
+                        self.skip_newlines();
+                        if *self.peek_kind() == TokenKind::Comma {
+                            self.next();
+                            self.skip_newlines();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        self.expect(TokenKind::RParen, "')'")?;
+        self.expect(TokenKind::Colon, "':'")?;
+        let body = self.parse_block()?;
+        Ok(nx_ast::Method { name, receiver, params, body, span })
     }
 
     /// A write position: a name, `a[i]`, or `p.x`. Postfix suffixes are
@@ -428,6 +552,11 @@ impl Parser {
     fn try_parse_assignment(&mut self) -> Result<Option<Stmt>, ParseError> {
         let start = self.pos;
         let first = self.peek().clone();
+        // `self` opens an assignment target for the same reason an
+        // identifier does: `self.x = v` and `self[i] = v` are the mutations
+        // a `mut self` method exists to make. It is a keyword, so it needs
+        // the same target treatment spelled out here.
+        let name_like = matches!(first.kind, TokenKind::Ident | TokenKind::Self_);
 
         // An identifier is either an assignment head or the start of an
         // expression; decide by looking at what follows the target chain.
@@ -439,7 +568,7 @@ impl Parser {
         // `a[i] = v` / `p.x = v` / `a[i] += v` cannot start with a bare
         // identifier that is itself the whole left side, so parse a
         // postfix expression and see whether a `=` follows it.
-        if matches!(first.kind, TokenKind::Ident) {
+        if name_like {
             let e = self.parse_postfix()?;
             let compound = match self.peek_kind() {
                 TokenKind::PlusEq => Some(BinOp::Add),
@@ -921,6 +1050,17 @@ impl Parser {
             TokenKind::Ident => {
                 self.next();
                 Ok(Expr::Var(t.lexeme, Span { line: t.line, col: t.col }))
+            }
+            // `self` is a keyword (so the receiver can be spelled `self`,
+            // `mut self`, `own self`), but inside a body it is just an
+            // ordinary binding -- the receiver. Promoting it here keeps the
+            // rest of the parser free of receiver awareness.
+            TokenKind::Self_ => {
+                self.next();
+                Ok(Expr::Var(
+                    "self".to_string(),
+                    Span { line: t.line, col: t.col },
+                ))
             }
             TokenKind::None => {
                 self.next();
@@ -1546,5 +1686,145 @@ mod tests {
     fn extended_number_literals() {
         let p = parse_source("a = 1_000\nb = 0xff\nc = 1e3\nd = 2.5e-3").unwrap();
         assert_eq!(p.stmts.len(), 4);
+    }
+
+    // ---- impl blocks ----
+
+    #[test]
+    fn impl_block_parses() {
+        let p = parse_source("impl Point:\n    fn area(self):\n        return 1\n    fn origin():\n        return 2").unwrap();
+        match &p.stmts[0] {
+            Stmt::Impl { type_name, methods, .. } => {
+                assert_eq!(type_name, "Point");
+                assert_eq!(methods.len(), 2);
+                assert_eq!(methods[0].name, "area");
+                assert_eq!(methods[0].receiver, nx_ast::ReceiverKind::Read);
+                assert!(methods[0].params.is_empty());
+                assert_eq!(methods[1].receiver, nx_ast::ReceiverKind::None);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_receivers() {
+        let p = parse_source(
+            "impl P:\n    fn a(self):\n        return 1\n    fn b(mut self, x):\n        return 2\n    fn c(own self):\n        return 3",
+        )
+        .unwrap();
+        let methods = match &p.stmts[0] {
+            Stmt::Impl { methods, .. } => methods,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(methods[0].receiver, nx_ast::ReceiverKind::Read);
+        assert_eq!(methods[1].receiver, nx_ast::ReceiverKind::Mut);
+        assert_eq!(methods[1].params, vec!["x".to_string()]);
+        assert_eq!(methods[2].receiver, nx_ast::ReceiverKind::Own);
+    }
+
+    #[test]
+    fn impl_rejects_non_fn_bodies() {
+        assert!(parse_source("impl P:\n    x = 1").is_err());
+        assert!(parse_source("impl P:\n    print(1)").is_err());
+    }
+
+    #[test]
+    fn impl_rejects_empty_and_duplicate_methods() {
+        assert!(parse_source("impl P:\n").is_err());
+        assert!(parse_source("impl P:\n    fn a(self):\n        return 1\n    fn a(self):\n        return 2").is_err());
+    }
+
+    #[test]
+    fn self_only_first() {
+        // `self` anywhere but first is refused, even though the name
+        // would otherwise parse as a parameter.
+        assert!(parse_source("impl P:\n    fn a(x, self):\n        return 1").is_err());
+        assert!(parse_source("impl P:\n    fn a(mut self, mut self):\n        return 1").is_err());
+    }
+
+    /// `self` is a keyword, but inside a body it is just the receiver
+    /// binding. Reading it, writing through it, and indexing it must all
+    /// parse as ordinary variable targets, because those are exactly the
+    /// operations a `mut self` method exists to perform.
+    #[test]
+    fn self_is_a_variable_in_a_body() {
+        let p = parse_source(
+            "impl P:\n    fn m(mut self):\n        self.x = 1\n        self.y = self.x + 2\n        self.items[0] = self.y\n        return self",
+        )
+        .unwrap();
+        let body = match &p.stmts[0] {
+            Stmt::Impl { methods, .. } => &methods[0].body,
+            other => panic!("{other:?}"),
+        };
+        // First statement must be an assignment, not a bare expression:
+        // that is the whole point of the promotion.
+        assert!(
+            matches!(body[0], Stmt::Assign { .. }),
+            "self.x = 1 must parse as an assignment: {:?}",
+            body[0]
+        );
+        // Reading `self` yields a plain variable reference.
+        let ret = match &body[3] {
+            Stmt::Return { values, .. } => values[0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(ret.span().line, 6);
+        assert!(
+            matches!(&ret, Expr::Var(n, _) if n == "self"),
+            "return self must be a variable read: {ret:?}"
+        );
+    }
+
+    /// `q.moved(1, 1).moved(2, 2)` parses as a call on a call, which is
+    /// what makes a `mut self` chain one expression.
+    #[test]
+    fn method_calls_chain_left() {
+        let p = parse_source("q.moved(1, 1).moved(2, 2).area()").unwrap();
+        match &p.stmts[0] {
+            Stmt::Expr(e) => {
+                let inner = match e {
+                    Expr::Call { callee, .. } => callee.as_ref(),
+                    other => panic!("{other:?}"),
+                };
+                // The receiver of the outer call is itself a call.
+                assert!(
+                    matches!(inner, Expr::Attr { base, .. } if matches!(base.as_ref(), Expr::Call { .. })),
+                    "chained method must nest: {inner:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `Point.origin()` is `Point` followed by a call on an attribute --
+    /// the associated-function spelling, distinct from constructing
+    /// `Point(...)`.
+    #[test]
+    fn associated_function_call_parses_as_attribute() {
+        let p = parse_source("p = Point.origin()").unwrap();
+        match &p.stmts[0] {
+            Stmt::Assign { values, .. } => match &values[0] {
+                Expr::Call { callee, .. } => assert!(
+                    matches!(callee.as_ref(), Expr::Attr { attr, .. } if attr == "origin"),
+                    "callee must be an attribute: {callee:?}"
+                ),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An `impl` block for a name that is not a type is a checker error, not
+    /// a parse error, so the parser accepts it and lets the checker report
+    /// the precise reason.
+    #[test]
+    fn impl_of_unknown_type_parses() {
+        assert!(parse_source("impl Missing:\n    fn a(self):\n        return 1").is_ok());
+    }
+
+    #[test]
+    fn impl_rejects_missing_type_name() {
+        assert!(parse_source("impl:\n    fn a(self):\n        return 1").is_err());
+        assert!(parse_source("impl P:\n    fn (self):\n        return 1").is_err());
     }
 }

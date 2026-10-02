@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.4.0
+
+### Stage 3: `impl` blocks and methods
+- `impl T:` attaches functions to a type declared in the same module.
+  `fn name(self)` is a method, called `v.name(...)`; `fn name(mut self)`
+  additionally writes its result back into the receiver, so
+  `p.moved(1.0, 1.0)` means `p = moved(p, 1.0, 1.0)`; `fn name()` is an
+  associated function, called `T.name(...)`.
+- Writing through a read-only `self` is a compile error. `self` is a copy
+  under value semantics, so such a write would be silently discarded --
+  the compiler says so instead of letting it look meaningful.
+- A `mut self` method must return the record: its result *is* the new
+  receiver, so anything else would clobber it with the wrong type.
+- A `mut self` call on a receiver with no storage still evaluates, it just
+  has nowhere to write. That is what makes `q.moved(1, 1).moved(2, 2)`
+  read as one expression.
+- Orphan impls are refused: an `impl` must live with its `type`. Two
+  modules holding incompatible layouts for one name is exactly what a
+  static type system cannot represent.
+- Resolution order for `base.attr(...)` is module, associated function,
+  impl method, then builtin sugar. Methods therefore win over the sugar,
+  so a type may define its own `push`. An unresolved base still takes
+  sugar, which is what keeps `x.push(1)` working on dynamic values.
+  Dynamic dispatch on an unresolved receiver is Stage 4.
+- Methods are their own analysis scope under `Type.method` keys in
+  `nx-ir` and `nx-mem`, so they never collide with same-named plain
+  functions in the effect or memory plans.
+- A method is never memoized. Purity analysis reasons about a function's
+  own body, but a `mut self` method's contract extends past it: the call
+  writes back at the call site, and a cache hit would skip that write.
+- Method dispatch types come from the checker, not from the unboxing
+  decision. `NX_NOUNBOX=1` keeps working method for method, so the opt-out
+  stays a debug switch instead of becoming a second language.
+
+### Fixed
+- A method receiver was emitted twice in the backend -- once to learn its
+  static type, once to build the argument list. For a `mut self` receiver
+  that ran the write-back twice, so `q.moved(1, 1).moved(1, 1)` advanced
+  `q` three times instead of once. Receivers are now evaluated once.
+- `nx_memo_put` was emitted from a second lookup of the memo id, so a
+  function could write a cache entry it never read, under an id belonging
+  to another function. The prologue's decision is now the only one.
+- Checking a function body consumed the enclosing scope, so every
+  statement after the first `fn` in a module saw an empty module and
+  reported its variables undefined. The locals are now returned instead
+  of taken.
+- `T.m(...)` asked the expression checker about `T`, which is a type and
+  not a binding, so it was reported undefined. Associated-function calls
+  are now resolved before the base is evaluated as a value.
+- `self` was a keyword the expression parser did not accept, so
+  `self.x = 1` -- the whole reason `mut self` exists -- did not parse.
+
+### Tooling
+- `tools/verify.ps1` runs every example three ways -- interpreter, native,
+  and native with `NX_NOUNBOX=1` -- and diffs the output. All 13 examples
+  must agree; a disagreement is a build failure.
+- All five benchmarks still match their Rust reference output.
+
 ## v0.3.0
 
 ### Purity-directed automatic memoization

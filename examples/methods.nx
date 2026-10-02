@@ -1,0 +1,114 @@
+# Methods: `impl` blocks attach behavior to a type.
+#
+# An `impl` block adds functions to a type declared in the same module.
+# `fn name(self)` is a method -- called as `v.name(...)`. `fn name(mut self)`
+# additionally writes its result back into the receiver, so the caller sees
+# the change: `p.moved(1.0, 1.0)` means `p = moved(p, 1.0, 1.0)`. A `fn`
+# with no receiver is an associated function, called as `T.name(...)`.
+
+type Point:
+    x: Float
+    y: Float
+
+type Counter:
+    n: Int
+
+# --- methods ----------------------------------------------------------
+impl Point:
+    fn area(self):
+        return self.x * self.y
+
+    fn scaled(self, k):
+        return Point(self.x * k, self.y * k)
+
+    # `mut self` mutates its own copy and returns it; the caller gets the
+    # result written back, so the receiver really does change.
+    fn moved(mut self, dx, dy):
+        self.x = self.x + dx
+        self.y = self.y + dy
+        return self
+
+    # An associated function: no receiver, so it is called on the type.
+    fn origin():
+        return Point(0.0, 0.0)
+
+    fn describe(self):
+        return self.area()
+
+# --- associated functions ---------------------------------------------
+# A factory that needs no instance, and a constructor that the type
+# itself routes through.
+impl Counter:
+    fn zero():
+        return Counter(0)
+
+    fn counted(n):
+        return Counter(n)
+
+    fn bumped(mut self):
+        self.n = self.n + 1
+        return self
+
+    fn get(self):
+        return self.n
+
+p = Point(3.0, 4.0)
+
+# --- calling a method -------------------------------------------------
+print(p.area())
+print(p.scaled(2.0))
+print(Point.origin())
+
+# --- `mut self` writes back -------------------------------------------
+print(p)
+p.moved(1.0, -2.0)
+print(p)
+print(p.area())
+
+# Chaining works: a `mut self` call evaluates to its result, and with no
+# storage on the intermediate value there is nothing to write back to.
+q = Point(0.0, 0.0)
+print(q.moved(1.0, 1.0).moved(1.0, 1.0).area())
+print(q)
+
+# --- one type's methods on another value ------------------------------
+print(Point(5.0, 6.0).area())
+
+# --- associated functions and mut methods together ---------------------
+c = Counter.zero()
+print(c.get())
+c.bumped()
+c.bumped()
+print(c.get())
+print(Counter.counted(41).get())
+
+# --- methods in expressions -------------------------------------------
+# A method call is an expression, so it composes like any other.
+pts = [Point(1.0, 2.0), Point(3.0, 4.0)]
+total = 0.0
+for pt in pts:
+    total = total + pt.area()
+print(total)
+
+# A list of records, each moved in turn.
+for pt in pts:
+    pt.moved(10.0, 10.0)
+    print(pt)
+
+# --- methods read fields, not the record ------------------------------
+# Value semantics: `self` is a copy, so a read-only method that writes
+# through it would be silently pointless. `mut self` is the way to change.
+q2 = p.scaled(3.0)
+print(q2.area())
+print(p.area())
+
+# A `mut self` method reads the value it is given. Writing through a
+# plain `self` is a compile error, because the write would be discarded.
+
+# --- builtin sugar still works ---------------------------------------
+# `xs.push(1)` is `push(xs, 1)`, and it resolves after methods do, so a
+# type may define its own `push` to override the default.
+xs = [1, 2]
+xs.push(3)
+print(xs)
+print(xs.len())

@@ -72,6 +72,15 @@ pub enum Stmt {
         fields: Vec<Field>,
         span: Span,
     },
+    /// `impl Point:` followed by an indented block of `fn` definitions.
+    /// Module-level only, in the type's own module (the orphan rule).
+    /// Carries no runtime value: the checker registers the methods and
+    /// the backends emit them as ordinary functions.
+    Impl {
+        type_name: String,
+        methods: Vec<Method>,
+        span: Span,
+    },
     Import { module: String, alias: Option<String>, span: Span },
     FromImport { module: String, names: Vec<(String, Option<String>)>, span: Span },
     /// `del a`, `del a[i]`, `del p.x`
@@ -89,6 +98,35 @@ pub struct Field {
     /// which is what keeps a record usable before the field's type is
     /// pinned down by how it is used.
     pub ty: String,
+}
+
+/// How a method receives its type: shared, exclusive, consuming, or not
+/// a method at all. `Mut` and `Own` are accepted from Stage 3; `Own`
+/// gains true move semantics in Stage 6, and until then behaves as a
+/// copy with documented intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverKind {
+    /// `fn origin():` -- associated function, no receiver.
+    None,
+    /// `fn area(self):` -- read-only receiver.
+    Read,
+    /// `fn moved(mut self, ...):` -- caller-visible mutation via
+    /// write-back; must return the record type.
+    Mut,
+    /// `fn consume(own self):` -- consuming receiver (Stage 6 semantics).
+    Own,
+}
+
+/// One method inside an `impl` block. Parameters exclude the receiver:
+/// `self` / `mut self` / `own self` is carried separately because it
+/// governs checking (purity, return-type rule, write-back), not arity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Method {
+    pub name: String,
+    pub receiver: ReceiverKind,
+    pub params: Vec<String>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
 }
 
 /// Somewhere an assignment can write. Reading one yields an [`Expr`], so

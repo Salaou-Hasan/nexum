@@ -125,6 +125,11 @@ fn mangle_desc(module: &str, name: &str) -> String {
     format!("nx__d_{}__{module}__{name}", name.len())
 }
 
+fn mangle_method(module: &str, type_name: &str, method: &str) -> String {
+    // Length-prefixed segments, so `a.B` + `c` can never alias `a` + `B.c`.
+    format!("nx__m_{}__{module}__{type_name}__{method}", method.len())
+}
+
 fn mangle_init(module: &str) -> String {
     format!("nx__init_{module}")
 }
@@ -135,7 +140,7 @@ fn mangle_done(module: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_entry, compile_opts, mangle_fn};
+    use super::{compile_entry, compile_opts, mangle_fn, mangle_method};
 
     /// Structural invariant: `define` may only appear at brace depth 0.
     /// (Catches outlined functions emitted mid-body.)
@@ -312,13 +317,185 @@ mod tests {
     /// Body of one emitted function, so a test can assert on its code
     /// without matching the prelude.
     fn body_of(ir: &str, mangled: &str) -> String {
-        let key = format!("define %NxVal @{mangled}(");
         let start = ir
-            .find(&key)
+            .find(&format!("define %NxVal @{mangled}("))
             .unwrap_or_else(|| panic!("no function {mangled} in output"));
         let rest = &ir[start..];
         let end = rest[1..].find("\ndefine ").map(|i| i + 1).unwrap_or(rest.len());
         rest[..end].to_string()
+    }
+
+    /// Body of a `void` function -- the module initializer, which is where
+    /// every top-level statement lands.
+    fn void_body_of(ir: &str, mangled: &str) -> String {
+        let start = ir
+            .find(&format!("define void @{mangled}("))
+            .unwrap_or_else(|| panic!("no function {mangled} in output"));
+        let rest = &ir[start..];
+        let end = rest[1..].find("\ndefine ").map(|i| i + 1).unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
+    // --- impl blocks and methods ------------------------------------
+
+    const POINT: &str = "type P:\n    x: Int\n    y: Int\n";
+
+    #[test]
+    fn method_bodies_emit_as_functions() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn sum(self):\n        return self.x + self.y\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        // A method mangles to `Type.method` under its own symbol, so a
+        // method can never collide with a same-named plain function.
+        let sym = mangle_method("__main__", "P", "sum");
+        assert!(ir.contains(&format!("define %NxVal @{sym}(")), "missing {sym}:\n{ir}");
+        assert!(
+            !ir.contains(&format!("define %NxVal @{}(", mangle_fn("__main__", "P.sum"))),
+            "the `Type.method` key must not collide with a plain function name"
+        );
+    }
+
+    /// `self` is a parameter, not a special register: value semantics give
+    /// the method its own copy to mutate, so the body clones it on entry.
+    #[test]
+    fn self_is_cloned_on_entry() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn plus(mut self, d):\n        self.x = self.x + d\n        return self\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_method("__main__", "P", "plus"));
+        assert!(b.contains("call %NxVal @nx_clone"), "self must be copied:\n{b}");
+    }
+
+    #[test]
+    fn associated_function_takes_no_self() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn zero():\n        return P(0, 0)\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_method("__main__", "P", "zero"));
+        assert!(
+            !b.contains("@nx_clone"),
+            "an associated function has no receiver to copy:\n{b}"
+        );
+    }
+
+    /// The whole point of `mut self`: the call's result is stored back
+    /// into the receiver variable.
+    #[test]
+    fn mut_self_call_writes_back_into_the_receiver() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn plus(mut self, d):\n        self.x = self.x + d\n        return self\np = P(1, 1)\np.plus(2)\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        assert!(
+            top.contains(&mangle_method("__main__", "P", "plus")),
+            "the call must be emitted:\n{top}"
+        );
+        // A store into the global holding the receiver, after the call.
+        let call_at = top.find(&mangle_method("__main__", "P", "plus")).unwrap();
+        let after = &top[call_at..];
+        assert!(
+            after.contains("store %NxVal") && after.contains("@nx__g___main____p"),
+            "the result must be written back to p:\n{after}"
+        );
+    }
+
+    /// A `mut self` call whose base has no storage evaluates but does not
+    /// write, which is what lets a chain read as one expression.
+    #[test]
+    fn mut_self_on_a_temporary_does_not_write_back() {
+        // `p.plus(2)` does write back, because `p` is a variable. A
+        // receiver built by a call has no storage, so the update has
+        // nowhere to go and only the result survives.
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn plus(mut self, d):\n        self.x = self.x + d\n        return self\n    fn total(self):\n        return self.x\nprint(P(1, 1).plus(2).total())\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        let call_at = top.find(&mangle_method("__main__", "P", "plus")).unwrap();
+        // Only the instruction right after the call: a write-back stores
+        // the result back into the receiver, so nothing may be stored
+        // between the call returning and the next value being prepared.
+        let after: Vec<&str> = top[call_at..].lines().skip(1).take(1).collect();
+        assert!(
+            !after.iter().any(|l| l.contains("store")),
+            "a temporary receiver has nowhere to write: {after:?}"
+        );
+    }
+
+    /// The receiver must be evaluated exactly once. It is emitted to learn
+    /// its static type, and emitting it again to build the argument list
+    /// would run a `mut self` chain's write-back twice.
+    #[test]
+    fn a_method_receiver_is_evaluated_once() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn plus(mut self, d):\n        self.x = self.x + d\n        return self\n    fn total(self):\n        return self.x\np = P(1, 1)\nprint(p.plus(2).plus(3).total())\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        assert_eq!(
+            top.matches(&format!("call %NxVal @{}", mangle_method("__main__", "P", "plus"))).count(),
+            2,
+            "two `plus` calls in the source, two in the IR:\n{top}"
+        );
+    }
+
+    /// Methods resolve before builtin sugar, so a type may define its own
+    /// `push` and it wins.
+    #[test]
+    fn a_method_resolves_before_builtin_sugar() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn push(self, v):\n        return self.x + v\np = P(1, 0)\nprint(p.push(41))\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        assert!(
+            top.contains(&mangle_method("__main__", "P", "push")),
+            "the method must win over the builtin:\n{top}"
+        );
+    }
+
+    /// A record receiver's type comes from the receiver, not from
+    /// inference, so method dispatch has to keep working when unboxing is
+    /// switched off. Otherwise NX_NOUNBOX would be a different language.
+    #[test]
+    fn methods_resolve_with_unboxing_off() {
+        let src = format!(
+            "{POINT}impl P:\n    fn sum(self):\n        return self.x + self.y\np = P(1, 2)\nprint(p.sum())\n"
+        );
+        for unbox_on in [true, false] {
+            let ir =
+                compile_opts(&src, std::path::Path::new("."), unbox_on).unwrap();
+            assert!(
+                ir.contains(&mangle_method("__main__", "P", "sum")),
+                "unbox_on={unbox_on}: method dispatch must not depend on unboxing:\n{ir}"
+            );
+            assert_top_level_defines(&ir);
+        }
+    }
+
+    /// A method is never memoized: its call has an effect the cache cannot
+    /// replay, because a `mut self` result is written back at the call site.
+    #[test]
+    fn methods_are_not_memoized() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn plus(mut self, d):\n        self.x = self.x + d\n        return self\np = P(1, 1)\np.plus(2)\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let b = body_of(&ir, &mangle_method("__main__", "P", "plus"));
+        assert!(!b.contains("@nx_memo_get"), "no cache read:\n{b}");
+        assert!(!b.contains("@nx_memo_put"), "no cache write:\n{b}");
     }
 
     #[test]
@@ -873,6 +1050,9 @@ struct Gen {
     /// alloca inside a loop body allocates fresh stack every iteration and
     /// is only released when the function returns.
     alloc_frames: Vec<AllocFrame>,
+    /// Memo id for the function being emitted, decided once in the
+    /// prologue so the epilogue cannot disagree with it.
+    memo_id: Option<i64>,
     /// Declared `type` layouts: (module, type) to field names in
     /// declaration order. Harvested from every program before emission,
     /// so a constructor in one module can use a layout from another.
@@ -881,9 +1061,23 @@ struct Gen {
     /// (declaring module, type). A bare `T(...)` in `cur` resolves
     /// through this exactly the way the checker does.
     type_alias: HashMap<(String, String), (String, String)>,
+    /// Methods by (declaring module, canonical type, method). Harvested
+    /// like layouts; `from m import T` brings T's methods along.
+    methods: HashMap<(String, String, String), MethodSig>,
     /// Type-descriptor globals already emitted, so two records in one
     /// module share one descriptor.
     desc_emitted: HashSet<String>,
+}
+
+/// A method signature as the backend sees it: explicit parameter names
+/// (excluding an implicit `self`), the receiver kind, and the body to
+/// emit. Bodies are emitted as ordinary functions under a mangled name.
+#[derive(Debug, Clone)]
+struct MethodSig {
+    params: Vec<String>,
+    receiver: nx_ast::ReceiverKind,
+    body: Vec<Stmt>,
+    span: Span,
 }
 
 /// Where a function's allocas have to be spliced back in: the byte offset
@@ -926,8 +1120,10 @@ impl Gen {
             term: None,
             loops: Vec::new(),
             alloc_frames: Vec::new(),
+            memo_id: None,
             layouts: HashMap::new(),
             type_alias: HashMap::new(),
+            methods: HashMap::new(),
             desc_emitted: HashSet::new(),
         }
     }
@@ -957,6 +1153,22 @@ impl Gen {
                             (module.clone(), name.clone()),
                             fields.iter().map(|f| f.name.clone()).collect(),
                         );
+                    }
+                    // Methods harvest like layouts: the checker has already
+                    // enforced the orphan rule, so the named type is declared
+                    // in this same module and the name is canonical.
+                    Stmt::Impl { type_name, methods, .. } => {
+                        for m in methods {
+                            self.methods.insert(
+                                (module.clone(), type_name.clone(), m.name.clone()),
+                                MethodSig {
+                                    params: m.params.clone(),
+                                    receiver: m.receiver,
+                                    body: m.body.clone(),
+                                    span: m.span,
+                                },
+                            );
+                        }
                     }
                     Stmt::FromImport { module: m, names, .. } => {
                         for (name, alias) in names {
@@ -1161,6 +1373,21 @@ impl Gen {
         if !self.unbox_on {
             return Ty::Unknown;
         }
+        self.types
+            .get(&(self.cur_module.clone(), self.cur_fn.clone()))
+            .and_then(|f| f.locals.get(name))
+            .cloned()
+            .unwrap_or(Ty::Unknown)
+    }
+
+    /// Static type of `name` in the function being emitted, ignoring the
+    /// unboxing opt-out. Method dispatch needs this: `self`'s type comes
+    /// from the receiver rather than from inference, so it is known even in
+    /// the all-boxed build. Unboxing is a representation choice, not a
+    /// typing one -- a call that resolves in one build must resolve in the
+    /// other, or NX_NOUNBOX stops being a debug switch and becomes a
+    /// different language.
+    fn ty_dispatch(&self, name: &str) -> Ty {
         self.types
             .get(&(self.cur_module.clone(), self.cur_fn.clone()))
             .and_then(|f| f.locals.get(name))
@@ -1537,6 +1764,16 @@ impl Gen {
                 self.emit_fn(module, name, params, body)?;
             }
         }
+        // Methods emit as ordinary functions under mangled names, in a
+        // stable order so the IR is reproducible run to run.
+        let mut mkeys: Vec<(String, String, String)> =
+            self.methods.keys().filter(|(m, _, _)| m == module).cloned().collect();
+        mkeys.sort();
+        for (m, t, meth) in mkeys {
+            if let Some(sig) = self.methods.get(&(m.clone(), t.clone(), meth.clone())).cloned() {
+                self.emit_method(&m, &t, &meth, &sig)?;
+            }
+        }
         // Module init body = top-level statements, guarded for import caching.
         self.in_init = true;
         self.term = None;
@@ -1590,6 +1827,54 @@ impl Gen {
         body: &[Stmt],
     ) -> Result<(), CodegenError> {
         let fname = mangle_fn(module, name);
+        self.emit_fn_inner(
+            module,
+            &fname,
+            Some(&(module.to_string(), name.to_string())),
+            name,
+            params,
+            body,
+        )
+    }
+
+    /// Emit a method body as an ordinary function. `fname` is the mangled
+    /// symbol, `key` the memo-table identity, and `scope` the
+    /// type-inference key (`Type.method`, matching the checker's
+    /// `inferred` map) used for unboxing decisions inside the body.
+    /// `self` (when present) binds positionally like any other parameter,
+    /// which under value semantics gives the method its own copy.
+    fn emit_method(
+        &mut self,
+        module: &str,
+        type_name: &str,
+        method: &str,
+        sig: &MethodSig,
+    ) -> Result<(), CodegenError> {
+        let fname = mangle_method(module, type_name, method);
+        let key = (module.to_string(), format!("{type_name}.{method}"));
+        let mut params = Vec::new();
+        if sig.receiver != nx_ast::ReceiverKind::None {
+            params.push("self".to_string());
+        }
+        params.extend(sig.params.clone());
+        let sig_body = sig.body.clone();
+        let _ = sig.span;
+        // A method is never memoized. Purity analysis reasons about a
+        // function's own body, but a `mut self` method's contract extends
+        // past it: the call writes its result back into the receiver. That
+        // write is real, caller-visible effect that a cache hit would skip.
+        self.emit_fn_inner(module, &fname, None, &key.1, &params, &sig_body)
+    }
+
+    fn emit_fn_inner(
+        &mut self,
+        module: &str,
+        fname: &str,
+        memo_key: Option<&(String, String)>,
+        scope: &str,
+        params: &[String],
+        body: &[Stmt],
+    ) -> Result<(), CodegenError> {
         self.locals.clear();
         self.rep.clear();
         self.term = None;
@@ -1597,7 +1882,11 @@ impl Gen {
         self.w("entry:");
         self.begin_allocs();
         // Memo prologue for purity-proven functions: hit returns cached.
-        let fnid = self.memo.get(&(module.to_string(), name.to_string())).copied();
+        // `memo_key` is None for anything whose call has effects the cache
+        // cannot replay -- methods, whose `mut self` result writes back into
+        // the receiver at the call site.
+        let fnid = memo_key.and_then(|k| self.memo.get(k).copied());
+        self.memo_id = fnid;
         if let Some(id) = fnid {
             let slot = self.alloca("%NxVal");
             let hit = self.reg();
@@ -1620,7 +1909,7 @@ impl Gen {
         let saved = self.cur_module.clone();
         let saved_fn = self.cur_fn.clone();
         self.cur_module = module.to_string();
-        self.cur_fn = name.to_string();
+        self.cur_fn = scope.to_string();
         for (i, p) in params.iter().enumerate() {
             // A proven scalar parameter lands straight in a typed slot;
             // everything else keeps the boxed ABI value.
@@ -1695,7 +1984,11 @@ impl Gen {
     /// Emit `ret` for a value, storing it in the memo cache first when
     /// the current function is memoized.
     fn emit_ret(&mut self, reg: Option<&str>) {
-        if let Some(id) = self.memo.get(&(self.cur_module.clone(), self.cur_fn.clone())).copied() {
+        // The memo id comes from the prologue's decision, never from a
+        // second lookup: a `put` without a matching `get` would populate
+        // the cache with an entry this function never reads, and worse,
+        // could reuse another function's id.
+        if let Some(id) = self.memo_id {
             if let Some(v) = reg {
                 self.w(&format!("  call void @nx_memo_put(i64 {id}, ptr %args, i64 %nargs, %NxVal {v})"));
             }
@@ -1860,6 +2153,11 @@ impl Gen {
             Stmt::TypeDecl { .. } => {
                 // A declaration is compile-time only. The layouts are
                 // harvested before emission, so there is nothing to emit.
+                Ok(())
+            }
+            Stmt::Impl { .. } => {
+                // Methods are harvested before emission and emitted as
+                // ordinary functions; there is nothing to emit inline.
                 Ok(())
             }
             Stmt::Print { values, .. } => {
@@ -3466,8 +3764,110 @@ impl Gen {
                     return self.emit_construct(&decl_module, &canon, name, args);
                 }
             }
-            if let Expr::Var(name, _) = callee {
-            if name == "len" {
+        if let Expr::Var(name, _) = callee {
+            if nx_types::builtin_arity(name).is_some() {
+                return self.emit_builtin(name, args, span);
+            }
+            let cur = self.cur_module.clone();
+            if self.arity.contains_key(&(cur.clone(), name.clone())) {
+                return self.emit_direct(&cur, name, args);
+            }
+            if let Some((m, f)) = self.falias.get(name).cloned() {
+                return self.emit_direct(&m, &f, args);
+            }
+            return Err(err(span, format!("unknown function '{name}'")));
+        }
+        if let Expr::Attr { base, attr, .. } = callee {
+            if let Expr::Var(m, _) = base.as_ref() {
+                if let Some(module) = self.modrefs.get(m).cloned() {
+                    // A type exported by the module constructs the same
+                    // way a local one does.
+                    if let Some(fields) = self.layouts.get(&(module.clone(), attr.clone())).cloned() {
+                        if args.len() != fields.len() {
+                            return Err(err(
+                                span,
+                                format!(
+                                    "type '{attr}' takes {} field{}, got {}",
+                                    fields.len(),
+                                    if fields.len() == 1 { "" } else { "s" },
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        return self.emit_construct(&module, attr, attr, args);
+                    }
+                    if self.is_module_fn(&module, attr) {
+                        return self.emit_direct(&module, attr, args);
+                    }
+                    return Err(err(span, format!("'{attr}' is not a function of '{module}'")));
+                }
+                // `T.m(...)` where T names a visible type: an associated
+                // function. The base is not a value, so there is no sugar
+                // fallback -- anything else is meaningless.
+                if let Some((decl, canon, _)) = self.resolve_type(m) {
+                    if let Some(sig) = self.methods.get(&(decl.clone(), canon.clone(), attr.clone())).cloned() {
+                        if sig.receiver != nx_ast::ReceiverKind::None {
+                            return Err(err(
+                                span,
+                                format!("method '{attr}' needs a receiver; call it on a '{canon}' value"),
+                            ));
+                        }
+                        return self.emit_method_call(&decl, &canon, attr, &sig, None, args, span);
+                    }
+                    return Err(err(span, format!("type '{canon}' has no associated function '{attr}'")));
+                }
+            }
+            // A record value dispatches to its type's method table. The
+            // base is evaluated once; its static type decides method
+            // versus sugar, so an unresolved base always takes sugar.
+            let recv = self.emit_expr(base)?;
+            // Dispatch types come from the checker, not from the unboxing
+            // decision: with unboxing off every `NV` is Unknown, and a
+            // method call that stopped resolving there would make the
+            // opt-out a different language. A bare variable can be asked
+            // directly, which is what keeps `self.area()` working.
+            let bt = match &recv.ty {
+                Ty::Unknown => match base.as_ref() {
+                    Expr::Var(n, _) => self.ty_dispatch(n),
+                    _ => Ty::Unknown,
+                },
+                t => t.clone(),
+            };
+            if let Ty::Record(t) = bt {
+                if let Some((decl, canon, _)) = self.resolve_type(&t) {
+                    if let Some(sig) = self.methods.get(&(decl.clone(), canon.clone(), attr.clone())).cloned() {
+                        return self.emit_method_call(&decl, &canon, attr, &sig, Some((base, &recv)), args, span);
+                    }
+                    // Records without the method fall through to sugar, so
+                    // a builtin that accepts records keeps working -- the
+                    // builtin's own check names any mismatch.
+                    if nx_types::builtin_arity(attr).is_none() {
+                        return Err(err(span, format!("type '{canon}' has no method '{attr}'")));
+                    }
+                } else {
+                    return Err(err(span, format!("unknown type '{t}'")));
+                }
+            }
+            // Builtin sugar: `xs.push(1)` for `push(xs, 1)`. The base
+            // expression is prepended and routed through the identical
+            // builtin path as a direct call.
+            if nx_types::builtin_arity(attr).is_some() {
+                let mut combined: Vec<Expr> = Vec::with_capacity(args.len() + 1);
+                combined.push((**base).clone());
+                combined.extend(args.iter().cloned());
+                return self.emit_builtin(attr, &combined, span);
+            }
+            return Err(err(span, "only modules, types and builtins support attribute calls".to_string()));
+        }
+        Err(err(span, "only direct calls are supported".to_string()))
+    }
+    /// Emit an ambient builtin by name. Direct calls (`push(xs, 1)`) and
+    /// sugar calls (`xs.push(1)`) share this path: sugar prepends the
+    /// base expression and arrives here with identical arguments, so the
+    /// two spellings cannot drift apart.
+    fn emit_builtin(&mut self, name: &str, args: &[Expr], span: Span) -> Result<NV, CodegenError> {
+        match name {
+            "len" => {
                 if args.len() != 1 {
                     return Err(err(span, "len() expects 1 argument".to_string()));
                 }
@@ -3478,9 +3878,9 @@ impl Gen {
                 // len is always an Int, so the payload can go straight on.
                 let n = self.reg();
                 self.w(&format!("  {n} = extractvalue %NxVal {r}, 1"));
-                return Ok(NV::raw(Ty::Int, n));
+                Ok(NV::raw(Ty::Int, n))
             }
-            if name == "push" {
+            "push" => {
                 if args.len() != 2 {
                     return Err(err(span, "push() expects 2 arguments".to_string()));
                 }
@@ -3526,45 +3926,83 @@ impl Gen {
                 }
                 let r = self.reg();
                 self.w(&format!("  {r} = call %NxVal @nx_none()"));
-                return Ok(NV::boxed_known(r, Ty::None));
+                Ok(NV::boxed_known(r, Ty::None))
             }
-            let cur = self.cur_module.clone();
-            if self.arity.contains_key(&(cur.clone(), name.clone())) {
-                return self.emit_direct(&cur, name, args);
-            }
-            if let Some((m, f)) = self.falias.get(name).cloned() {
-                return self.emit_direct(&m, &f, args);
-            }
-            return Err(err(span, format!("unknown function '{name}'")));
+            _ => Err(err(span, format!("unknown builtin '{name}'"))),
         }
-        if let Expr::Attr { base, attr, .. } = callee {
-            if let Expr::Var(m, _) = base.as_ref() {
-                if let Some(module) = self.modrefs.get(m).cloned() {
-                    // A type exported by the module constructs the same
-                    // way a local one does.
-                    if let Some(fields) = self.layouts.get(&(module.clone(), attr.clone())).cloned() {
-                        if args.len() != fields.len() {
-                            return Err(err(
-                                span,
-                                format!(
-                                    "type '{attr}' takes {} field{}, got {}",
-                                    fields.len(),
-                                    if fields.len() == 1 { "" } else { "s" },
-                                    args.len()
-                                ),
-                            ));
-                        }
-                        return self.emit_construct(&module, attr, attr, args);
-                    }
-                    if self.is_module_fn(&module, attr) {
-                        return self.emit_direct(&module, attr, args);
-                    }
-                    return Err(err(span, format!("'{attr}' is not a function of '{module}'")));
+    }
+
+    /// Emit a method or associated-function call. The receiver value (for
+    /// methods) is prepended to the argument boxes, so the callee sees
+    /// `self` positionally like any other parameter -- which under value
+    /// semantics gives the method its own copy to mutate.
+    ///
+    /// A `mut self` result is written back into the receiver when the
+    /// receiver has storage; a temporary base has nowhere to write, so the
+    /// call evaluates to its result alone.
+    fn emit_method_call(
+        &mut self,
+        decl_module: &str,
+        canon: &str,
+        method: &str,
+        sig: &MethodSig,
+        receiver: Option<(&Expr, &NV)>,
+        args: &[Expr],
+        span: Span,
+    ) -> Result<NV, CodegenError> {
+        let fname = mangle_method(decl_module, canon, method);
+        // The receiver is already evaluated -- the caller emitted it once to
+        // learn its type, and emitting it again here would run a `mut self`
+        // chain's write-back twice.
+        let mut vals: Vec<NV> = Vec::with_capacity(args.len() + 1);
+        if let Some((_, rv)) = receiver {
+            vals.push(rv.clone());
+        }
+        for a in args {
+            vals.push(self.emit_expr(a)?);
+        }
+        // The return type comes from inference when available; a `mut self`
+        // method returns the record by the checker's rule, which is what
+        // makes the write-back type-correct without an annotation.
+        let ret = if sig.receiver == nx_ast::ReceiverKind::Mut {
+            Ty::Record(canon.to_string())
+        } else {
+            self.types
+                .get(&(decl_module.to_string(), format!("{canon}.{method}")))
+                .map(|f| f.ret.clone())
+                .unwrap_or(Ty::Unknown)
+        };
+        let out = self.emit_call_boxed(&fname, &vals, ret)?;
+        // Write-back for `mut self`, when the receiver has storage. A
+        // temporary base has nowhere to write, so the call evaluates to its
+        // result alone -- which is what makes `q.moved(1, 1).moved(2, 2)`
+        // read as one expression.
+        if sig.receiver == nx_ast::ReceiverKind::Mut {
+            if let Some((base, _)) = receiver {
+                if let Some(t) = Self::target_of_expr(base) {
+                    self.store_target(&t, &out, span)?;
                 }
             }
-            return Err(err(span, "only direct module.attr() calls are supported".to_string()));
         }
-        Err(err(span, "only direct calls are supported".to_string()))
+        Ok(out)
+    }
+
+    /// Reinterpret a call receiver as an assignment target, for `mut self`
+    /// write-back. Mirrors the interpreter's helper: only shapes that have
+    /// storage qualify.
+    fn target_of_expr(e: &Expr) -> Option<nx_ast::Target> {
+        match e {
+            Expr::Var(name, _) => Some(nx_ast::Target::Name(name.clone())),
+            Expr::Index { base, index, .. } => Some(nx_ast::Target::Index {
+                base: base.clone(),
+                index: index.clone(),
+            }),
+            Expr::Attr { base, attr, .. } => Some(nx_ast::Target::Attr {
+                base: base.clone(),
+                field: attr.clone(),
+            }),
+            _ => None,
+        }
     }
 
     /// `Type(v0, v1, ...)` -- allocate the record, then fill each field in
@@ -3608,12 +4046,42 @@ impl Gen {
         args: &[Expr],
     ) -> Result<NV, CodegenError> {
         let fname = mangle_fn(module, name);
-        let n = args.len();
+        let ty = self.ret_ty(module, name);
+        self.emit_direct_named(&fname, args, ty)
+    }
+
+    /// Call an already-mangled function symbol with boxed ABI arguments.
+    /// Each argument expression is evaluated exactly once.
+    fn emit_direct_named(
+        &mut self,
+        fname: &str,
+        args: &[Expr],
+        ty: Ty,
+    ) -> Result<NV, CodegenError> {
+        let mut vals: Vec<NV> = Vec::with_capacity(args.len());
+        for a in args {
+            vals.push(self.emit_expr(a)?);
+        }
+        self.emit_call_boxed(fname, &vals, ty)
+    }
+
+    /// Call an already-mangled symbol with values that are *already*
+    /// evaluated. Method calls come through here rather than through
+    /// `emit_direct_named` because the receiver has to be emitted once: it
+    /// is evaluated to learn its static type, and a `mut self` receiver is
+    /// an expression with an effect of its own. Re-emitting it to build the
+    /// argument list would run that effect twice.
+    fn emit_call_boxed(
+        &mut self,
+        fname: &str,
+        vals: &[NV],
+        ty: Ty,
+    ) -> Result<NV, CodegenError> {
+        let n = vals.len();
         let arr = self.alloca(&format!("[{n} x %NxVal]"));
-        for (i, a) in args.iter().enumerate() {
-            let v = self.emit_expr(a)?;
+        for (i, v) in vals.iter().enumerate() {
             // The ABI is boxed: every argument re-boxes here.
-            let vb = self.unbox(&v);
+            let vb = self.unbox(v);
             let ep = self.reg();
             self.w(&format!("  {ep} = getelementptr [{n} x %NxVal], ptr {arr}, i64 0, i64 {i}"));
             self.w(&format!("  store %NxVal {vb}, ptr {ep}"));
@@ -3626,7 +4094,6 @@ impl Gen {
         }
         let r = self.reg();
         self.w(&format!("  {r} = call %NxVal @{fname}(ptr {p0}, i64 {n})"));
-        let ty = self.ret_ty(module, name);
         if let Some(ll) = ll_scalar(&ty) {
             let p1 = self.reg();
             self.w(&format!("  {p1} = extractvalue %NxVal {r}, 1"));
