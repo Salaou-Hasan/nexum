@@ -9,7 +9,17 @@ the code:
 | Tokens, literals, layout | `compiler/nx-lexer/src/lib.rs` |
 | Statements, expressions, precedence | `compiler/nx-parser/src/lib.rs` |
 | Types, methods, ambient builtins | `compiler/nx-types/src/lib.rs` |
-| Runtime meaning | `compiler/nx-codegen/src/runtime.ll` |
+| Operator result types | `fn arith_result`, `compiler/nx-types/src/lib.rs` |
+| Runtime meaning (arithmetic, strings, limits, `parallel:`) | this document: sections 3.1.1, 2.3, 4.2 |
+
+Runtime meaning is owned by this specification, not by a backend. There
+is one execution model (ahead-of-time compilation to a native
+executable), so a rule stated here has exactly one implementation to
+keep honest; `compiler/nx-codegen/src/runtime.ll` is an implementation of
+this document, not an authority over it. The one exception is the
+operator result matrix in `arith_result`, which is the checker-side owner
+of the type each operator produces, and which section 3.1.1 states in
+prose as well.
 
 Nexum is indentation-sensitive like Python and statically checked with no
 type annotations. `Int` is 64-bit signed, `Float` is an IEEE double.

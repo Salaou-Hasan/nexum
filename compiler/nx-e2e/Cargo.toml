@@ -1,16 +1,17 @@
 [package]
-name = "nx-interp"
+name = "nx-e2e"
 version = "0.4.4"
 edition = "2021"
 license = "MIT"
+publish = false
 
 [lib]
-name = "nx_interp"
+name = "nx_e2e"
 path = "src/lib.rs"
 
 [dependencies]
-nx-ast = { path = "../nx-ast" }
 nx-lexer = { path = "../nx-lexer" }
+nx-ast = { path = "../nx-ast" }
 nx-parser = { path = "../nx-parser" }
-nx-ir = { path = "../nx-ir" }
 nx-types = { path = "../nx-types" }
+nx-codegen = { path = "../nx-codegen" }

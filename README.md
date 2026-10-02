@@ -3,7 +3,6 @@
 Python-simple syntax. Native compiler. LLVM backend.
 
 ```powershell
-nx examples\hello.nx          # run (tree-walk interpreter)
 nx run examples\hello.nx      # build if stale, then run native
 nx check examples\hello.nx    # static type check
 nx build examples\hello.nx    # native exe via LLVM (needs clang)
@@ -13,13 +12,28 @@ nx update                     # self-update exe + extension
 nx setup --apply              # wire .nx icons into your VS Code theme
 ```
 
-Prototype with the interpreter, ship with the compiler:
+Write it once, the compiler ships the machine:
 
 ```
 parallel:          # tasks run on threads when conflict-free
     a = fib(20)    # (deterministic: same output every run)
     b = fib(20)
 ```
+
+## One execution model
+
+Nexum compiles ahead-of-time. Every program takes one path:
+
+```
+source -> lexer -> parser -> type check -> effect summary + memory plan
+       -> LLVM IR -> clang -O2 -> native executable
+```
+
+`nx <file.nx>` and `nx run <file.nx>` both end at that executable, and
+with no `-o` the executable is written next to its `.nx` source file.
+There is no second way to execute NX: the tree-walking interpreter was
+deleted rather than kept alongside the compiler, so every rule in
+`docs/grammar.md` has exactly one implementation behind it.
 
 ## What the compiler does for you
 
@@ -70,14 +84,13 @@ flag flip rebuilds instead of silently reusing a stale binary.
 - `compiler/nx-ast/` — AST
 - `compiler/nx-parser/` — recursive descent
 - `compiler/nx-types/` — static checker (`nx check`)
-- `compiler/nx-interp/` — tree-walk interpreter (`nx file.nx`)
 - `compiler/nx-ir/` — effect summaries (reads/writes/prints per function)
 - `compiler/nx-mem/` — memory planning (Unique/Shared per local)
 - `compiler/nx-codegen/` — LLVM IR backend (`nx build`)
 - `compiler/nx-driver/` — `nx` CLI
 - `editors/vscode-nexum/` — VS Code extension
 - `wix/` — Windows MSI installer
-- `tools/verify.ps1` — every example, three ways, diffed
+- `tools/verify.ps1` — every example, two ways, diffed
 - `bench/run.ps1` — Nexum vs Rust, correctness-gated
 - `examples/` — `.nx` samples
 

@@ -1,0 +1,125 @@
+# Records, methods, and the copies value semantics requires.
+#
+# Nothing in bench/ declares a `type` or an `impl`. The whole value model --
+# construction, field read and write, `self` as a copy, `mut self` writing
+# back, associated functions, structural equality, records inside lists and
+# dicts -- has no measurement at all. This workload is the one place where
+# those are the subject rather than the setup.
+#
+# The phases are ordered so the copy cost is visible separately from the
+# dispatch cost: phase 1 calls a read-only method, phase 3 calls a `mut
+# self` method (which clones the record, writes through it, and writes the
+# result back), and phase 4 measures a bare bind.
+
+type Cell:
+    v: Int
+    tag: Int
+
+impl Cell:
+    fn get(self):
+        return self.v
+
+    # `mut self` must return the record, and the caller writes the result
+    # back over the receiver.
+    fn bumped(mut self):
+        self.v = self.v + 1
+        self.tag = self.tag + self.v
+        return self
+
+    fn retagged(mut self, k):
+        self.tag = self.tag * 3 + k
+        return self
+
+    # An associated function: no receiver, so it is called on the type.
+    fn made(base):
+        return Cell(base, 0)
+
+    # A static read-only method: one clone on bind, no write-back.
+    fn folded(self):
+        return self.v * 2 + self.tag
+
+rounds = 2000000
+
+# --- 1. read-only method dispatch -------------------------------------
+# One clone per call, because `self` is a copy under value semantics.
+acc = 0
+c = Cell.made(1)
+r = 0
+while r < rounds:
+    acc = acc + c.get()
+    r = r + 1
+print(acc, c.v, c.tag)
+
+# --- 2. fold: two field reads through `self` --------------------------
+facc = 0
+r = 0
+while r < rounds:
+    facc = facc + c.folded()
+    r = r + 1
+print(facc)
+
+# --- 3. `mut self` in a loop over a list of records -------------------
+# Each iteration clones the record, mutates the clone, and the result is
+# written back over the loop variable -- and over nothing else. A `for`
+# loop variable is a fresh copy per iteration, so this loop leaves `cells`
+# exactly as it found it, which the printed `cells[0].v` and `cells[999].v`
+# show. Written over an index (`cells[i].bumped()`) the same method does
+# write back into the list, because then the receiver has storage.
+#
+# That asymmetry is a trap worth measuring rather than assuming: a `mut
+# self` method inside a `for` over a collection is silently a no-op on the
+# collection, and nothing in the type system says so.
+cells = []
+i = 0
+while i < 1000:
+    push(cells, Cell(i, i * 2))
+    i = i + 1
+
+tacc = 0
+pass = 0
+while pass < 20:
+    for cell in cells:
+        cell.bumped()
+        tacc = tacc + cell.v
+    pass = pass + 1
+print(tacc, cells[0].v, cells[999].v)
+
+# --- 4. copy on bind, with no call at all -----------------------------
+q = Cell(7, 9)
+q.v = 99
+p = q
+p.v = 1234
+print(q.v, p.v, q == p, q == Cell(99, 9))
+
+# --- 5. records inside containers -------------------------------------
+lod = []
+i = 0
+while i < 2000:
+    push(lod, Cell(i, i + 1))
+    i = i + 1
+
+idx = {}
+i = 0
+while i < 2000:
+    idx[i * 7] = Cell(i, i)
+    i = i + 1
+
+sacc = 0
+for cell in lod:
+    sacc = sacc + cell.folded()
+print(sacc, len(idx))
+
+dacc = 0
+for k in idx:
+    dacc = dacc + idx[k].v
+print(dacc)
+
+# --- 6. `mut self` chained on a call result ----------------------------
+# With no storage on the intermediate there is nowhere to write back to,
+# so this reads as one expression and allocates two records.
+chain = Cell.made(5).bumped().bumped().bumped()
+print(chain.v, chain.tag)
+
+# A list element has storage, so the write-back lands in the list.
+cells[0].retagged(2)
+print(cells[0].tag)

@@ -1,0 +1,95 @@
+# Allocation pressure: how much it costs to make and throw away
+# containers.
+#
+# The other workloads build one or two large containers and keep them, so
+# nothing in the suite measures the allocate/free path. NX has no garbage
+# collector: a list or dict that goes out of scope is released by an
+# explicit `nx_free_val` walk over its elements at scope exit, and strings
+# are never released at all. Those three policies have very different costs
+# and this workload separates them.
+#
+# Every phase allocates and drops in a loop, so the peak footprint stays
+# flat and the time is genuinely the allocator rather than a growing heap.
+
+rounds = 400000
+
+# --- 1. small lists, 16 elements each ---------------------------------
+acc = 0
+r = 0
+while r < rounds:
+    t = []
+    i = 0
+    while i < 16:
+        push(t, r * 16 + i)
+        i = i + 1
+    acc = acc + t[0] + t[15] + len(t)
+    r = r + 1
+print(acc, rounds)
+
+# --- 2. dicts, 8 integer keys each -------------------------------------
+# Each insert is a linear scan, so a dict of k entries costs k^2/2
+# comparisons to build. That cost is the subject of `dictops`; here what is
+# being counted is the malloc/free pair per entry plus the entry array.
+bacc = 0
+r = 0
+while r < rounds // 4:
+    d = {}
+    i = 0
+    while i < 8:
+        d[i] = r * 8 + i
+        i = i + 1
+    bacc = bacc + d[0] + d[7] + len(d)
+    r = r + 1
+print(bacc)
+
+# --- 3. nested lists: 8 inner lists of 8 inside one outer list ---------
+# Releasing the outer list has to walk into every inner list, so this is
+# the phase that measures the free walk rather than a single free.
+cacc = 0
+r = 0
+while r < rounds // 8:
+    outer = []
+    i = 0
+    while i < 8:
+        inner = []
+        j = 0
+        while j < 8:
+            push(inner, i * 8 + j)
+            j = j + 1
+        push(outer, inner)
+        i = i + 1
+    cacc = cacc + outer[0][0] + outer[7][7]
+    r = r + 1
+print(cacc)
+
+# --- 4. dicts built then halved by `del` ------------------------------
+# `del d[k]` compacts the entry array, so this phase measures two kinds of
+# reallocation: growing the array, then shrinking it.
+dacc = 0
+r = 0
+while r < rounds // 8:
+    d = {}
+    i = 0
+    while i < 32:
+        d[i] = i
+        i = i + 1
+    i = 0
+    while i < 16:
+        del d[i]
+        i = i + 1
+    dacc = dacc + len(d) + d[31]
+    r = r + 1
+print(dacc)
+
+# --- 5. strings, which are never released -----------------------------
+# `a + b` allocates and the runtime never frees a string, so this phase
+# grows the process without bound. It is here to make that visible rather
+# than to be efficient: the loop is short on purpose, and the peak working
+# set this workload reports is dominated by it.
+sacc = 0
+r = 0
+while r < 40000:
+    s = "abcdefghijklmnopqrstuvwxyz" + "0123456789"
+    sacc = sacc + len(s)
+    r = r + 1
+print(sacc)

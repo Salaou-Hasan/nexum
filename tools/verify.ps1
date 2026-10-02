@@ -1,90 +1,164 @@
-# Verifies every example three ways: the interpreter, a native build, and
-# a native build with unboxing disabled (NX_NOUNBOX=1). All three must
-# produce identical output, or the compiler is lying to somebody.
+# Differential harness: every example is built twice as a native executable and
+# both runs must produce identical output.
 #
-# Usage: pwsh -File tools\verify.ps1
+#   1. the default build      (unboxing on)
+#   2. NX_NOUNBOX=1           (every value boxed)
+#
+# The second build exists to prove the unboxing pass is a representation
+# change and not a language change. If they ever disagree, `NX_NOUNBOX` has
+# become a second language.
+#
+# There is deliberately NO interpreter axis. The tree-walking interpreter was
+# removed; Nexum compiles ahead-of-time and has exactly one execution model.
+# The compiler that produces the reference output is the same compiler whose
+# IR is being checked, so this harness cannot prove the compiler correct on
+# its own. It proves one thing: that the unboxing decision changes nothing
+# observable. Correctness is pinned by the expected-value tests in
+# compiler/nx-e2e, not here.
+#
+# Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify.ps1
+#
+# ASCII only: PowerShell 5.1 reads a BOM-less .ps1 as ANSI.
 $ErrorActionPreference = 'Continue'
-$nx = "$env:USERPROFILE\.cargo\bin\nx.exe"
-$root = Split-Path -Parent $PSScriptRoot
-$examples = Get-ChildItem "$root\examples\*.nx" | Sort-Object Name
-$fail = 0
 
-# Native command stderr arrives as PowerShell error records; anything on
-# this pattern is build chatter, not program output.
-function Get-Clean {
-    param([scriptblock]$Cmd)
-    $ErrorActionPreference = 'Continue'
-    $out = & $Cmd 2>&1 |
-        Where-Object {
-            "$_" -notmatch 'CategoryInfo|FullyQualifiedErrorId|At line|^\s*\+|^\s*$' -and
-            "$_" -notmatch 'warning: overriding the module target triple|warning generated|^nx: built '
-        }
-    return @($out | ForEach-Object { "$_" })
+$root = Split-Path -Parent $PSScriptRoot
+$nx = Join-Path (Join-Path (Join-Path $root 'target') 'debug') 'nx.exe'
+
+# Build the compiler under test. Using an installed copy from $CARGO_HOME\bin
+# would let this report all-green while testing a binary from many commits
+# ago, which is worse than not testing at all.
+Push-Location $root
+$env:CARGO_TARGET_DIR = Join-Path $root 'target'
+& cargo build -q -p nx-driver --offline 2>&1 | Out-Null
+$built = $LASTEXITCODE
+Pop-Location
+if ($built -ne 0 -or -not (Test-Path $nx)) {
+    Write-Host "FATAL: could not build the compiler under test at $nx"
+    exit 2
 }
 
-foreach ($ex in $examples) {
-    $name = $ex.Name
-    $stem = $ex.BaseName
+# The corpus is an explicit list, not a glob. A glob silently skips whatever
+# a naming convention happens to exclude; examples/modules/main.nx is exactly
+# that kind of file, and a recursive glob would also pick up module parts that
+# are not entry points.
+$examples = @(
+    'comments.nx', 'control.nx', 'fib.nx', 'flex.nx', 'funcs.nx',
+    'hello.nx', 'lists.nx', 'methods.nx', 'parallel.nx', 'records.nx',
+    'search.nx', 'syntax.nx', 'unbox.nx',
+    'modules/main.nx'
+)
+
+$fail = 0
+
+# Run an executable and capture its raw stdout as a single string, plus its
+# exit code. Output goes to a file rather than through PowerShell's pipeline,
+# because a native command's stderr becomes an error record here and any
+# pipeline filter would then have to guess what was program output and what
+# was build chatter. Bytes in, bytes out.
+function Invoke-Program {
+    param([string]$Exe, [string]$OutFile)
+    & $Exe 1> $OutFile 2> $null
+    return @{ Code = $LASTEXITCODE; Out = [IO.File]::ReadAllText($OutFile) }
+}
+
+function Normalize([string]$s) {
+    # CRLF and a trailing newline are not semantic. Everything else is.
+    return ($s -replace "`r`n", "`n").TrimEnd("`n")
+}
+
+foreach ($rel in $examples) {
+    $name = Split-Path $rel -Leaf
+    $stem = [IO.Path]::GetFileNameWithoutExtension($rel)
+    $src = Join-Path (Join-Path $root 'examples') $rel
+    if (-not (Test-Path $src)) {
+        Write-Host "FAIL $rel : example missing from the corpus list"
+        $fail++
+        continue
+    }
+
     $work = Join-Path $env:TEMP "nxverify_$stem"
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $work | Out-Null
-    # Copy the example plus the shared module directory, so cross-module
-    # examples resolve.
-    Copy-Item $ex.FullName $work
-    if (Test-Path "$root\examples\modules") {
-        Copy-Item -Recurse "$root\examples\modules" $work
+    Copy-Item $src (Join-Path $work $name) -Force
+    # Module examples import from examples/modules.
+    $modDir = Join-Path (Join-Path $root 'examples') 'modules'
+    if (Test-Path $modDir) {
+        Copy-Item -Recurse -Force $modDir $work
     }
-
-    $interp = Get-Clean { & $nx "$work\$name" }
 
     Push-Location $work
-    Get-Clean { & $nx build $name } | Out-Null
-    $buildOk = (Test-Path "$stem.exe")
-    Pop-Location
-    if (-not $buildOk) {
-        Write-Host "FAIL $name : native build failed"
-        $fail++
-        continue
-    }
-    $native = Get-Clean { & "$work\$stem.exe" }
+    try {
+        $exe = Join-Path $work "$stem.exe"
 
-    # Rebuild with unboxing off; the stamp makes nx skip an unchanged build,
-    # so the old executable has to go first.
-    $env:NX_NOUNBOX = '1'
-    Push-Location $work
-    Remove-Item "$stem.exe", "$stem.exe.nxstamp" -ErrorAction SilentlyContinue
-    Get-Clean { & $nx build $name } | Out-Null
-    $rebuildOk = (Test-Path "$stem.exe")
-    Pop-Location
-    $env:NX_NOUNBOX = ''
-    if (-not $rebuildOk) {
-        Write-Host "FAIL $name : NX_NOUNBOX build failed"
-        $fail++
-        continue
-    }
-    $unboxed = Get-Clean { & "$work\$stem.exe" }
-
-    $d1 = Compare-Object -ReferenceObject $interp -DifferenceObject $native
-    $d2 = Compare-Object -ReferenceObject $interp -DifferenceObject $unboxed
-    if ($d1 -or $d2) {
-        Write-Host "FAIL $name : paths disagree"
-        foreach ($pair in @(@('native', $d1), @('NX_NOUNBOX', $d2))) {
-            if ($pair[1]) {
-                Write-Host "  interpreter vs $($pair[0]):"
-                $pair[1] | ForEach-Object { Write-Host "    $($_.SideIndicator) $($_.InputObject)" }
-            }
+        # Build 1: default.
+        & $nx build $name -o $exe 1> build1.log 2>&1
+        $rc1 = $LASTEXITCODE
+        if ($rc1 -ne 0 -or -not (Test-Path $exe)) {
+            Write-Host "FAIL $rel : native build failed"
+            Get-Content build1.log -ErrorAction SilentlyContinue |
+                Select-Object -Last 5 | ForEach-Object { Write-Host "      $_" }
+            $fail++
+            continue
         }
-        $fail++
-    } else {
-        Write-Host ("ok   {0,-16} {1} lines" -f $name, $interp.Count)
+        $a = Invoke-Program $exe (Join-Path $work 'out1.txt')
+
+        # Build 2: unboxing off. The stamp file makes nx skip an unchanged
+        # build, and NX_NOUNBOX is deliberately absent from the stamp, so the
+        # previous executable and its stamp both have to go.
+        $env:NX_NOUNBOX = '1'
+        Remove-Item $exe, "$exe.nxstamp" -Force -ErrorAction SilentlyContinue
+        & $nx build $name -o $exe 1> build2.log 2>&1
+        $rc2 = $LASTEXITCODE
+        $env:NX_NOUNBOX = ''
+        if ($rc2 -ne 0 -or -not (Test-Path $exe)) {
+            Write-Host "FAIL $rel : NX_NOUNBOX build failed"
+            $fail++
+            continue
+        }
+        $b = Invoke-Program $exe (Join-Path $work 'out2.txt')
+
+        # Both runs must succeed. A program that fails identically on both
+        # paths would otherwise compare equal and report ok.
+        if ($a.Code -ne 0) {
+            Write-Host "FAIL $rel : native run exited $($a.Code)"
+            Write-Host "      $($a.Out.Trim())"
+            $fail++
+            continue
+        }
+        if ($b.Code -ne 0) {
+            Write-Host "FAIL $rel : NX_NOUNBOX run exited $($b.Code)"
+            Write-Host "      $($b.Out.Trim())"
+            $fail++
+            continue
+        }
+
+        $oa = Normalize $a.Out
+        $ob = Normalize $b.Out
+        if ($oa -ne $ob) {
+            Write-Host "FAIL $rel : unboxed and NX_NOUNBOX disagree"
+            Write-Host "      default   : $($oa -replace "`n", ' | ')"
+            Write-Host "      NX_NOUNBOX: $($ob -replace "`n", ' | ')"
+            $fail++
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($oa)) {
+            Write-Host "FAIL $rel : produced no output, so this proves nothing"
+            $fail++
+            continue
+        }
+        $count = ($oa -split "`n").Count
+        Write-Host ("ok   {0,-18} {1} lines" -f $rel, $count)
     }
-    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+    finally {
+        Pop-Location
+        Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host ""
 if ($fail -eq 0) {
-    Write-Host "all $($examples.Count) examples agree across interpreter / native / NX_NOUNBOX"
-} else {
-    Write-Host "$fail of $($examples.Count) examples disagree"
-    exit 1
+    Write-Host "all $($examples.Count) examples agree across default / NX_NOUNBOX"
+    exit 0
 }
+Write-Host "$fail of $($examples.Count) examples failed"
+exit 1

@@ -1,0 +1,37 @@
+﻿Nexum compiler performance measurement
+tag=hang3   runs=1  warmup=1  wall=7.77586267 min
+nx     : C:\nexum\target\release\nx.exe (nx 0.4.3)
+clang  : C:\Program Files\LLVM\bin\clang.exe (clang version 23.1.2 (https://github.com/llvm/llvm-project 85ac560262434c9ccfc0c183ec22d4138ed647fb))
+machine: Intel(R) Core(TM) 7 240H / 16 logical cores / 15.69 GB
+ps     : 5.1.26100.9444
+
+process-launch floor (median of 15) -- nothing below this is resolvable:
+  cmd /c exit       38.33 ms
+  nx --version      39.00 ms
+  clang --version   55.82 ms
+
+program          check_s   emit_ir   codegen   clang-c  link+drv   build_s     ll_KB   nxPK_MB   clPK_MB    exe_KB
+--------------------------------------------------------------------------------------------------------------------------
+funcs-50           0.037     0.047     0.010     0.299     0.139     0.485       270       5.9      17.9       198
+funcs-800          0.079     0.272     0.193     2.473    -0.383     2.362     3,148      24.0      17.9       507
+
+per-mode medians (s), with spread:
+program              mode      n        med       min       max      sd     cv%
+funcs-50            check      1     0.0374    0.0374    0.0374  0.0000     0.0
+funcs-50          dump-ir      1     0.0333    0.0333    0.0333  0.0000     0.0
+funcs-50          emit-ir      1     0.0474    0.0474    0.0474  0.0000     0.0
+funcs-50            build      1     0.4853    0.4853    0.4853  0.0000     0.0
+funcs-50        clangc-O2      1     0.2991    0.2991    0.2991  0.0000     0.0
+funcs-50         clang-O2      1     0.4125    0.4125    0.4125  0.0000     0.0
+funcs-800           check      1     0.0793    0.0793    0.0793  0.0000     0.0
+funcs-800         dump-ir      1    29.8832   29.8832   29.8832  0.0000     0.0
+funcs-800         emit-ir      1     0.2723    0.2723    0.2723  0.0000     0.0
+funcs-800           build      1     2.3624    2.3624    2.3624  0.0000     0.0
+funcs-800       clangc-O2      1     2.4729    2.4729    2.4729  0.0000     0.0
+funcs-800        clang-O2      1     3.6128    3.6128    3.6128  0.0000     0.0
+
+raw samples: C:\nexum\bench\compiler\results\compiler-hang3-raw.csv
+summary    : C:\nexum\bench\compiler\results\compiler-hang3-summary.csv
+derived    : C:\nexum\bench\compiler\results\compiler-hang3-derived.csv
+context    : C:\nexum\bench\compiler\results\compiler-hang3-context.json
+

@@ -32,13 +32,37 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --locked
-      - run: cargo run -q -p nx-driver -- check examples/hello.nx
-      - run: cargo run -q -p nx-driver -- check examples/modules/main.nx
-      - run: cargo run -q -p nx-driver -- examples/hello.nx
-      - run: cargo run -q -p nx-driver -- examples/lists.nx
+      - name: type-check hello
+        run: cargo run -q -p nx-driver -- check examples/hello.nx
+      - name: type-check modules/main
+        run: cargo run -q -p nx-driver -- check examples/modules/main.nx
+      # `nx <file.nx>` compiles to a native executable and runs it; there is
+      # no interpreter left to agree with, so these are smoke tests only --
+      # they prove the end-to-end path works on each OS. Every example is
+      # actually compiled and executed by the native job below.
+      - name: build and run hello natively
+        run: cargo run -q -p nx-driver -- examples/hello.nx
+      - name: build and run lists natively
+        run: cargo run -q -p nx-driver -- examples/lists.nx
 
   native:
-    # Interpreter and compiled binaries must print byte-identical output.
+    # nx compiles ahead of time to a native executable and does nothing else.
+    # The tree-walking interpreter has been deleted, so there is no second
+    # implementation left to diff against. Every gate below is therefore
+    # either "this example builds, runs, exits 0 and prints something" or
+    # "these two builds of the same program must agree with each other".
+    env:
+      # One canonical example list for every step in this job, deliberately
+      # in one place. When the list was inlined per step the copies drifted
+      # apart and records.nx, methods.nx and syntax.nx were left out of all
+      # of them, which left records, impl/mut self, del, comprehensions,
+      # slices and None with no native coverage anywhere in CI.
+      EXAMPLES: >-
+        examples/hello.nx examples/flex.nx examples/control.nx
+        examples/funcs.nx examples/lists.nx examples/search.nx
+        examples/records.nx examples/methods.nx examples/syntax.nx
+        examples/modules/main.nx examples/parallel.nx examples/fib.nx
+        examples/unbox.nx examples/comments.nx
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -52,31 +76,40 @@ jobs:
       - name: install clang (windows)
         if: runner.os == 'Windows'
         run: choco install llvm -y --no-progress
-      - name: interp vs native must match
+      - name: every example must build and run natively
         shell: bash
         run: |
-          norm() { tr -d '\r' < "$1"; }
-          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx examples/unbox.nx examples/comments.nx; do
+          # nx is a compiler now. For each example: compile it to a native
+          # executable, run that executable, and require a clean exit plus
+          # non-empty stdout. A silent binary is a broken binary.
+          for f in $EXAMPLES; do
             safe="$(echo "$f" | tr '/.' '__')"
             out="probe-$safe"
             if [ "${RUNNER_OS}" = "Windows" ]; then out="probe-$safe.exe"; fi
-            cargo run -q -p nx-driver -- "$f" > want.txt
             cargo run -q -p nx-driver -- build "$f" -o "$out"
-            "./$out" > got.txt
-            if ! diff <(norm want.txt) <(norm got.txt); then
-              echo "MISMATCH $f"
-              echo "--- want bytes:"; od -c want.txt | head -20
-              echo "--- got bytes:"; od -c got.txt | head -20
+            rc=0
+            "./$out" > got.txt || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "NONZERO EXIT $f (rc=$rc)"
+              echo "--- output bytes:"; od -c got.txt | head -20
               exit 1
             fi
+            if [ ! -s got.txt ]; then
+              echo "NO OUTPUT $f"
+              exit 1
+            fi
+            echo "ok $f -> $(wc -c < got.txt) bytes"
+            rm -f "$out"
           done
       - name: unboxed and NX_NOUNBOX builds must agree
         shell: bash
         run: |
           # The unboxing pass must not change observable behavior, only
-          # representation: same program, same output, either way.
+          # representation: same program, same output, either way. Checked
+          # over every example, not a hand-picked few, because an
+          # optimization pass can misfire on any construct.
           norm() { tr -d '\r' < "$1"; }
-          for f in examples/unbox.nx examples/funcs.nx examples/control.nx examples/lists.nx; do
+          for f in $EXAMPLES; do
             safe="$(echo "$f" | tr '/.' '__')"
             cargo run -q -p nx-driver -- build "$f" -o "un-$safe"
             NX_NOUNBOX=1 cargo run -q -p nx-driver -- build "$f" -o "bx-$safe"
@@ -90,8 +123,8 @@ jobs:
       - name: parallel must actually spawn threads
         shell: bash
         run: |
-          # A parallel batch that silently ran inline would pass the
-          # differential test while doing no work at all, so assert on
+          # A parallel batch that silently ran inline would still print the
+          # expected output while doing no work at all, so assert on
           # the generated IR directly.
           for f in examples/parallel.nx; do
             cargo run -q -p nx-driver -- build "$f" --emit-ir > out.ll
@@ -129,10 +162,24 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
-          for f in examples/hello.nx examples/flex.nx examples/control.nx examples/funcs.nx examples/lists.nx examples/search.nx examples/modules/main.nx examples/parallel.nx examples/fib.nx examples/unbox.nx examples/comments.nx; do
+          # Same pipeline as every other step, plus ASan via NX_CFLAGS. The
+          # program must run clean: exit 0 and no sanitizer diagnostic
+          # anywhere in its output. ASan writes to stderr, so capture it.
+          for f in $EXAMPLES; do
             safe="$(echo "$f" | tr '/.' '__')"
             NX_CFLAGS="-fsanitize=address -g" cargo run -q -p nx-driver -- build "$f" -o "asan-$safe"
-            ./asan-$safe > got.txt
-            cargo run -q -p nx-driver -- "$f" > want.txt
-            diff want.txt got.txt || (echo "MISMATCH $f"; exit 1)
+            rc=0
+            "./asan-$safe" > got.txt 2>&1 || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "ASAN RUN FAILED $f (rc=$rc)"
+              head -40 got.txt
+              exit 1
+            fi
+            if grep -q 'AddressSanitizer' got.txt; then
+              echo "ASAN DIAGNOSTIC $f"
+              head -40 got.txt
+              exit 1
+            fi
+            echo "asan clean $f"
+            rm -f "asan-$safe"
           done

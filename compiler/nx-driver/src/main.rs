@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx> (interpret)\n       nx run <file.nx> (build if needed, run native)\n       nx --lex <file.nx>\n       nx --parse <file.nx>\n       nx --run <file.nx> (interpret)\n       nx check <file.nx>\n       nx dump-ir <file.nx>\n       nx build <file.nx> [-o <out>] [--run]\n       nx --version\n       nx --license\n       nx setup [--apply]\n       nx update [--version <ver>]".to_string()
+    "usage: nx <file.nx>              (build to native and run it)\n       nx run <file.nx> [-o <out>]    (build if needed, run native)\n       nx build <file.nx> [-o <out>] [--run] [--emit-ir]\n       nx check <file.nx>             (type check only, no output file)\n       nx dump-ir <file.nx>           (print the LLVM IR)\n       nx --lex <file.nx> | --parse <file.nx>\n       nx --version | --license\n       nx setup [--apply] | nx update [--version <ver>]\n\nCompilation is ahead-of-time: every program becomes a native executable.\nWith no -o, the executable is written next to its .nx source file.".to_string()
 }
 
 const UPDATE_REPO: &str = "Salaou-Hasan/nexum";
@@ -29,11 +29,38 @@ fn main() -> ExitCode {
     if args.len() == 3 && args[1] == "--parse" {
         return parse_file(&args[2]);
     }
-    if args.len() == 3 && args[1] == "--run" {
-        return run_file(&args[2]);
-    }
-    if args.len() == 3 && args[1] == "run" {
-        return run_native(&args[2]);
+
+    // nx run <file.nx> [-o <out>] -- build if needed, then run natively.
+    if args.len() >= 3 && args[1] == "run" {
+        let mut file: Option<String> = None;
+        let mut out: Option<String> = None;
+        let mut i = 0;
+        while i < args[2..].len() {
+            match args[2 + i].as_str() {
+                "-o" => {
+                    i += 1;
+                    if 2 + i >= args.len() {
+                        eprintln!("usage: nx run <file.nx> [-o <out>]");
+                        return ExitCode::from(2);
+                    }
+                    out = Some(args[2 + i].clone());
+                }
+                f if file.is_none() => file = Some(f.to_string()),
+                _ => {
+                    eprintln!("usage: nx run <file.nx> [-o <out>]");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 1;
+        }
+        let file = match file {
+            Some(f) => f,
+            None => {
+                eprintln!("usage: nx run <file.nx> [-o <out>]");
+                return ExitCode::from(2);
+            }
+        };
+        return run_native(&file, out.as_deref());
     }
     if args.len() == 3 && args[1] == "check" {
         return check_file(&args[2]);
@@ -44,9 +71,10 @@ fn main() -> ExitCode {
     if args.len() >= 3 && args[1] == "build" {
         return build_cmd(&args[2..]);
     }
-    // Default: nx <file.nx> runs the program.
+    // Default: `nx <file.nx>` compiles to a native executable and runs it.
+    // There is no interpreter path in this compiler.
     if args.len() == 2 && !args[1].starts_with('-') {
-        return run_file(&args[1]);
+        return run_native(&args[1], None);
     }
     eprintln!("{}", usage());
     ExitCode::from(2)
@@ -297,6 +325,17 @@ fn build_ir(file: &str) -> Result<String, ExitCode> {
 }
 
 fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
+    // Create the output directory if the caller asked for one that does not
+    // exist yet. Without this, `nx build a.nx -o build\release\a.exe` fails
+    // deep inside the linker with a message that says nothing about nx.
+    if let Some(dir) = std::path::Path::new(out).parent() {
+        if !dir.as_os_str().is_empty() && !dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("nx: cannot create output directory '{}': {e}", dir.display());
+                return Err(ExitCode::from(1));
+            }
+        }
+    }
     let ir = build_ir(file)?;
     let ll = std::env::temp_dir().join(format!("nxbuild-{}.ll", std::process::id()));
     if let Err(e) = std::fs::write(&ll, ir) {
@@ -347,8 +386,13 @@ fn default_exe_name(file: &str) -> String {
 }
 
 /// `nx run`: build the native exe when stale, then execute it.
-fn run_native(path: &str) -> ExitCode {
-    let out = default_exe_name(path);
+fn run_native(path: &str, out_override: Option<&str>) -> ExitCode {
+    // No -o means the executable lands beside its source file, so a project
+    // stays self-contained and nothing litters the working directory.
+    let out = match out_override {
+        Some(o) => o.to_string(),
+        None => default_exe_name(path),
+    };
     if up_to_date(path, &out) {
         println!("nx: up to date ({out})");
     } else if let Err(c) = build_exe(path, &out) {
@@ -361,52 +405,6 @@ fn run_native(path: &str) -> ExitCode {
         },
         Err(e) => {
             eprintln!("nx: cannot run {out}: {e}");
-            ExitCode::from(1)
-        }
-    }
-}
-
-fn run_file(path: &str) -> ExitCode {
-    let source = match read_source(path) {
-        Ok(s) => s,
-        Err(c) => return c,
-    };
-    let path = path.to_string();
-    // Run the interpreter on a thread with a large stack so deep (but
-    // bounded) Nexum recursion hits our CALL_LIMIT error instead of
-    // overflowing the small default Windows main-thread stack.
-    let child = std::thread::Builder::new()
-        .name("nx-run".to_string())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(move || -> Result<Vec<String>, String> {
-            let tokens = nx_lexer::lex(&source).map_err(|e| e.to_string())?;
-            let prog = nx_parser::parse(tokens).map_err(|e| e.to_string())?;
-            let base = std::path::Path::new(&path)
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or(".".into());
-            nx_interp::run_with_base(&prog, &base).map_err(|e| e.to_string())
-        });
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("nx: cannot spawn run thread: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    match child.join() {
-        Ok(Ok(lines)) => {
-            for line in lines {
-                println!("{line}");
-            }
-            ExitCode::SUCCESS
-        }
-        Ok(Err(e)) => {
-            eprintln!("nx: {e}");
-            ExitCode::from(1)
-        }
-        Err(_) => {
-            eprintln!("nx: interpreter crashed (stack overflow)");
             ExitCode::from(1)
         }
     }

@@ -320,26 +320,46 @@ function Invoke-Mode([string]$prog, [string]$mode, [string]$llPath, [string]$exe
 }
 
 # ---------------------------------------------------------------------------
-# Correctness gate: the corpus is only worth timing if it compiles to
-# something that agrees with the interpreter. Run once per program, untimed.
+# Correctness gate: the corpus is only worth timing if what it compiles to is
+# both sound and reproducible. There is no interpreter to use as a reference
+# any more, so the gate is: the program builds, runs, exits clean, prints
+# something, and two independent from-scratch builds of it agree byte for
+# byte. Run once per program, untimed.
 # ---------------------------------------------------------------------------
 if (-not $NoVerifyRun) {
     Write-Host ""
-    Write-Host "correctness gate (native vs interpreter, untimed)..." -ForegroundColor DarkGray
+    Write-Host "correctness gate (untimed)..." -ForegroundColor DarkGray
     foreach ($p in $programs) {
         $d = Join-Path $workRoot $p.BaseName
         New-Item -ItemType Directory -Force -Path $d | Out-Null
         $xe = Join-Path $d 'verify.exe'
+
+        # (a) it must build at all
         $b = [NxProc]::Run($NxExe, @('build', $p.FullName, '-o', $xe), $null, $PollMs, $TimeoutSec * 1000)
-        if ($b.ExitCode -ne 0 -or $b.Error) { Write-Host ("  {0,-16} BUILD FAILED" -f $p.BaseName) -ForegroundColor Red; $script:Failures += "$($p.BaseName): build failed"; continue }
+        if ($b.ExitCode -ne 0 -or $b.Error) {
+            Write-Host ("  {0,-16} BUILD FAILED {1}" -f $p.BaseName, $b.Error) -ForegroundColor Red
+            $script:Failures += "$($p.BaseName): build failed"; continue
+        }
         $nat = (& $xe 2>&1) -join "`n"
-        $r = [NxProc]::Run($NxExe, @($p.FullName), $null, $PollMs, $TimeoutSec * 1000)
-        # capture interpreter stdout through a temp file
-        $ip = Join-Path $d 'interp.txt'
-        $r2 = [NxProc]::Run($NxExe, @($p.FullName), $ip, $PollMs, $TimeoutSec * 1000)
-        $int = (Get-Content $ip -Raw -EA SilentlyContinue)
-        if ($nat.Trim() -ceq $int.Trim()) { Write-Host ("  {0,-16} MATCH   [{1}]" -f $p.BaseName, ($nat -replace "`n", ' ')) -ForegroundColor DarkGreen }
-        else { Write-Host ("  {0,-16} MISMATCH native=[{1}] interp=[{2}]" -f $p.BaseName, ($nat -replace "`n", ' '), ($int -replace "`n", ' ')) -ForegroundColor Red; $script:Failures += "$($p.BaseName): output mismatch" }
+        if ([string]::IsNullOrWhiteSpace($nat)) {
+            Write-Host ("  {0,-16} NO OUTPUT" -f $p.BaseName) -ForegroundColor Red
+            $script:Failures += "$($p.BaseName): produced no output"; continue
+        }
+
+        # (b) codegen must be deterministic: build again from scratch and
+        #     require byte-identical program output.
+        $xe2 = Join-Path $d 'verify2.exe'
+        $b2 = [NxProc]::Run($NxExe, @('build', $p.FullName, '-o', $xe2), $null, $PollMs, $TimeoutSec * 1000)
+        if ($b2.ExitCode -ne 0 -or $b2.Error) {
+            Write-Host ("  {0,-16} REBUILD FAILED {1}" -f $p.BaseName, $b2.Error) -ForegroundColor Red
+            $script:Failures += "$($p.BaseName): rebuild failed"; continue
+        }
+        $nat2 = (& $xe2 2>&1) -join "`n"
+        if ($nat.Trim() -cne $nat2.Trim()) {
+            Write-Host ("  {0,-16} NON-DETERMINISTIC BUILD" -f $p.BaseName) -ForegroundColor Red
+            $script:Failures += "$($p.BaseName): build not deterministic"; continue
+        }
+        Write-Host ("  {0,-16} OK  [{1}]" -f $p.BaseName, ($nat -replace "`n", ' ')) -ForegroundColor DarkGreen
     }
     if ($script:Failures.Count -gt 0) {
         Write-Host ""
@@ -367,31 +387,46 @@ foreach ($p in $programs) {
 
     # Warm-up: one untimed pass over every mode so the binary pages, the
     # source file and the temp dir are all in cache before sample 1.
+    $wu = "  warmup "
     foreach ($m in $modes) {
         $r = Invoke-Mode $p.FullName $m $llPath $exePath $objPath $stampPath
-        if ($r.Error) { Write-Host "  $m : $($r.Error)" -ForegroundColor Red }
+        $wu += ("{0}={1:N3}s " -f $m, $r.Seconds)
+        if ($r.Error) { $wu += "ERR($($r.Error)) " }
+        if ($r.ExitCode -ne 0 -and $r.ExitCode -ne -1) { $wu += "EXIT$($r.ExitCode) " }
     }
+    Write-Host $wu -ForegroundColor DarkGray
 
     $llBytes = 0; $exeBytes = 0
     if (Test-Path $llPath) { $llBytes = (Get-Item $llPath).Length }
     if (Test-Path $exePath) { $exeBytes = (Get-Item $exePath).Length }
 
     # Timed repeats. Modes are interleaved inside a repeat, NOT run in blocks:
-    # a 30-second background-load episode on a shared box then perturbs all
-    # modes of one repeat rather than poisoning one whole mode.
+    # a background-load episode on a shared box then perturbs all modes of one
+    # repeat rather than poisoning one whole mode.
+    #
+    # Each repeat also carries its own floor probe. This box is shared with
+    # other work, and load episodes are severe enough to inflate a single
+    # mode by 3-6x (observed: nx dump-ir on funcs-800 read 0.098 s standalone
+    # and 29.9 s inside a loaded repeat). A repeat whose floor is far above
+    # the session minimum is dropped from the statistics -- explicitly and
+    # reversibly, with the dropped rows still present in the raw CSV.
     for ($rep = 1; $rep -le $Runs; $rep++) {
-        $line = "  rep {0}/{1} " -f $rep, $Runs
+        $fp = @()
+        for ($k = 0; $k -lt 3; $k++) { $fp += ([NxProc]::Run($NxExe, @('--version'), $null, $PollMs, 120000)).Seconds }
+        $repFloor = ($fp | Sort-Object)[0]
+        $line = "  rep {0}/{1} floor={2:N1}ms " -f $rep, $Runs, ($repFloor * 1000)
         foreach ($m in $modes) {
             $r = Invoke-Mode $p.FullName $m $llPath $exePath $objPath $stampPath
             $null = $raw.Add([pscustomobject]@{
-                    program = $p.BaseName
-                    mode    = $m
-                    rep     = $rep
-                    seconds = $r.Seconds
-                    peak    = $r.PeakBytes
-                    polls   = $r.Polls
-                    exit    = $r.ExitCode
-                    error   = $r.Error
+                    program    = $p.BaseName
+                    mode       = $m
+                    rep        = $rep
+                    rep_floor_ms = [math]::Round($repFloor * 1000, 2)
+                    seconds    = $r.Seconds
+                    peak       = $r.PeakBytes
+                    polls      = $r.Polls
+                    exit       = $r.ExitCode
+                    error      = $r.Error
                 })
             $line += ("{0}={1:N3}s " -f $m, $r.Seconds)
         }
@@ -420,29 +455,44 @@ function Get-Stats($vals) {
     }
 }
 
+# A repeat is "clean" when its own floor probe is within $LoadFactor of the
+# quietest repeat observed anywhere in the session. Load on this box is
+# machine-wide, so one session-wide threshold is the right filter.
+$LoadFactor = 1.5
+$allFloors = @($raw | ForEach-Object { $_.rep_floor_ms } | Sort-Object -Unique)
+$floorMin = if ($allFloors.Count) { $allFloors[0] } else { 0 }
+$cleanFloors = @($allFloors | Where-Object { $_ -le $LoadFactor * $floorMin })
+Write-Host ""
+Write-Host ("repeat floors (ms, distinct): {0}" -f (($allFloors | ForEach-Object { '{0:N1}' -f $_ }) -join ', '))
+Write-Host ("clean repeats: floor <= {0:N1}ms ({1} of {2} distinct floor readings kept)" -f ($LoadFactor * $floorMin), $cleanFloors.Count, $allFloors.Count)
+
 $summary = @()
 foreach ($p in $programs) {
     foreach ($m in $modes) {
-        $rows = @($raw | Where-Object { $_.program -eq $p.BaseName -and $_.mode -eq $m })
-        if ($rows.Count -eq 0) { continue }
+        $all = @($raw | Where-Object { $_.program -eq $p.BaseName -and $_.mode -eq $m })
+        if ($all.Count -eq 0) { continue }
+        $rows = @($all | Where-Object { $_.rep_floor_ms -le $LoadFactor * $floorMin })
+        $dropped = $all.Count - $rows.Count
+        if ($rows.Count -eq 0) { $rows = $all; $dropped = 0 }
         $st = Get-Stats $rows.seconds
-        $pk = Get-Stats ($rows | Where-Object { $_.peak -gt 0 } | ForEach-Object { $_.peak })
+        $pkRows = @($rows | Where-Object { $_.peak -gt 0 })
+        $pkMax = if ($pkRows.Count) { ($pkRows | Measure-Object peak -Maximum).Maximum } else { 0 }
         $bad = @($rows | Where-Object { $_.exit -ne 0 -or $_.error })
-        $d = Join-Path $workRoot $p.BaseName
         $summary += [pscustomobject]@{
             program = $p.BaseName
             family = $(if ($manifest.ContainsKey("$($p.BaseName).nx")) { $manifest["$($p.BaseName).nx"].family } else { '' })
             axis = $(if ($manifest.ContainsKey("$($p.BaseName).nx")) { $manifest["$($p.BaseName).nx"].axis } else { '' })
             mode = $m
             n = $st.n
+            n_dropped = $dropped
             med_s = [math]::Round($st.med, 4)
             min_s = [math]::Round($st.min, 4)
             max_s = [math]::Round($st.max, 4)
             mean_s = [math]::Round($st.mean, 4)
             sd_s = [math]::Round($st.sd, 4)
             cv_pct = [math]::Round($st.cv * 100, 1)
-            peak_mb = $(if ($pk) { [math]::Round($pk.med / 1MB, 2) } else { [math]::Round(($rows | Measure-Object peak -Maximum).Maximum / 1MB, 2) })
-            peak_sampled = $rows[0].polls -gt 0
+            peak_mb = [math]::Round($pkMax / 1MB, 2)
+            peak_sampled = ($pkRows.Count -gt 0)
             bad_runs = $bad.Count
             samples_s = $st.vals
         }
@@ -519,7 +569,13 @@ $txtPath = Join-Path $OutDir "compiler-$Tag-report.txt"
 $raw | Export-Csv -Path $rawCsv -NoTypeInformation -Encoding UTF8
 $summary | Export-Csv -Path $sumCsv -NoTypeInformation -Encoding UTF8
 $derived | Export-Csv -Path $derCsv -NoTypeInformation -Encoding UTF8
-($machine + [ordered]@{ floors = @($floorCmd, $floorNx, $floorClang) }) | ConvertTo-Json -Depth 5 | Set-Content $jsPath -Encoding UTF8
+($machine + [ordered]@{
+    floors = @($floorCmd, $floorNx, $floorClang)
+    load_factor = $LoadFactor
+    repeat_floor_ms = $allFloors
+    clean_floor_ms = $cleanFloors
+    wall_minutes = [math]::Round($wall, 2)
+}) | ConvertTo-Json -Depth 5 | Set-Content $jsPath -Encoding UTF8
 
 $sb = New-Object System.Text.StringBuilder
 function W($s) { $null = $sb.AppendLine($s) }
@@ -544,9 +600,12 @@ foreach ($r in $derived) {
 }
 W ""
 W "per-mode medians (s), with spread:"
-W ("{0,-14} {1,10} {2,6} {3,10} {4,9} {5,9} {6,7} {7,7}" -f 'program', 'mode', 'n', 'med', 'min', 'max', 'sd', 'cv%')
+W ("repeat floors observed (ms): {0}" -f (($allFloors | ForEach-Object { '{0:N1}' -f $_ }) -join ', '))
+W ("clean-repeat filter: rep_floor <= {0:N1}ms ; {1} of {2} distinct readings kept" -f ($LoadFactor * $floorMin), $cleanFloors.Count, $allFloors.Count)
+W ""
+W ("{0,-14} {1,10} {2,4} {3,7} {4,10} {5,9} {6,9} {7,9} {8,7} {9,7}" -f 'program', 'mode', 'n', 'drop', 'med', 'min', 'max', 'sd', 'cv%', 'pkMB')
 foreach ($r in $summary) {
-    W ("{0,-14} {1,10} {2,6} {3,10:N4} {4,9:N4} {5,9:N4} {6,7:N4} {7,7:N1}" -f $r.program, $r.mode, $r.n, $r.med_s, $r.min_s, $r.max_s, $r.sd_s, $r.cv_pct)
+    W ("{0,-14} {1,10} {2,4} {3,7} {4,10:N4} {5,9:N4} {6,9:N4} {7,9:N4} {8,7:N1} {9,7:N1}" -f $r.program, $r.mode, $r.n, $r.n_dropped, $r.med_s, $r.min_s, $r.max_s, $r.sd_s, $r.cv_pct, $r.peak_mb)
 }
 W ""
 W "raw samples: $rawCsv"

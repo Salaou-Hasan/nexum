@@ -1,0 +1,100 @@
+# Recursion: cost per call, cost per unit of stack, and the price of the
+# copy that value semantics puts on every call.
+#
+# `fib` in bench/ is the only recursion benchmark, and it measures two
+# things at once -- call overhead and NX's automatic memoization -- at
+# depth 34. Three separate costs are invisible there:
+#
+#   1. a chain deep enough to put real pressure on the stack,
+#   2. a wide recursion that is cheap per frame but visits a lot of nodes,
+#   3. the clone that argument passing performs, which is the same cost
+#      measured against a payload instead of against a frame.
+#
+# Depth is capped at 350 on purpose. The native backend survives about
+# 7000 frames and then takes a real stack overflow with no diagnostic, and
+# the interpreter refuses at 500 frames by design (`CALL_LIMIT`). A
+# workload that has to stay inside both ceilings cannot honestly claim to
+# measure deep recursion; 350 is the compromise, and the ceilings are
+# reported in the audit rather than hidden.
+
+depth = 350
+rounds = 400000
+
+# --- 1. a deep chain, repeated ----------------------------------------
+# Each frame holds an accumulator and one argument, so this measures the
+# per-call cost at depth rather than at the top of the stack.
+fn chain(n, acc):
+    if n <= 0:
+        return acc
+    return chain(n - 1, acc + n)
+
+ctotal = 0
+r = 0
+while r < rounds:
+    ctotal = ctotal + chain(depth, 0)
+    r = r + 1
+print(ctotal)
+
+# --- 2. a wide recursion over a flat segment tree ---------------------
+# The tree is read from a module-level binding rather than passed as an
+# argument. That is not a style choice: NX containers copy on bind, so
+# `walk(t, node, b)` would clone the whole 524288-element table on every
+# one of the 524287 calls -- about 2.7e11 element copies. Written that way
+# the workload does not finish, and the process dies with an access
+# violation partway through. Reading the table from a global costs one
+# pointer read per node instead of one clone per node.
+#
+# This is the single most expensive thing value semantics costs in NX, and
+# it is why a recursive traversal over a container has to be written this
+# way rather than the obvious way.
+leaves = 524288
+base = 1
+while base < leaves:
+    base = base * 2
+
+tree = []
+i = 0
+while i < 2 * base:
+    push(tree, 0)
+    i = i + 1
+j = 0
+while j < base:
+    tree[base + j] = (j * 2654435761) % 65521
+    j = j + 1
+i = base - 1
+while i > 0:
+    tree[i] = tree[2 * i] + tree[2 * i + 1]
+    i = i - 1
+
+fn walk(node, b):
+    if node >= b:
+        return tree[node]
+    return walk(node * 2, b) + walk(node * 2 + 1, b)
+
+wtotal = walk(1, base)
+print(wtotal, base)
+
+# --- 3. the copy on bind, measured against a payload ------------------
+# `sum1` never writes through `xs`, but the call still clones it: NX
+# containers copy on bind and argument passing does not alias. This phase
+# is that same clone counted against payload instead of against a frame.
+fn sum1(xs):
+    t = 0
+    i = 0
+    while i < len(xs):
+        t = t + xs[i]
+        i = i + 1
+    return t
+
+payload = []
+i = 0
+while i < 64:
+    push(payload, i * 3 + 1)
+    i = i + 1
+
+stotal = 0
+r = 0
+while r < rounds:
+    stotal = stotal + sum1(payload)
+    r = r + 1
+print(stotal, len(payload))

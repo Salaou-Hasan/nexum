@@ -1,0 +1,43 @@
+﻿{
+    "timestamp":  "2026-10-02T16:50:41.0074291+00:00",
+    "tag":  "hang3",
+    "cpu":  "Intel(R) Core(TM) 7 240H",
+    "cores_logical":  16,
+    "ram_gb":  15.69,
+    "os":  "Microsoft Windows 11 Pro",
+    "nx_exe":  "C:\\nexum\\target\\release\\nx.exe",
+    "nx_version":  "nx 0.4.3",
+    "clang_exe":  "C:\\Program Files\\LLVM\\bin\\clang.exe",
+    "clang_version":  "clang version 23.1.2 (https://github.com/llvm/llvm-project 85ac560262434c9ccfc0c183ec22d4138ed647fb)",
+    "runs":  1,
+    "warmup":  1,
+    "poll_ms":  1,
+    "verify_max_bytes":  150000,
+    "ps_version":  "5.1.26100.9444",
+    "floor_cmd_ms":  38.33,
+    "floor_nx_ms":  39,
+    "floor_clang_ms":  55.82,
+    "floors":  [
+                   {
+                       "label":  "cmd /c exit",
+                       "n":  15,
+                       "min_ms":  27.23,
+                       "med_ms":  38.33,
+                       "max_ms":  68.06
+                   },
+                   {
+                       "label":  "nx --version",
+                       "n":  15,
+                       "min_ms":  22.05,
+                       "med_ms":  39,
+                       "max_ms":  83.94
+                   },
+                   {
+                       "label":  "clang --version",
+                       "n":  15,
+                       "min_ms":  43.21,
+                       "med_ms":  55.82,
+                       "max_ms":  64.6
+                   }
+               ]
+}

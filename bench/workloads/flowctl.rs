@@ -1,37 +1,40 @@
-// Same algorithm as flowctl.nx: n-queens for sizes 8..=11 by backtracking,
-// a 0/1 knapsack over a downwards inner loop, and a Collatz window whose
-// trip count comes from the data.
+// Same algorithm as flowctl.nx: n-queens for sizes 9..=11 by backtracking
+// over three bitmasks, a 0/1 knapsack with a downwards inner loop, and a
+// Collatz window whose trip count comes from the data.
 //
-// The queen solver here takes `&mut Vec<i8>` rather than a fresh vector per
-// node, so NX pays a list copy per node for its value semantics and this
-// side does not. That difference is the point of the row: it prices
-// copy-on-bind rather than hiding it.
+// All five arguments to `place` are i64, so NX memoizes it here as well
+// and this side does not. That difference is called out in the .nx header
+// rather than engineered away.
 
-fn safe(cols: &[i8], r: i8, c: i8) -> bool {
-    let mut k: i8 = 0;
-    while (k as usize) < (r as usize) {
-        let d = cols[k as usize];
-        if d == c {
-            return false;
-        }
-        if (d - k) == (c - r) || (d + k) == (c + r) {
-            return false;
-        }
-        k += 1;
+fn ok(cmask: i64, d1: i64, d2: i64, c: i64) -> bool {
+    let b = 1i64 << c;
+    if (cmask & b) != 0 {
+        return false;
+    }
+    if (d1 & b) != 0 {
+        return false;
+    }
+    if (d2 & b) != 0 {
+        return false;
     }
     true
 }
 
-fn place(cols: &mut Vec<i8>, r: i8, n: i8) -> i64 {
-    if r == n {
+fn place(cmask: i64, d1: i64, d2: i64, left: i64, nn: i64) -> i64 {
+    if left == 0 {
         return 1;
     }
     let mut total: i64 = 0;
-    let mut c: i8 = 0;
-    while c < n {
-        if safe(cols, r, c) {
-            cols[r as usize] = c;
-            total += place(cols, r + 1, n);
+    let mut c: i64 = 0;
+    while c < nn {
+        if ok(cmask, d1, d2, c) {
+            total += place(
+                cmask | (1i64 << c),
+                (d1 | (1i64 << c)) << 1,
+                (d2 | (1i64 << c)) >> 1,
+                left - 1,
+                nn,
+            );
         }
         c += 1;
     }
@@ -40,36 +43,34 @@ fn place(cols: &mut Vec<i8>, r: i8, n: i8) -> i64 {
 
 fn main() {
     let mut qtotal: i64 = 0;
-    let mut qnodes: i64 = 0;
-    let mut size: i8 = 8;
-    while size <= 11 {
-        let mut cols: Vec<i8> = vec![-1i8; size as usize];
-        let got = place(&mut cols, 0, size);
-        qtotal += got;
-        qnodes += 1;
-        size += 1;
+    let mut qsizes: i64 = 0;
+    let mut qn: i64 = 9;
+    while qn <= 11 {
+        qtotal += place(0, 0, 0, qn, qn);
+        qsizes += 1;
+        qn += 1;
     }
-    println!("{} {}", qtotal, qnodes);
+    println!("{} {}", qtotal, qsizes);
 
-    let cap: usize = 20000;
-    let mut iw: Vec<usize> = Vec::with_capacity(48);
+    let cap: i64 = 20000;
+    let mut iw: Vec<i64> = Vec::with_capacity(48);
     let mut iv: Vec<i64> = Vec::with_capacity(48);
-    let mut i: usize = 0;
+    let mut i: i64 = 0;
     while i < 48 {
         iw.push((i * 37 + 11) % 900 + 100);
-        iv.push(((i * 613 + 29) % 4000 + 50) as i64);
+        iv.push((i * 613 + 29) % 4000 + 50);
         i += 1;
     }
 
-    let mut best: Vec<i64> = vec![0i64; cap + 1];
+    let mut best: Vec<i64> = vec![0i64; (cap + 1) as usize];
 
     let mut i: usize = 0;
     while i < iw.len() {
         let w = iw[i];
         let v = iv[i];
-        let mut c: i64 = cap as i64;
-        while c >= w as i64 {
-            let cand = best[(c - w as i64) as usize] + v;
+        let mut c: i64 = cap;
+        while c >= w {
+            let cand = best[(c - w) as usize] + v;
             if cand > best[c as usize] {
                 best[c as usize] = cand;
             }
@@ -77,19 +78,24 @@ fn main() {
         }
         i += 1;
     }
-    println!("{} {} {}", best[cap], best[cap / 3], best[0]);
+    println!(
+        "{} {} {}",
+        best[cap as usize],
+        best[(cap / 3) as usize],
+        best[0]
+    );
 
     let mut total: i64 = 0;
     let mut longest: i64 = 0;
     let mut i: i64 = 600000;
     while i < 700000 {
-        let mut n = i;
+        let mut v = i;
         let mut steps: i64 = 0;
-        while n != 1 {
-            if n % 2 == 0 {
-                n = n / 2;
+        while v != 1 {
+            if v % 2 == 0 {
+                v = v / 2;
             } else {
-                n = 3 * n + 1;
+                v = 3 * v + 1;
             }
             steps += 1;
         }

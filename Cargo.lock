@@ -27,7 +27,6 @@ version = "0.4.4"
 dependencies = [
  "nx-ast",
  "nx-codegen",
- "nx-interp",
  "nx-ir",
  "nx-lexer",
  "nx-parser",
@@ -35,11 +34,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "nx-interp"
+name = "nx-e2e"
 version = "0.4.4"
 dependencies = [
  "nx-ast",
- "nx-ir",
+ "nx-codegen",
  "nx-lexer",
  "nx-parser",
  "nx-types",

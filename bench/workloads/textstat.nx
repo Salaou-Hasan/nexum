@@ -1,0 +1,146 @@
+# A small text-processing program: tokenize, count, report.
+#
+# Every other workload in bench/ is a loop that computes a number. This one
+# is the shape a program actually has: build a corpus, scan it character by
+# character, cut it into words, accumulate counts in a dict, and print a
+# report. It is also the workload that shows what is missing from the
+# language rather than what is fast in it, because a text program needs
+# three things NX does not have today:
+#
+#   * no `str()` -- there is no conversion from Int to Str in either
+#     direction, so `itoa` below is written out by hand and every digit it
+#     produces is a fresh string the runtime will never free;
+#   * no `split` -- tokenizing means scanning for a separator class by
+#     hand, and there is no character-to-code conversion either, so "is
+#     this a letter" is a membership test against a 26-character string;
+#   * no file I/O -- the corpus is generated from a fixed vocabulary, so
+#     the program is deterministic and needs no I/O at all.
+#
+# That is the honest reason this is the shape of an application benchmark
+# in NX today. It exercises the real path (characters in, dict in the
+# middle, formatted text out) with the parts the language has, and it names
+# the parts it does not.
+
+reps = 1200
+
+# --- the vocabulary ---------------------------------------------------
+# Words are composed from a literal alphabet rather than written out, to
+# keep the source short; `[c for c in "abc"]` is a comprehension over a
+# string, which is the one place NX can enumerate characters cheaply.
+letters = [c for c in "abcdefghijklmnopqrstuvwxyz"]
+
+nwords = 40
+vocab = []
+i = 0
+while i < nwords:
+    w = letters[i % 26] + letters[i // 26 % 26] + letters[i // 676 % 26] + letters[i % 5]
+    push(vocab, w)
+    i = i + 1
+
+# --- the corpus -------------------------------------------------------
+# One paragraph, then the paragraph repeated. Concatenating straight into
+# a single corpus for the whole run would be quadratic in the bytes copied
+# and would leak every intermediate, which is `strbuild`'s subject; here the
+# build cost is a fixed fraction and the scan is the point.
+para = ""
+i = 0
+while i < 200:
+    if i > 0:
+        para = para + " "
+    para = para + vocab[i * 7919 % nwords]
+    i = i + 1
+para = para + ", "
+
+corpus = ""
+r = 0
+while r < reps:
+    corpus = corpus + para
+    r = r + 1
+
+corpus_len = len(corpus)
+print(corpus_len)
+
+# --- tokenize and count -----------------------------------------------
+# A word is a maximal run of characters in the alphabet. Anything else ends
+# it. There is no `isalpha` and no character code, so membership against
+# the 26-letter string is the test.
+alpha = "abcdefghijklmnopqrstuvwxyz"
+
+fn itoa(n):
+    digits = "0123456789"
+    if n == 0:
+        return "0"
+    if n < 0:
+        return "-" + itoa(0 - n)
+    # Prepending is the only way to build a number's text left to right,
+    # because there is no mutable string and no push for one.
+    out = ""
+    while n > 0:
+        out = digits[n % 10] + out
+        n = n // 10
+    return out
+
+counts = {}
+tokens = 0
+longest = 0
+cur = ""
+i = 0
+while i < corpus_len:
+    ch = corpus[i]
+    if ch in alpha:
+        cur = cur + ch
+        if len(cur) > longest:
+            longest = len(cur)
+    else:
+        if len(cur) > 0:
+            tokens = tokens + 1
+            if cur in counts:
+                counts[cur] = counts[cur] + 1
+            else:
+                counts[cur] = 1
+            cur = ""
+    i = i + 1
+if len(cur) > 0:
+    tokens = tokens + 1
+    if cur in counts:
+        counts[cur] = counts[cur] + 1
+    else:
+        counts[cur] = 1
+
+print(tokens, len(counts), longest)
+
+# --- the report -------------------------------------------------------
+# Walk the vocabulary in a fixed order and print `word=count`. Building
+# each line costs three concatenations, and the count side of it is the
+# hand-written `itoa`.
+report = ""
+i = 0
+while i < nwords:
+    if vocab[i] in counts:
+        report = report + vocab[i] + "=" + itoa(counts[vocab[i]]) + " "
+    i = i + 1
+print(report)
+
+# --- summary statistics over the dict --------------------------------
+# Order-independent, so it does not depend on dict iteration order.
+wsum = 0
+for w in counts:
+    wsum = wsum + len(w) * counts[w]
+print(wsum)
+
+best = 0
+bestn = 0
+i = 0
+while i < nwords:
+    if vocab[i] in counts:
+        c = counts[vocab[i]]
+        if c > best:
+            best = c
+        if c == best:
+            bestn = bestn + 1
+    i = i + 1
+print(best, bestn)
+
+# A fixed string, as a final check that the reporting path works on
+# something that is not a count.
+print(itoa(0), itoa(7), itoa(1234), itoa(1000000), itoa(0 - 42))
