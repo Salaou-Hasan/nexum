@@ -1,0 +1,176 @@
+# Dict operations: build, update, read, miss, delete, iterate.
+#
+# NX dicts are insertion-ordered association lists with a linear scan per
+# lookup (runtime.ll, `nx_dictfindidx`), so every row here is quadratic
+# where a hash map is linear. That is a property of the current runtime,
+# not a property of the source language, and it is the single biggest gap
+# in the benchmark suite: `bench/` contains no dict at all.
+#
+# The Rust side uses `BTreeMap` rather than `HashMap` on purpose. NX dicts
+# iterate in insertion order, and that order is observable, so an unordered
+# Rust map could not be made to print the same thing. `BTreeMap` is the
+# closest stdlib structure that has a defined, matching order, and its
+# O(log n) lookup against NX's O(n) scan is exactly the difference worth
+# measuring.
+#
+# Two things the language cannot express are worked around here and are
+# worth naming:
+#
+#   * `push(d[k], v)` is refused ("push() first argument must be a list
+#     variable"), so growing a list stored in a dict needs a round trip
+#     through a temporary.
+#   * `d[k]` on a missing key is a runtime error, not a default, so every
+#     probe is guarded by `k in d`.
+
+nkeys = 6000
+
+# --- build: n distinct Int keys --------------------------------------
+d = {}
+i = 0
+while i < nkeys:
+    d[i] = i * 3 + 1
+    i = i + 1
+print(len(d))
+
+# --- update every key in place ---------------------------------------
+# `d[i] = d[i] + p` is a read then a write, so two scans per key.
+p = 0
+while p < 4:
+    i = 0
+    while i < nkeys:
+        d[i] = d[i] + p
+        i = i + 1
+    p = p + 1
+
+total = 0
+i = 0
+while i < nkeys:
+    total = total + d[i]
+    i = i + 1
+print(total)
+
+# --- miss: every key probed is absent, so every probe scans the end ---
+miss = 0
+i = 0
+while i < nkeys:
+    if i + nkeys in d:
+        miss = miss + 1
+    i = i + 1
+print(miss)
+
+# --- iterate, accumulating an order-independent checksum --------------
+sumlen = 0
+for k in d:
+    sumlen = sumlen + d[k]
+print(sumlen)
+
+# --- delete half, then put them back ----------------------------------
+i = 0
+while i < nkeys:
+    if i % 2 == 0:
+        del d[i]
+    i = i + 1
+print(len(d))
+
+i = 0
+while i < nkeys:
+    d[i] = i
+    i = i + 1
+print(len(d))
+
+# --- string keys: 40 distinct words, inserted in a rotating order -----
+words = []
+push(words, "alpha")
+push(words, "bravo")
+push(words, "charlie")
+push(words, "delta")
+push(words, "echo")
+push(words, "fox")
+push(words, "golf")
+push(words, "hotel")
+push(words, "india")
+push(words, "juliet")
+push(words, "kilo")
+push(words, "lima")
+push(words, "mike")
+push(words, "november")
+push(words, "oscar")
+push(words, "papa")
+push(words, "quebec")
+push(words, "romeo")
+push(words, "sierra")
+push(words, "tango")
+push(words, "uniform")
+push(words, "victor")
+push(words, "whiskey")
+push(words, "xray")
+push(words, "yankee")
+push(words, "zulu")
+push(words, "amber")
+push(words, "basalt")
+push(words, "cobalt")
+push(words, "dune")
+push(words, "ember")
+push(words, "fjord")
+push(words, "garnet")
+push(words, "halite")
+push(words, "iodine")
+push(words, "jasper")
+push(words, "krypton")
+push(words, "lithium")
+push(words, "magnet")
+push(words, "nickel")
+
+nwords = 2400
+sd = {}
+i = 0
+while i < nwords:
+    sd[words[i % 40]] = i % 40
+    i = i + 1
+print(len(sd))
+
+hits = 0
+i = 0
+while i < nwords:
+    if words[i % 40] in sd:
+        hits = hits + sd[words[i % 40]]
+    i = i + 1
+print(hits)
+
+# Order-independent aggregate over a string-keyed dict.
+wsum = 0
+for w in sd:
+    wsum = wsum + len(w) * sd[w]
+print(wsum)
+
+# --- dict of lists, and a list of dicts ------------------------------
+per = 200
+ml = {}
+i = 0
+while i < per:
+    row = []
+    j = 0
+    while j < 16:
+        push(row, i * 16 + j)
+        j = j + 1
+    ml[i] = row
+    i = i + 1
+print(len(ml))
+
+rowsum = 0
+for r in ml:
+    rowsum = rowsum + ml[r][0] + ml[r][15]
+print(rowsum)
+
+lod = []
+i = 0
+while i < per:
+    cell = {}
+    cell["row"] = i
+    cell["flag"] = i % 3
+    push(lod, cell)
+    i = i + 1
+flags = 0
+for c in lod:
+    flags = flags + c["flag"] * c["row"]
+print(flags)

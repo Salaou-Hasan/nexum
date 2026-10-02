@@ -1,0 +1,94 @@
+# Immutable-string construction.
+#
+# NX has no mutable string builder: `s + t` allocates a fresh string every
+# time, so joining n words copies O(n^2) bytes and every intermediate is
+# never reclaimed (the native runtime frees container storage but not
+# strings -- see runtime.ll's note on `nx_strcat`). This workload measures
+# that path head on, and the substring-slice copy next to it.
+#
+# Rust reaches for `String::push_str`, which is amortised O(1). That is the
+# idiomatic mirror of the same algorithm, so the row measures the absence
+# of a builder rather than a difference in skill.
+
+n = 12000
+
+# A fixed vocabulary, so the corpus is identical on every run and needs no
+# file I/O: NX has no `open`/`read` yet. A list literal may not span lines
+# (only call arguments and dict entries may), so it is filled with push.
+vocab = []
+push(vocab, "alpha")
+push(vocab, "bravo")
+push(vocab, "delta")
+push(vocab, "echo")
+push(vocab, "fox")
+push(vocab, "golf")
+push(vocab, "hotel")
+push(vocab, "india")
+push(vocab, "juliet")
+push(vocab, "kilo")
+push(vocab, "lima")
+push(vocab, "mike")
+push(vocab, "november")
+push(vocab, "oscar")
+push(vocab, "papa")
+push(vocab, "quebec")
+push(vocab, "romeo")
+push(vocab, "sierra")
+push(vocab, "tango")
+push(vocab, "uniform")
+push(vocab, "victor")
+push(vocab, "whiskey")
+push(vocab, "xray")
+push(vocab, "yankee")
+push(vocab, "zulu")
+push(vocab, "amber")
+push(vocab, "basalt")
+push(vocab, "cobalt")
+push(vocab, "dune")
+push(vocab, "ember")
+push(vocab, "fjord")
+push(vocab, "garnet")
+
+words = []
+i = 0
+while i < n:
+    push(words, vocab[i % 32])
+    i = i + 1
+
+fn join(ws, sep):
+    out = ""
+    i = 0
+    while i < len(ws):
+        if i > 0:
+            out = out + sep
+        out = out + ws[i]
+        i = i + 1
+    return out
+
+text = join(words, " ")
+
+print(len(text))
+print(text[0])
+print(text[len(text) - 1])
+
+# A slice copies its bytes out into a new string; bounds here are fixed so
+# both toolchains take the same characters.
+mid = text[100:200]
+print(len(mid), mid[0], mid[99])
+
+# Doubling: four `+` steps move 1x, 2x, 3x and 4x the whole text.
+u = ""
+j = 0
+while j < 4:
+    u = u + text
+    j = j + 1
+print(len(u), u[999], u[1000])
+
+# Concatenating a long string with a one-character string, which is what a
+# naive character-by-character accumulator would do.
+acc = ""
+k = 0
+while k < 4000:
+    acc = acc + text[k]
+    k = k + 1
+print(len(acc), acc[0], acc[3999])

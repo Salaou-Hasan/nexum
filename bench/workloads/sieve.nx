@@ -1,0 +1,97 @@
+# Integer arithmetic at scale: a sieve, then a totient accumulation.
+#
+# `bench/` currently has one integer workload (`listsum`, one add per
+# element) and two float ones. Nothing here exercises the integer
+# operators as a group: `%`, `//`, the bit operators, `+=`, or repeated
+# indexed writes into a list under a nested-loop stride.
+#
+# Both tables are plain lists of Ints written by index. NX has no
+# indexed-assignment-free path for this (it does have indexed assignment --
+# grammar section 2.5 -- so this workload is written the natural way), which
+# makes it the clean integer counterpart to `listsum`'s push-then-read
+# shape.
+
+limit = 2500000
+
+# --- sieve of Eratosthenes -------------------------------------------
+# One list of flags. The inner loop writes every p-th element, so this is
+# a strided write pattern rather than a sequential one.
+sieve = []
+i = 0
+while i <= limit:
+    push(sieve, 1)
+    i = i + 1
+sieve[0] = 0
+sieve[1] = 0
+
+marked = 0
+p = 2
+while p * p <= limit:
+    if sieve[p] == 1:
+        m = p * p
+        while m <= limit:
+            sieve[m] = 0
+            marked = marked + 1
+            m = m + p
+    p = p + 1
+
+nprimes = 0
+psum = 0
+i = 0
+while i <= limit:
+    if sieve[i] == 1:
+        nprimes = nprimes + 1
+        psum = psum + i
+    i = i + 1
+print(nprimes, psum, marked)
+
+# --- totients over the same range -------------------------------------
+# `phi[m] - phi[m] // p` is a read-modify-write per element, so this phase
+# is twice the list traffic of the sieve for the same range.
+phi = []
+i = 0
+while i <= limit:
+    push(phi, i)
+    i = i + 1
+p = 2
+while p <= limit:
+    if phi[p] == p:
+        m = p
+        while m <= limit:
+            phi[m] = phi[m] - phi[m] // p
+            m = m + p
+    p = p + 1
+
+tsum = 0
+i = 0
+while i <= limit:
+    tsum = tsum + phi[i]
+    i = i + 1
+print(nprimes, tsum)
+
+# --- a branchy integer kernel over the sieve table --------------------
+# Every operator in the integer group, once per surviving prime, plus a
+# rejection loop whose trip count is data dependent.
+#
+# Two spellings here are load-bearing and are mirrored exactly on the Rust
+# side. `^` binds *tighter* than `+` in NX (grammar section 3.1: levels 5
+# and 8), so the xor needs its own parentheses or the sum folds into it.
+# And `+ 1000000007 -` keeps the subtractive branch non-negative, because
+# NX's `%` takes the sign of the divisor (Python) where Rust's takes the
+# sign of the dividend (C).
+h = 0
+state = 12345
+p = 2
+while p <= limit:
+    if sieve[p] == 1:
+        state = (state * 1103515245 + 12345) % 2147483648
+        b = state % 97
+        if b > 48:
+            h = (h + p * b + ((p >> 3) ^ (state & 65535))) % 1000000007
+        elif b > 24:
+            h = (h + 1000000007 - p * (b + 1)) % 1000000007
+        else:
+            h = (h + p) % 1000000007
+    p = p + 1
+print(h)
+print(len(sieve), len(phi))

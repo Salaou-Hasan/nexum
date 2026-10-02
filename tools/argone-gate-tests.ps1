@@ -10,13 +10,15 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $gate = Join-Path $PSScriptRoot 'argone-gate.ps1'
-$status = Join-Path $root 'docs\ARGONE-STATUS.md'
+# Join-Path, never a literal separator -- see argone-gate.ps1 for why.
+$status = Join-Path (Join-Path $root 'docs') 'ARGONE-STATUS.md'
 $backup = Join-Path $env:TEMP 'argone-status-backup.md'
 
 Copy-Item $status $backup -Force
 
 function Invoke-Gate {
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $gate -Enforce 2>&1
+    $exe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh' } else { 'powershell' }
+    $out = & $exe -NoProfile -ExecutionPolicy Bypass -File $gate -Enforce 2>&1
     return @{ Code = $LASTEXITCODE; Out = ($out | ForEach-Object { "$_" }) }
 }
 
@@ -73,24 +75,27 @@ try {
     #    the status still `not started` the gate blocks on task count, not
     #    on evidence -- so the status has to be flipped too.
     $noEvidence = $original -replace '(?m)^Status: not started', 'Status: complete'
-    $noEvidence = $noEvidence -replace '(?m)^(\s*)- \[ \]', '$1- [x]'
-    $noEvidence = $noEvidence -replace '(?m)^\s*Evidence:.*$\r?\n', ''
+    # `[ ]` rather than `\s`: in multiline mode `\s` also matches the
+    # newline, so `\s*` can walk past a blank line and tick the wrong box.
+    $noEvidence = $noEvidence -replace '(?m)^([ ]*)- \[ \]', '$1- [x]'
+    $noEvidence = $noEvidence -replace '(?m)^[ ]*Evidence:.*\r?\n', ''
     Set-Status $noEvidence
     Expect "all-ticked without evidence is blocked" $true "Evidence"
 
-    # 5. One task genuinely complete: still blocked, because 16 remain.
+    # 5. One task genuinely complete: still blocked, because 14 remain.
     #    This is the check that stops "one task done" reading as "done".
     $oneDone = $original
-    $oneDone = $oneDone -replace '(?m)^(## B - Baseline tests and benchmarks\r?\n\r?\nStatus: )not started', '${1}complete'
-    $oneDone = $oneDone -replace '(?m)^- \[ \] Every section 23 benchmark category', '- [x] Every section 23 benchmark category'
+    $oneDone = $oneDone -replace '(?m)^(## B - Baselines\r?\n\r?\nStatus: )not started', '${1}complete'
+    $oneDone = $oneDone -replace '(?m)^- \[ \] Every benchmark category', '- [x] Every benchmark category'
     $oneDone = $oneDone -replace '(?m)^- \[ \] bench/baseline.json committed', '- [x] bench/baseline.json committed'
-    $oneDone = $oneDone -replace '(?m)^- \[ \] Compile time, binary size', '- [x] Compile time, binary size'
-    $oneDone = $oneDone -replace '(?m)^- \[ \] A recorded run on an idle machine', '- [x] A recorded run on an idle machine'
+    $oneDone = $oneDone -replace '(?m)^- \[ \] clang-vs-Nexum codegen split', '- [x] clang-vs-Nexum codegen split'
+    $oneDone = $oneDone -replace '(?m)^- \[ \] Noise characterised', '- [x] Noise characterised'
+    $oneDone = $oneDone -replace '(?m)^[ ]*Evidence:[ ]*$', '      Evidence: commit def5678'
     Set-Status $oneDone
-    Expect "one task done does not open the gate" $true "tasks complete: 1 / 17"
+    Expect "one task done does not open the gate" $true "tasks complete: 1 / 15"
 
     # 6. A missing task must be noticed, not silently ignored.
-    $missing = $original -replace '(?ms)^## P - .*$', ''
+    $missing = $original -replace '(?ms)^## N - .*$', ''
     Set-Status $missing
     Expect "a missing task is a blocker" $true "missing from the status file"
 
@@ -102,7 +107,8 @@ try {
     # 8. Everything done: the gate opens. If this fails, the gate is
     #    unreachable and the whole mechanism is theatre.
     $allDone = $original -replace '(?m)^Status: not started', 'Status: complete'
-    $allDone = $allDone -replace '(?m)^(\s*)- \[ \]', '$1- [x]'
+    $allDone = $allDone -replace '(?m)^([ ]*)- \[ \]', '$1- [x]'
+    $allDone = $allDone -replace '(?m)^[ ]*Evidence:[ ]*$', '      Evidence: commit abc1234'
     Set-Status $allDone
     Expect "a fully complete stage opens the gate" $false "ARGONE COMPLETE"
 }

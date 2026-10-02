@@ -1,0 +1,35 @@
+﻿Nexum compiler performance measurement
+tag=smoke   runs=2  warmup=1  wall=0.0969034216666667 min
+nx     : C:\nexum\target\release\nx.exe (nx 0.4.3)
+clang  : C:\Program Files\LLVM\bin\clang.exe (clang version 23.1.2 (https://github.com/llvm/llvm-project 85ac560262434c9ccfc0c183ec22d4138ed647fb))
+machine: Intel(R) Core(TM) 7 240H / 16 logical cores / 15.69 GB
+ps     : 5.1.26100.9444
+
+process-launch floor (median of 15) -- nothing below this is resolvable:
+  cmd /c exit       22.31 ms
+  nx --version      17.58 ms
+  clang --version   38.97 ms
+
+program           check_s  codegen_s  clangO2_s    build_s      ll_KB   nxPK_MB   clPK_MB    exe_KB
+------------------------------------------------------------------------------------------------------------
+funcs-50            0.036      0.000      0.436      0.511        270       5.4      18.5       198
+stmts-20            0.024      0.001      0.322      0.453         98       3.0      18.5       179
+
+per-mode medians (s), with spread:
+program              mode      n        med       min       max      sd     cv%
+funcs-50            check      2     0.0362    0.0335    0.0389  0.0038    10.5
+funcs-50          dump-ir      2     0.0306    0.0305    0.0307  0.0001     0.4
+funcs-50          emit-ir      2     0.0365    0.0337    0.0394  0.0040    10.9
+funcs-50            build      2     0.5107    0.5098    0.5117  0.0013     0.3
+funcs-50         clang-O2      2     0.4363    0.4358    0.4367  0.0006     0.1
+stmts-20            check      2     0.0239    0.0214    0.0263  0.0035    14.6
+stmts-20          dump-ir      2     0.0259    0.0236    0.0281  0.0032    12.3
+stmts-20          emit-ir      2     0.0248    0.0216    0.0280  0.0045    18.0
+stmts-20            build      2     0.4531    0.4501    0.4561  0.0042     0.9
+stmts-20         clang-O2      2     0.3223    0.3223    0.3223  0.0000     0.0
+
+raw samples: C:\nexum\bench\compiler\results\compiler-smoke-raw.csv
+summary    : C:\nexum\bench\compiler\results\compiler-smoke-summary.csv
+derived    : C:\nexum\bench\compiler\results\compiler-smoke-derived.csv
+context    : C:\nexum\bench\compiler\results\compiler-smoke-context.json
+

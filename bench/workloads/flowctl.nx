@@ -1,0 +1,112 @@
+# Mixed control flow: backtracking recursion, nested loops with a guarded
+# write, and a loop whose trip count comes from the data.
+#
+# `bench/` has recursion (fib), straight-line loops (mandel, matmul,
+# listsum, dot) and nothing in between. Three shapes are missing, and all
+# three are where a compiler's branch layout and bounds checks actually
+# show up:
+#
+#   * a recursive search that returns early from inside a nested loop
+#     (n-queens),
+#   * a dynamic program whose inner loop writes conditionally and runs
+#     backwards (0/1 knapsack),
+#   * an unbounded loop whose exit depends on the value (Collatz).
+#
+# The queen solver is also the one place in this suite where copy-on-bind
+# shows up as a cost: `cols` is copied on every call, so the search pays
+# one list copy per node. That is the price of the value semantics the
+# language documents, and it is priced here rather than worked around.
+
+# --- n-queens ---------------------------------------------------------
+# `cols[r]` is the column of row r. Each call writes its own slot and
+# passes the list down, so the copy on bind costs a copy per node but
+# loses nothing: the parent rewrites the slot on every candidate.
+fn safe(cols, r, c):
+    k = 0
+    while k < r:
+        d = cols[k]
+        if d == c:
+            return false
+        if (d - k) == (c - r) or (d + k) == (c + r):
+            return false
+        k = k + 1
+    return true
+
+fn place(cols, r, n):
+    if r == n:
+        return 1
+    total = 0
+    c = 0
+    while c < n:
+        if safe(cols, r, c):
+            cols[r] = c
+            total = total + place(cols, r + 1, n)
+        c = c + 1
+    return total
+
+qtotal = 0
+qnodes = 0
+size = 8
+while size <= 11:
+    cols = []
+    i = 0
+    while i < size:
+        push(cols, -1)
+        i = i + 1
+    got = place(cols, 0, size)
+    qtotal = qtotal + got
+    qnodes = qnodes + 1
+    size = size + 1
+print(qtotal, qnodes)
+
+# --- 0/1 knapsack -----------------------------------------------------
+# The inner loop runs downwards so each item is taken at most once, and
+# writes only on an improvement.
+cap = 20000
+iw = []
+iv = []
+i = 0
+while i < 48:
+    push(iw, (i * 37 + 11) % 900 + 100)
+    push(iv, (i * 613 + 29) % 4000 + 50)
+    i = i + 1
+
+best = []
+i = 0
+while i <= cap:
+    push(best, 0)
+    i = i + 1
+
+i = 0
+while i < len(iw):
+    w = iw[i]
+    v = iv[i]
+    c = cap
+    while c >= w:
+        cand = best[c - w] + v
+        if cand > best[c]:
+            best[c] = cand
+        c = c - 1
+    i = i + 1
+print(best[cap], best[cap // 3], best[0])
+
+# --- Collatz over a fixed window --------------------------------------
+# Trip count is a function of the value, so the loop cannot be unrolled or
+# strength-reduced and the branch is genuinely unpredictable.
+total = 0
+longest = 0
+i = 600000
+while i < 700000:
+    n = i
+    steps = 0
+    while n != 1:
+        if n % 2 == 0:
+            n = n // 2
+        else:
+            n = 3 * n + 1
+        steps = steps + 1
+    if steps > longest:
+        longest = steps
+    total = total + steps
+    i = i + 1
+print(total, longest)

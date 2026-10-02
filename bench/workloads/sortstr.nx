@@ -1,0 +1,156 @@
+# Sorting a list of strings.
+#
+# The same algorithm as `sortint`, but every element is a string, so each
+# comparison goes through a lexicographic compare on heap-allocated bytes
+# and every swap moves two 24-byte tagged values holding pointers. It is
+# the shape a real program hits: build a list once with `push` (the words
+# themselves are shared, so the list costs one box per element, not one
+# copy per element), then sort it.
+#
+# `sort_unstable` on the Rust side would not be a comparison of like with
+# like: it is a different algorithm with a different comparison count. The
+# reference below runs the identical quicksort so the row isolates what
+# sorting a `Vec<&str>` costs against sorting a `Vec<i64>`.
+
+m = 200000
+
+# A fixed alphabet and a fixed word set, built once. NX has no `str()`
+# conversion and no PRNG, so a corpus is composed from string literals;
+# `[c for c in "abc"]` is the cheapest way to get one-character strings
+# without 26 separate literals.
+letters = [c for c in "abcdefghijklmnopqrstuvwxyz"]
+
+nvocab = 256
+vocab = []
+i = 0
+while i < nvocab:
+    w = letters[i % 26] + letters[i // 26 % 26] + letters[i // 676 % 26] + letters[i % 7]
+    push(vocab, w)
+    i = i + 1
+print(len(vocab), vocab[0], vocab[255])
+
+# A list of m words drawn from that vocabulary, scattered by a Weyl step so
+# equal elements are common: a sort that is only correct on distinct keys
+# would still have to get the duplicates in the same order as the reference.
+xs = []
+i = 0
+while i < m:
+    push(xs, vocab[i * 7919 % nvocab])
+    i = i + 1
+
+stack = []
+i = 0
+while i < 64:
+    push(stack, 0)
+    i = i + 1
+sp = 0
+stack[sp] = 0
+sp = sp + 1
+stack[sp] = m - 1
+sp = sp + 1
+cut = 16
+
+cmp = 0
+swp = 0
+while sp > 0:
+    sp = sp - 1
+    hi = stack[sp]
+    sp = sp - 1
+    lo = stack[sp]
+
+    mid = lo + (hi - lo) // 2
+    if xs[mid] < xs[lo]:
+        t = xs[mid]
+        xs[mid] = xs[lo]
+        xs[lo] = t
+        cmp = cmp + 1
+    if xs[hi] < xs[lo]:
+        t = xs[hi]
+        xs[hi] = xs[lo]
+        xs[lo] = t
+        cmp = cmp + 1
+    if xs[hi] < xs[mid]:
+        t = xs[hi]
+        xs[hi] = xs[mid]
+        xs[mid] = t
+        cmp = cmp + 1
+    t = xs[mid]
+    xs[mid] = xs[hi - 1]
+    xs[hi - 1] = t
+
+    pivot = xs[hi - 1]
+    k = lo
+    j = lo
+    while j < hi - 1:
+        if xs[j] <= pivot:
+            t = xs[k]
+            xs[k] = xs[j]
+            xs[j] = t
+            swp = swp + 1
+            k = k + 1
+        j = j + 1
+        cmp = cmp + 1
+    t = xs[k]
+    xs[k] = xs[hi - 1]
+    xs[hi - 1] = t
+
+    if k - lo > cut:
+        stack[sp] = lo
+        sp = sp + 1
+        stack[sp] = k - 1
+        sp = sp + 1
+    if hi - k > cut:
+        stack[sp] = k + 1
+        sp = sp + 1
+        stack[sp] = hi
+        sp = sp + 1
+
+i = 1
+while i < m:
+    key = xs[i]
+    j = i - 1
+    while j >= 0 and xs[j] > key:
+        xs[j + 1] = xs[j]
+        j = j - 1
+        cmp = cmp + 1
+    xs[j + 1] = key
+    i = i + 1
+
+bad = 0
+i = 0
+while i < m:
+    if i > 0 and xs[i - 1] > xs[i]:
+        bad = bad + 1
+    i = i + 1
+
+# A position- and value-sensitive signature: rank each sampled word against
+# eight fixed reference words and fold the ranks together, so a divergence
+# in the sorted order anywhere in the list changes the output.
+refs = []
+push(refs, "aaaa")
+push(refs, "abzz")
+push(refs, "cfzz")
+push(refs, "dlzz")
+push(refs, "ezzz")
+push(refs, "fyzz")
+push(refs, "gznz")
+push(refs, "hzzz")
+
+sig = 0
+samples = 0
+i = 0
+while i < m:
+    if i % 997 == 0:
+        rank = 0
+        j = 0
+        while j < 8:
+            if xs[i] > refs[j]:
+                rank = rank + 1
+            j = j + 1
+        sig = sig * 9 + rank
+        samples = samples + 1
+    i = i + 1
+
+print(m, bad, cmp, swp, samples)
+print(xs[0], xs[1], xs[m // 2], xs[m - 2], xs[m - 1])
+print(sig)

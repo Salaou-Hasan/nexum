@@ -1,0 +1,101 @@
+﻿[
+    {
+        "file":  "funcs-50.nx",
+        "family":  "funcs",
+        "axis":  50,
+        "bytes":  17018,
+        "lines":  614,
+        "sha256":  "5ED5EAE7C62D532D4B4CABA150DB0A2A35B3212726EA0C01CD0EC5CCC1A0A557",
+        "sha256_short":  "5ED5EAE7C62D"
+    },
+    {
+        "file":  "funcs-200.nx",
+        "family":  "funcs",
+        "axis":  200,
+        "bytes":  66983,
+        "lines":  2414,
+        "sha256":  "28508975E2B38231B554779990ACFF3E89B3FE5E39F741CEE98DC46E8E01B066",
+        "sha256_short":  "28508975E2B3"
+    },
+    {
+        "file":  "funcs-800.nx",
+        "family":  "funcs",
+        "axis":  800,
+        "bytes":  267517,
+        "lines":  9614,
+        "sha256":  "B8541EDF17EB63D8BC5EC0577ED4C268CDC597749B8FB731F115C40933AB5564",
+        "sha256_short":  "B8541EDF17EB"
+    },
+    {
+        "file":  "funcs-2000.nx",
+        "family":  "funcs",
+        "axis":  2000,
+        "bytes":  671657,
+        "lines":  24014,
+        "sha256":  "251F68A6763A23901E215F8608790D4C4DAC356E18140466F97FC55D56A1A255",
+        "sha256_short":  "251F68A6763A"
+    },
+    {
+        "file":  "stmts-20.nx",
+        "family":  "stmts",
+        "axis":  20,
+        "bytes":  1843,
+        "lines":  57,
+        "sha256":  "3376CB6104BE27D4A56CCC598E63D6A938585D023E68D27DDA98DC6AA4037A76",
+        "sha256_short":  "3376CB6104BE"
+    },
+    {
+        "file":  "stmts-100.nx",
+        "family":  "stmts",
+        "axis":  100,
+        "bytes":  4462,
+        "lines":  137,
+        "sha256":  "B79716406C2B5EE851F8C65EDC6CAD7AFE4AAC2A7E1855732F959EA0274B34D1",
+        "sha256_short":  "B79716406C2B"
+    },
+    {
+        "file":  "stmts-400.nx",
+        "family":  "stmts",
+        "axis":  400,
+        "bytes":  14298,
+        "lines":  437,
+        "sha256":  "79DEB851B284C97D6F8A3C32522132D611FC4786CB5F610CAC55EC36087AD29B",
+        "sha256_short":  "79DEB851B284"
+    },
+    {
+        "file":  "stmts-1500.nx",
+        "family":  "stmts",
+        "axis":  1500,
+        "bytes":  50375,
+        "lines":  1537,
+        "sha256":  "A5F34A46A977B3DE9090ECCF01D6D231140D6D6E2D02A4802480EE0B004584F7",
+        "sha256_short":  "A5F34A46A977"
+    },
+    {
+        "file":  "flow-30.nx",
+        "family":  "flow",
+        "axis":  30,
+        "bytes":  18513,
+        "lines":  652,
+        "sha256":  "E87AB66D4F0DCE7AAA7F9855621F9CDADE270AE405B5CE7DC5DAE171D77CD355",
+        "sha256_short":  "E87AB66D4F0D"
+    },
+    {
+        "file":  "flow-120.nx",
+        "family":  "flow",
+        "axis":  120,
+        "bytes":  73395,
+        "lines":  2542,
+        "sha256":  "FADF4E61B25864D63EA532DC92FB2322A676548B28A099A86E4801035A9F21CE",
+        "sha256_short":  "FADF4E61B258"
+    },
+    {
+        "file":  "flow-480.nx",
+        "family":  "flow",
+        "axis":  480,
+        "bytes":  299950,
+        "lines":  10102,
+        "sha256":  "981C60A0F7FB23340431409EA72DFD9983BC00FD24850F83D4CB1205BE351F22",
+        "sha256_short":  "981C60A0F7FB"
+    }
+]

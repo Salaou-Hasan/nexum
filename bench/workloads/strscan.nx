@@ -1,0 +1,108 @@
+# Character-level string work: indexing, `in`, `<`, iteration and slicing.
+#
+# The five existing workloads contain no strings at all, so nothing in the
+# suite says what a string costs in NX. This one puts every string
+# primitive the language has today through the same loop and reports a
+# separate count for each, so the numbers can be read apart.
+#
+# Two costs dominate and are worth naming up front:
+#
+#   * `s[i]` mallocs a one-byte buffer per character read (runtime.ll,
+#     `nx_index`), so a character scan allocates as it goes.
+#   * a slice allocates and copies too, so tokenising by slicing is a
+#     per-character allocation as well.
+#
+# Stepped string slices (`s[::2]`) are deliberately absent: the native
+# `nx_slice` writes its result at `src - from` instead of at the packed
+# output offset, so a stepped string slice reads uninitialised memory and
+# writes past the end of its buffer. Interpreter and native disagree there.
+# That is a defect to report, not a workload to build on.
+
+passes = 200
+
+vowels = "aeiou"
+chunk = "the quick brown fox jumps over a lazy dog 0123456789 "
+
+# Concatenate the corpus once. Small enough that the quadratic concat cost
+# and its leaked intermediates stay out of the measurement, which is
+# `strbuild`'s job.
+text = ""
+i = 0
+while i < 400:
+    text = text + chunk
+    i = i + 1
+
+print(len(text))
+
+# --- indexing, `in`, and ordering, one character at a time --------------
+nv = 0
+nc = 0
+p = 0
+while p < passes:
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c in vowels:
+            nv = nv + 1
+        if c < "m":
+            nc = nc + 1
+        i = i + 1
+    p = p + 1
+print(nv, nc)
+
+# --- iterating the string rather than indexing it ----------------------
+no = 0
+p = 0
+while p < passes:
+    for c in text:
+        if c == "o":
+            no = no + 1
+    p = p + 1
+print(no)
+
+# --- naive substring search, three indexed characters per position -----
+hits = 0
+p = 0
+while p < passes:
+    i = 0
+    lim = len(text) - 2
+    while i < lim:
+        if text[i] == "f" and text[i + 1] == "o" and text[i + 2] == "x":
+            hits = hits + 1
+            i = i + 3
+        else:
+            i = i + 1
+    p = p + 1
+print(hits)
+
+# --- slicing, which copies its span out of the source ------------------
+sl = 0
+p = 0
+while p < passes:
+    i = 0
+    while i < 800:
+        w = text[i:i + 2]
+        if w < "ab":
+            sl = sl + 1
+        i = i + 2
+    p = p + 1
+print(sl)
+
+# --- `in` as substring search over the whole corpus --------------------
+found = 0
+for c in "abcdefghijklmnopqrstuvwxyz":
+    if c in text:
+        found = found + 1
+print(found)
+
+# --- slicing plus comparison: two 64-byte copies and a memcmp -----------
+cmp = 0
+p = 0
+while p < passes:
+    i = 0
+    while i < 200:
+        if text[0:64] < text[1:65]:
+            cmp = cmp + 1
+        i = i + 1
+    p = p + 1
+print(cmp)

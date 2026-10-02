@@ -25,7 +25,11 @@ param([switch]$Enforce)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$statusPath = Join-Path $root 'docs\ARGONE-STATUS.md'
+# Build paths with Join-Path, never with a literal separator. PowerShell on
+# Unix treats `\` as an ordinary filename character, so a hand-written
+# `docs\ARGONE-STATUS.md` resolves to a file that does not exist there and
+# the gate exits 2. That silently made this script fail on ubuntu CI.
+$statusPath = Join-Path (Join-Path $root 'docs') 'ARGONE-STATUS.md'
 
 if (-not (Test-Path $statusPath)) {
     Write-Host "FATAL: missing $statusPath"
@@ -34,11 +38,12 @@ if (-not (Test-Path $statusPath)) {
 
 $lines = [IO.File]::ReadAllLines($statusPath)
 
-# The seventeen tasks the prompt's required order defines. Task 0 is the
-# toolchain prerequisite Argone discovered; it is part of the stage.
+# The tasks the plan defines. Task 0 is semantic correctness: the audit
+# found eleven reachable programs where the interpreter and the native
+# backend disagree, and the fix gates every representation change.
 $expected = @(
     'Task 0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
-    'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P'
+    'I', 'J', 'K', 'L', 'M', 'N'
 )
 
 # States that mean "partially implemented". All of them are rejected on

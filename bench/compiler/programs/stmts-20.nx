@@ -1,0 +1,56 @@
+# ----------------------------------------------------------------
+# GENERATED FILE - do not edit. Produced by bench/compiler/gen.ps1
+# family=stmts axis=20 seed=20260902
+# Deterministic: byte-identical on every run and every machine.
+# Every arithmetic result is masked with & 65535 so values stay
+# in [0,65535]; the program cannot overflow i64 or hang.
+# ----------------------------------------------------------------
+
+# axis: 1 function, 20 statements in one straight-line SSA chain.
+
+fn work(a, b):
+    t = (a + b) & 65535
+    t = ((t & 70) & 40) & 65535
+    t = ((t | 16) | 67) & 65535
+    t = ((t | 56) | 44) & 65535
+    t = ((t * 94) * 65) & 65535
+    t = ((t ^ 12) ^ 5) & 65535
+    t = ((t * 84) * 28) & 65535
+    t = ((t + 3) + 48) & 65535
+    t = ((t + 51) + 40) & 65535
+    t = ((t & 2) & 14) & 65535
+    t = ((t | 3) | 72) & 65535
+    t = ((t - 88) - 76) & 65535
+    t = ((t | 46) | 64) & 65535
+    t = ((t ^ 10) ^ 47) & 65535
+    t = ((t & 37) & 15) & 65535
+    t = ((t - 22) - 85) & 65535
+    t = ((t - 22) - 49) & 65535
+    t = ((t % 59) % 26) & 65535
+    t = ((t % 30) % 21) & 65535
+    t = ((t ^ 8) ^ 37) & 65535
+    return t
+
+# seed[] is filled at run time with push, so seed[i] is a heap read
+# through the runtime rather than a constant. Without this the whole
+# chain above folds to one literal and the generated binary is the
+# same size for every s, which would hide clang's real work here.
+seed = []
+i = 0
+while i < 4:
+    push(seed, (i * 7919 + 13) & 65535)
+    i = i + 1
+
+# The compile-time axis is the chain above, not the loop count, which
+# is pinned at 4 so the program runs instantly.
+fn step(k):
+    i = 0
+    acc = 0
+    while i < 4:
+        acc = (acc + work(seed[i], i + k)) & 65535
+        i = i + 1
+    return acc
+
+print(step(7))
+print(step(11))
+

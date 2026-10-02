@@ -1,0 +1,129 @@
+# Sorting a list of Ints with a hand-written quicksort.
+#
+# There is no `sort` in NX and none is planned into the minimal stdlib yet,
+# so a sort has to be written in the language. Two things about that shape
+# the code:
+#
+#   * It cannot be recursive. Containers copy on bind, and a partition step
+#     cannot mutate its argument, so every recursive level would copy the
+#     whole list: O(n^2) element copies. The stack is therefore explicit,
+#     an array of bounds plus a pointer, which the language does allow
+#     because a list element is writable.
+#   * It cannot be factored into `swap(a, i, j)`, for the same reason. The
+#     three statements of the swap are written out at each of the five
+#     places they are needed.
+#
+# That is the honest state of the language today, and the row below should
+# be read as "the cost of sorting in NX", not "the cost of NX's codegen".
+
+n = 2000000
+
+# A Weyl sequence, so the input is a well-spread permutation of 0..n-1
+# with no PRNG state and no generator to get wrong. `i * 2654435761` stays
+# inside i64 for every n used here.
+xs = []
+i = 0
+while i < n:
+    push(xs, (i * 2654435761) % 4294967296)
+    i = i + 1
+
+# Explicit stack of (lo, hi) pairs, pushed as two entries.
+stack = []
+i = 0
+while i < 64:
+    push(stack, 0)
+    i = i + 1
+sp = 0
+stack[sp] = 0
+sp = sp + 1
+stack[sp] = n - 1
+sp = sp + 1
+
+# Partitions smaller than the cutoff are left for the final insertion pass.
+# That keeps the stack shallow and bounded: each push halves the remaining
+# work, so 64 slots is far more than this input can need.
+cut = 16
+
+cmp = 0
+swp = 0
+while sp > 0:
+    sp = sp - 1
+    hi = stack[sp]
+    sp = sp - 1
+    lo = stack[sp]
+
+    # Median of three into hi - 1, which is CLRS' quicksort.
+    mid = lo + (hi - lo) // 2
+    if xs[mid] < xs[lo]:
+        t = xs[mid]
+        xs[mid] = xs[lo]
+        xs[lo] = t
+        cmp = cmp + 1
+    if xs[hi] < xs[lo]:
+        t = xs[hi]
+        xs[hi] = xs[lo]
+        xs[lo] = t
+        cmp = cmp + 1
+    if xs[hi] < xs[mid]:
+        t = xs[hi]
+        xs[hi] = xs[mid]
+        xs[mid] = t
+        cmp = cmp + 1
+    t = xs[mid]
+    xs[mid] = xs[hi - 1]
+    xs[hi - 1] = t
+
+    pivot = xs[hi - 1]
+    m = lo
+    j = lo
+    while j < hi - 1:
+        if xs[j] <= pivot:
+            t = xs[m]
+            xs[m] = xs[j]
+            xs[j] = t
+            swp = swp + 1
+            m = m + 1
+        j = j + 1
+        cmp = cmp + 1
+    t = xs[m]
+    xs[m] = xs[hi - 1]
+    xs[hi - 1] = t
+
+    if m - lo > cut:
+        stack[sp] = lo
+        sp = sp + 1
+        stack[sp] = m - 1
+        sp = sp + 1
+    if hi - m > cut:
+        stack[sp] = m + 1
+        sp = sp + 1
+        stack[sp] = hi
+        sp = sp + 1
+
+# Final insertion pass. After the partitioning above the array is a set of
+# correctly ordered runs, each at most `cut` long, so this is linear in the
+# number of inversions left rather than quadratic.
+i = 1
+while i < n:
+    key = xs[i]
+    j = i - 1
+    while j >= 0 and xs[j] > key:
+        xs[j + 1] = xs[j]
+        j = j - 1
+        cmp = cmp + 1
+    xs[j + 1] = key
+    i = i + 1
+
+# Verify, then report something small enough to diff.
+bad = 0
+chk = 0
+i = 0
+while i < n:
+    if i > 0 and xs[i - 1] > xs[i]:
+        bad = bad + 1
+    chk = (chk + xs[i] * (i + 1)) % 1000000007
+    i = i + 1
+
+print(n, bad)
+print(xs[0], xs[n - 1], xs[n // 2])
+print(chk, cmp, swp)

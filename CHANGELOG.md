@@ -1,5 +1,132 @@
 # Changelog
 
+## v0.4.4
+
+### ARGONE revised: MLIR removed as a prerequisite, and the audit found something worse
+
+A ten-agent parallel investigation, reconciled against the tree. Full
+report in `docs/architecture/audit.md`; plan in `docs/ARGONE.md`; gate in
+`docs/ARGONE-STATUS.md`.
+
+**MLIR is no longer a prerequisite, dependency, or completion criterion.**
+Tasks G-K previously described a Nexum MLIR dialect and an MLIR lowering
+pipeline. They are replaced by a backend boundary trait, structured LLVM
+generation through the LLVM C API, and pipeline integration. MLIR may be
+added later if a concrete requirement justifies it. JIT, ORC and LLJIT are
+permanently out of scope.
+
+### Corrections to v0.4.3, on the record
+
+Three claims in the previous entry were wrong.
+
+- **"`static.crates.io` is unreachable."** It is reachable. A scratch crate
+  resolves and downloads (`cargo fetch`, exit 0, fetched `unicode-width
+  v0.2.2`). The earlier probe fetched the CDN *root*, which returns 403
+  because it serves no directory index, and I read that as blocked.
+- **"No C++ toolchain."** MSVC 14.44.35207 is installed at
+  `C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\`.
+  It needs `vcvars64.bat` to enter the environment, not installation.
+- **"No LLVM C API."** `LLVM-C.dll` (71 MB) and `LLVM-C.lib` (293 KB) are both
+  present under `C:\Program Files\LLVM`. There are no `llvm-c` headers,
+  which does not matter for Rust FFI.
+
+Only one of the three blockers was real: MLIR tools genuinely do not exist
+on this machine. That is no longer a blocker.
+
+The AST-arm duplication figure (100 `Stmt` / 133 `Expr`) was also wrong.
+Measured: 146 and 118 — and the total was the wrong target anyway.
+
+### Eleven verified interpreter/native divergences
+
+Every one executed on this host.
+
+| Program | Interpreter | Native |
+| --- | --- | --- |
+| `9223372036854775807 + 1` | error `integer overflow` | `-9223372036854775808` |
+| `9223372036854775807 * 2` | error | `-2` |
+| `2 ** 100` | saturates to `i64::MAX` | `0` |
+| `2 ** -1` | error, names the fix | `1` |
+| `"" in "hello"` | `true` | `false` |
+| `"hello" in "hello"` | `true` | `false` |
+| `len("héllo")` | `5` | `6` |
+| `"héllo"[1]` | `é` | invalid byte |
+| `"héllo"[0:2]` | `hé` | `h` + invalid byte |
+| `1.0e15` | `1000000000000000.0` | `1000000000000000` |
+| `del d["z"]` (missing) | error | silently no-ops |
+
+The three-way differential is green because no example or benchmark reaches
+these cases: `listsum` peaks near 4e9, `fib` stops at 34, `syntax` tops out
+at `2**10`. The harness is sound; the corpus is empty exactly where the
+compiler is wrong.
+
+**Root cause is architectural.** `docs/grammar.md:12` lists
+`compiler/nx-codegen/src/runtime.ll` as the authority for "Runtime meaning".
+The specification points at a backend. The interpreter is a cross-check on a
+backend, not the reverse. Every divergence exists because a rule was written
+once in Rust and once in LLVM IR with no owner.
+
+This is now **Task 0**, gating every representation change: building a typed
+HIR while the backend silently wraps integers produces two wrong
+implementations instead of one.
+
+### A bug the differential cannot see by construction
+
+`nx_ir::expr` has a `_ => {}` arm that silently drops `Dict`, `Slice`,
+`IfExpr` and `Comprehension`, so a function reading a global only inside a
+dict literal is memoized. Confirmed by execution and by `--emit-ir` showing
+`nx_memo_put`/`nx_memo_get` for the function:
+
+```nexum
+g = 5
+fn f(k):
+    d = {"a": g}
+    return d["a"]
+print(f(0))   # 5
+g2()          # writes g = 10
+print(f(0))   # 5 -- stale; should be 10
+```
+
+Both engines produce the stale `5` because both call the same
+`memoizable`. Interpreter/native comparison is structurally incapable of
+catching this; only a property-based test would.
+
+A related claim — that memoization caches a freed container pointer — was
+**not reproduced**: the function is not memoized in that shape, and an
+AddressSanitizer build reports no error.
+
+### Harness defects found
+
+`tools/verify.ps1`, the oracle:
+
+- runs `%USERPROFILE%\.cargo\bin\nx.exe`, a **stale installed binary**, so it
+  can report all-green against a broken checkout
+- drops blank lines and any line starting with whitespace plus `+`
+- uses `Compare-Object`, a set comparison, while the header and changelog
+  claim "byte-identical"
+- checks no exit code on any of its three runs, so a program failing
+  identically on all three compares equal and reports `ok`
+- globs non-recursively, so `examples/modules/` never runs
+
+CI natively compiles 11 of 13 examples, omitting `records.nx`, `methods.nx`
+and `syntax.nx` — the only coverage of records, `mut self`, `del`,
+comprehensions, slices and `None`.
+
+### Fixes in this entry
+
+- `tools/argone-gate.ps1` and `tools/argone-gate-tests.ps1` built paths with
+  literal `\`, which PowerShell on Unix treats as a filename character. The
+  `argone-gate` CI job I added in v0.4.3 therefore exited 2 on every
+  `ubuntu-latest` run. Both now build paths with `Join-Path`, and the
+  self-tests invoke `pwsh` on PowerShell Core rather than `powershell` by
+  name.
+- `docs/ARGONE.md`, `docs/ARGONE-STATUS.md` and the gate's expected-task list
+  rewritten from 17 MLIR-shaped tasks to 15: Task 0 (semantic correctness)
+  plus A-N. The two-state rule is unchanged. All ten adversarial gate tests
+  pass.
+
+No compiler behaviour changed. 318 tests pass; the 13 examples still agree
+across interpreter / native / `NX_NOUNBOX`.
+
 ## v0.4.3
 
 ### ARGONE: the architecture stage is planned, gated, and started
