@@ -5,3 +5,6 @@ dist/
 *.exe
 *.nxstamp
 
+
+# generated measurement artifacts, never source
+bench/compiler/results/

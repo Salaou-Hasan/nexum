@@ -1,3 +1,0 @@
-﻿"program","family","axis","src_b","ll_b","exe_b","check_s","dump_ir_s","emit_ir_s","build_s","codegen_est_s","clang_est_s","clang_o2_direct_s","clang_o0_direct_s","clang_o2_over_o0","codegen_pct","clang_pct","peak_nx_mb","peak_clang_mb","peak_pipeline_mb"
-"funcs-50","funcs","50","17018","276013","202752","0.0362","0.0306","0.0365","0.5107","0.0003","0.4742","0.4363",,"","0.1","92.9","5.42","18.48","23.9"
-"stmts-20","stmts","20","1843","100343","182784","0.0239","0.0259","0.0248","0.4531","0.0009","0.4283","0.3223",,"","0.2","94.5","3.03","18.46","21.49"
