@@ -1,9 +1,9 @@
 # Every Stage 1 addition in one program.
 #
-# This file exists to be run through both the interpreter and the native
-# compiler and compared byte for byte, so it is the differential test for
-# the whole new surface. Anything that behaves differently on the two
-# paths shows up here rather than in a user's program.
+# This file is the regression fixture for the whole language surface: it
+# reaches every statement, operator and container form, so a change in
+# behaviour shows up here first. Its expected output is published in
+# docs/grammar.md and checked against the native build by tools/verify.ps1.
 
 # --- operators -------------------------------------------------------
 print(7 % 3)          # 1

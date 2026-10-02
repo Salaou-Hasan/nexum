@@ -11,7 +11,7 @@
 //! v0 limits (checked programs only; `nx build` requires `nx check` clean):
 //! - Modules and from-imported names resolve at compile time.
 //! - No function values in value position (`x = foo`); call them.
-//! - No closures over outer function locals (matches the interpreter).
+//! - No closures over outer function locals.
 
 use std::collections::{HashMap, HashSet};
 use nx_ast::{BinOp, Expr, Program, Span, Stmt, UnaryOp};
@@ -1357,7 +1357,7 @@ enum Binding {
     ModuleFn(String, String),
 }
 
-/// Block termination state (mirrors interpreter Flow, minus values).
+/// Block termination state: which terminator the current block ends with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Term {
     Ret,
@@ -2277,7 +2277,7 @@ impl Gen {
             self.w(&format!("  {cv} = load %NxVal, ptr {slot}"));
             // The cache holds one box shared across calls; the caller gets
             // a copy, or a mutation through one call site would corrupt the
-            // next. The interpreter clones on a memo hit the same way.
+            // next: a memo hit clones, so every call site gets its own copy.
             let cc = self.reg();
             self.w(&format!("  {cc} = call %NxVal @nx_clone(%NxVal {cv})"));
             self.w(&format!("  ret %NxVal {cc}"));
@@ -2616,7 +2616,7 @@ impl Gen {
                     }
                     // `return a, b` is a list, which is what the caller's
                     // `a, b = f()` destructures. Same shape as the
-                    // interpreter, so both paths agree.
+                    // the caller destructures, so both forms agree.
                     _ => {
                         let n = values.len() as i64;
                         let l = self.reg();
@@ -2930,7 +2930,7 @@ impl Gen {
                 let bv = self.unbox(&b);
                 // A record's arity is fixed, so removing a value means
                 // blanking the field rather than changing the layout --
-                // the same rule the interpreter follows.
+                // a record's arity is fixed, so deleting a field blanks it.
                 let none = self.reg();
                 self.w(&format!("  {none} = call %NxVal @nx_none()"));
                 match &b.ty {
@@ -3354,7 +3354,7 @@ impl Gen {
                 } else if matches!(v.ty, Ty::Unknown) {
                     // Unresolved iterable: the tag decides list, string or
                     // dict at runtime. A dict yields its keys, matching the
-                    // static-dict path and the interpreter exactly.
+                    // the statically-known-dict path.
                     self.w(&format!(
                         "  {el} = call %NxVal @nx_each(%NxVal {vb}, i64 {i})"
                     ));
@@ -4056,8 +4056,8 @@ impl Gen {
                     self.w(&format!("  {out} = call double @nx_fpow(double {a}, double {b})"));
                 } else {
                     // A negative exponent has no integer answer, and an
-                    // oversized one overflows; both go to the runtime,
-                    // which panics or saturates exactly as the interpreter does.
+                    // oversized one overflows. Both checks live in @nx_pow;
+                    // this path calls @nx_ipow directly and so must add them there.
                     self.w(&format!("  {out} = call i64 @nx_ipow(i64 {a}, i64 {b})"));
                 }
                 Some(NV::raw(ty, out))
@@ -4405,7 +4405,7 @@ impl Gen {
     }
 
     /// Reinterpret a call receiver as an assignment target, for `mut self`
-    /// write-back. Mirrors the interpreter's helper: only shapes that have
+    /// write-back. Only shapes that have
     /// storage qualify.
     fn target_of_expr(e: &Expr) -> Option<nx_ast::Target> {
         match e {
@@ -4602,7 +4602,7 @@ impl Gen {
             // container storage: the snapshot global is shared read-only
             // traffic, and a task that mutates through it (push, `a[i] =
             // v`) must not corrupt the parent's value or race with another
-            // worker. The interpreter hands each worker a deep copy the
+            // worker: each worker gets its own deep copy, because the
             // same way.
             for (k, name) in reads.iter().enumerate() {
                 let v = self.reg();

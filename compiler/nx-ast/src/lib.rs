@@ -264,7 +264,7 @@ pub enum BinOp {
     FloorDiv,
     /// `%` -- remainder, with Python's sign convention: the result takes
     /// the sign of the divisor, so `-7 % 3` is `2`. The runtime and the
-    /// interpreter both have to agree on this.
+    /// the runtime and the backend both have to agree on this.
     Mod,
     /// `**` -- exponentiation, right associative.
     Pow,

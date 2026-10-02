@@ -73,7 +73,6 @@ problem.
 | `Gen` | `tmp`, `label`, `strc` | `u64` | DO_NOT_CHANGE — see §4.7 |
 | `Gen` | `AllocFrame.at` | `usize` | DO_NOT_CHANGE — byte offset into a `String`, used for slicing |
 | `nx-ir` | `batches: Vec<Vec<usize>>` | `usize` | DO_NOT_CHANGE — task indices |
-| `Interpreter` | `call_depth` | `usize` | DO_NOT_CHANGE — one field, compared to a constant |
 | `nx-types` | `arity`, `builtin_arity` | `usize` | DO_NOT_CHANGE — one field per function |
 
 ---
@@ -292,8 +291,9 @@ touching the language.
 and every call argument array. 53 sites in `runtime.ll`, one in the
 backend. Blocked on: a dedicated stage with an ASan/UBSan sweep of the
 whole runtime, since a mistake here is silent memory corruption rather
-than a wrong answer. The three-path differential would catch functional
-breakage but not an out-of-bounds read.
+than a wrong answer. The two-path differential (native, then native with
+`NX_NOUNBOX=1`) would catch functional breakage but not an out-of-bounds
+read.
 
 ### 6.2 `%NxPool` → `{ i32 total, i32 done, ptr fn }`
 

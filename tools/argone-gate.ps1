@@ -39,7 +39,7 @@ if (-not (Test-Path $statusPath)) {
 $lines = [IO.File]::ReadAllLines($statusPath)
 
 # The tasks the plan defines. Task 0 is semantic correctness: the audit
-# found eleven reachable programs where the interpreter and the native
+# found eleven reachable programs whose semantics were wrong, and
 # backend disagree, and the fix gates every representation change.
 $expected = @(
     'Task 0', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',

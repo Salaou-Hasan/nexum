@@ -119,6 +119,7 @@ using System; using System.Diagnostics; using System.IO; using System.Text; usin
 public sealed class NxRun {
     public double Seconds; public long PeakBytes; public int ExitCode;
     public long   StdoutBytes; public int Polls; public string Error;
+    public string DrainError;
 }
 
 public static class NxProc {
@@ -142,8 +143,13 @@ public static class NxProc {
         return sb.ToString();
     }
 
-    // stdoutPath == null discards stdout. Drain threads exist either way so a
-    // full pipe can never deadlock the child.
+    // A null or empty stdoutPath means "discard". It MUST be tested with
+    // IsNullOrEmpty, not == null: PowerShell binds $null to a C# string
+    // parameter as String.Empty, so a `== null` test silently builds
+    // FileStream("") -- which throws inside the drain thread, kills it, and
+    // leaves the child blocked forever on a full stdout pipe. That is not
+    // hypothetical: it made `nx dump-ir` appear to hang for 120 s when it
+    // really takes 0.05 s. The drain failure is reported, not swallowed.
     public static NxRun Run(string file, string[] args, string stdoutPath, int pollMs, int timeoutMs) {
         var r = new NxRun();
         var psi = new ProcessStartInfo();
@@ -151,20 +157,37 @@ public static class NxProc {
         psi.UseShellExecute = false; psi.CreateNoWindow = true;
         psi.RedirectStandardOutput = true; psi.RedirectStandardError = true; psi.RedirectStandardInput = true;
 
+        // Open the sink BEFORE the child starts, so a bad path is a loud
+        // error here rather than a silently dead drain thread.
+        FileStream outFile = null;
+        Stream dst = Stream.Null;
+        if (!string.IsNullOrEmpty(stdoutPath)) {
+            try {
+                outFile = new FileStream(stdoutPath, FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 16);
+                dst = outFile;
+            } catch (Exception ex) {
+                r.Error = "sink: " + ex.Message; return r;
+            }
+        }
+
         var sw = Stopwatch.StartNew();
         Process p;
         try { p = Process.Start(psi); }
         catch (Exception ex) { r.Error = "start: " + ex.Message; r.Seconds = sw.Elapsed.TotalSeconds; return r; }
 
         long outBytes = 0;
+        string drainErrMsg = null;
         var drainOut = new Thread(() => {
-            try {
-                Stream dst = stdoutPath == null ? Stream.Null
-                    : (Stream)new FileStream(stdoutPath, FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 16);
-                var buf = new byte[1 << 16]; int n;
-                while ((n = p.StandardOutput.BaseStream.Read(buf, 0, buf.Length)) > 0) { dst.Write(buf, 0, n); Interlocked.Add(ref outBytes, n); }
-                dst.Flush(); if (dst != Stream.Null) dst.Dispose();
-            } catch { }
+            var buf = new byte[1 << 16];
+            while (true) {
+                int c;
+                try { c = p.StandardOutput.BaseStream.Read(buf, 0, buf.Length); }
+                catch (Exception ex) { drainErrMsg = "read: " + ex.Message; break; }
+                if (c <= 0) break;
+                Interlocked.Add(ref outBytes, c);
+                try { dst.Write(buf, 0, c); }
+                catch (Exception ex) { drainErrMsg = "write: " + ex.Message; break; }
+            }
         });
         var drainErr = new Thread(() => { try { p.StandardError.BaseStream.CopyTo(Stream.Null); } catch { } });
         drainOut.IsBackground = true; drainErr.IsBackground = true;
@@ -184,8 +207,11 @@ public static class NxProc {
         try { p.Refresh(); long v = p.PeakWorkingSet64; if (v > peak) peak = v; } catch { }
         try { if (!exited) p.WaitForExit(); r.ExitCode = p.ExitCode; } catch { r.ExitCode = -1; }
         drainOut.Join(10000); drainErr.Join(10000);
+        try { if (outFile != null) { outFile.Flush(); outFile.Dispose(); } } catch { }
         r.Seconds = sw.Elapsed.TotalSeconds;
         r.PeakBytes = peak; r.Polls = polls; r.StdoutBytes = outBytes;
+        r.DrainError = drainErrMsg;
+        if (drainErrMsg != null && r.Error == null) r.Error = "drain: " + drainErrMsg;
         try { p.Dispose(); } catch { }
         return r;
     }
@@ -471,13 +497,23 @@ foreach ($p in $programs) {
     foreach ($m in $modes) {
         $all = @($raw | Where-Object { $_.program -eq $p.BaseName -and $_.mode -eq $m })
         if ($all.Count -eq 0) { continue }
-        $rows = @($all | Where-Object { $_.rep_floor_ms -le $LoadFactor * $floorMin })
-        $dropped = $all.Count - $rows.Count
-        if ($rows.Count -eq 0) { $rows = $all; $dropped = 0 }
+        # A run that errored (timeout, drain failure, non-zero exit) is NOT a
+        # measurement. Excluding it from the statistics matters: a single
+        # 120 s timeout in the middle of seven 0.05 s runs would otherwise
+        # become the median. They stay in the raw CSV and are counted here.
+        $errored = @($all | Where-Object { $_.error -or $_.exit -ne 0 })
+        $clean = @($all | Where-Object { -not $_.error -and $_.exit -eq 0 })
+        $rows = @($clean | Where-Object { $_.rep_floor_ms -le $LoadFactor * $floorMin })
+        $dropped = $clean.Count - $rows.Count
+        if ($rows.Count -eq 0) { $rows = $clean }
+        if ($rows.Count -eq 0) {
+            Write-Host ("  {0}/{1}: NO VALID RUNS ({2} errored: {3})" -f $p.BaseName, $m, $errored.Count, (($errored | Select-Object -First 1).error)) -ForegroundColor Red
+            $script:Failures += "$($p.BaseName)/$m : $($errored.Count) errored run(s)"
+            continue
+        }
         $st = Get-Stats $rows.seconds
         $pkRows = @($rows | Where-Object { $_.peak -gt 0 })
         $pkMax = if ($pkRows.Count) { ($pkRows | Measure-Object peak -Maximum).Maximum } else { 0 }
-        $bad = @($rows | Where-Object { $_.exit -ne 0 -or $_.error })
         $summary += [pscustomobject]@{
             program = $p.BaseName
             family = $(if ($manifest.ContainsKey("$($p.BaseName).nx")) { $manifest["$($p.BaseName).nx"].family } else { '' })
@@ -485,6 +521,7 @@ foreach ($p in $programs) {
             mode = $m
             n = $st.n
             n_dropped = $dropped
+            n_error = $errored.Count
             med_s = [math]::Round($st.med, 4)
             min_s = [math]::Round($st.min, 4)
             max_s = [math]::Round($st.max, 4)
@@ -493,7 +530,6 @@ foreach ($p in $programs) {
             cv_pct = [math]::Round($st.cv * 100, 1)
             peak_mb = [math]::Round($pkMax / 1MB, 2)
             peak_sampled = ($pkRows.Count -gt 0)
-            bad_runs = $bad.Count
             samples_s = $st.vals
         }
     }
@@ -603,9 +639,14 @@ W "per-mode medians (s), with spread:"
 W ("repeat floors observed (ms): {0}" -f (($allFloors | ForEach-Object { '{0:N1}' -f $_ }) -join ', '))
 W ("clean-repeat filter: rep_floor <= {0:N1}ms ; {1} of {2} distinct readings kept" -f ($LoadFactor * $floorMin), $cleanFloors.Count, $allFloors.Count)
 W ""
-W ("{0,-14} {1,10} {2,4} {3,7} {4,10} {5,9} {6,9} {7,9} {8,7} {9,7}" -f 'program', 'mode', 'n', 'drop', 'med', 'min', 'max', 'sd', 'cv%', 'pkMB')
+W ("{0,-14} {1,10} {2,4} {3,6} {4,6} {5,10} {6,9} {7,9} {8,9} {9,7} {10,7}" -f 'program', 'mode', 'n', 'drop', 'err', 'med', 'min', 'max', 'sd', 'cv%', 'pkMB')
 foreach ($r in $summary) {
-    W ("{0,-14} {1,10} {2,4} {3,7} {4,10:N4} {5,9:N4} {6,9:N4} {7,9:N4} {8,7:N1} {9,7:N1}" -f $r.program, $r.mode, $r.n, $r.n_dropped, $r.med_s, $r.min_s, $r.max_s, $r.sd_s, $r.cv_pct, $r.peak_mb)
+    W ("{0,-14} {1,10} {2,4} {3,6} {4,6} {5,10:N4} {6,9:N4} {7,9:N4} {8,9:N4} {9,7:N1} {10,7:N1}" -f $r.program, $r.mode, $r.n, $r.n_dropped, $r.n_error, $r.med_s, $r.min_s, $r.max_s, $r.sd_s, $r.cv_pct, $r.peak_mb)
+}
+if ($script:Failures.Count -gt 0) {
+    W ""
+    W "ERRORED (program, mode) pairs -- excluded from all statistics above:"
+    $script:Failures | ForEach-Object { W "  $_" }
 }
 W ""
 W "raw samples: $rawCsv"

@@ -206,7 +206,7 @@ fn field_ty(
 /// (`xs.push(1)` for `push(xs, 1)`) consults this: an attribute name with
 /// a known arity rewrites to the builtin call, so sugar needs no separate
 /// table to drift out of sync. Free function (not a method) so the
-/// interpreter and backend crates can share the gate.
+/// the backend crate can share the gate.
 pub fn builtin_arity(name: &str) -> Option<usize> {
     match name {
         // The full Stage 3 set lives in `check_builtin`; this gate stays
@@ -1953,7 +1953,7 @@ impl Checker {
 
 fn arith_result(l: &Ty, op: BinOp, r: &Ty) -> Option<Ty> {
     use Ty::*;
-    // Operator result matrix (mirrors the interpreter).
+    // Operator result matrix. This is the single owner of Int/Float promotion.
     if matches!(op, BinOp::Add) {
         if matches!((l, r), (Str, Str)) {
             return Some(Str);
@@ -2246,7 +2246,7 @@ mod tests {
         ok("a, b = 1, 2\n");
         ok("fn f():\n    return 1, 2\na, b = f()\n");
         // Two targets against one value is destructuring, which the
-        // interpreter resolves at runtime; one target against two values
+        // resolved at runtime; one target against two values
         // is a shape error.
         assert!(!err("a = 1, 2\n").is_empty());
     }

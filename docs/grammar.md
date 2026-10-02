@@ -1,8 +1,10 @@
 # The Nexum grammar
 
-Derived from the implementation, not from intent. Every rule below names the
-file and function that enforces it, so a claim here can be checked against
-the code:
+Derived from the implementation, not from intent. Every rule below names
+the file and function that enforces it where there is one, so a claim here
+can be checked against the code. Where there is no single enforcing
+function -- a runtime semantic with one implementation, for instance --
+the rule is stated normatively and this document is the authority.
 
 | Layer | Source |
 | --- | --- |
@@ -265,8 +267,13 @@ A block may not be empty.
 `parallel:` takes a block of task statements, not a list of expressions. Its
 tasks are analysed for conflicts: conflict-free tasks run on a thread pool,
 conflicting ones serialise in program order. Output is byte-identical
-either way. A task may not `return`, and may not write a name that is
-local to the enclosing function.
+either way, and it comes out in task order regardless of which way the
+block was scheduled -- that is rule R5 in section 3.1.1. A task may not
+`return`, and may not write a name that is local to the enclosing function.
+
+Neither loop form counts iterations against a limit and call depth is not
+tracked, so there is no iteration budget and no recursion limit to
+configure -- rule R4 in section 3.1.1.
 
 ### 2.4 Modules
 
@@ -377,6 +384,78 @@ the second comparison is a Bool, so `1 < 2 < 3` is rejected statically
 with "cannot order Bool and Int" rather than silently doing something
 surprising — but it is worth knowing that the parse is left-associative.
 
+#### 3.1.1 Fixed runtime rules
+
+Five rules that were previously ambiguous and are now decided. Each one
+is stated so that a single test can check it, and each is owned by this
+document: an implementation that disagrees with one of them is a bug, not
+an alternative reading of the language. They live here because this is
+where the operator rules live; the string rule is also summarised in
+section 4.2 and the `parallel:` rule in section 2.3.
+
+**R1. Integer overflow traps. It never wraps.**
+`+`, `-`, `*`, `//` and `%` on two `Int`s compute exactly in `i64`. If
+the exact result lies outside `-9223372036854775808 .. 9223372036854775807`,
+the program stops with the runtime error "integer overflow". There is no
+wrapping, no saturating, and no `Int` value that stands for "too big":
+`9223372036854775807 + 1` is an error, not `-9223372036854775808`. `**`
+is the one arithmetic operator that does not follow this rule, and R2
+says why. Division or modulus by zero remains a runtime error, unchanged.
+
+**R2. `Int ** Int` saturates; a negative exponent is rejected.**
+- A negative exponent on an `Int` base is a runtime error: "negative
+  exponent on Int; use a Float exponent for a fractional result". So
+  `2 ** -1` is an error while `2.0 ** -1` is `0.5`. This is the rule
+  referred to above: the grammar admits the exponent, the runtime
+  decides whether the arithmetic exists.
+- If the exact result is not representable, the answer is the extreme
+  `Int` in the direction of the base: `9223372036854775807` for a
+  positive base, `-9223372036854775808` for a negative one. It does not
+  wrap.
+- The two bases whose power is always exactly representable are answered
+  exactly instead of being clamped: a base of `0` gives `0` for any
+  positive exponent, and a base of `-1` gives `1` or `-1` by the parity of
+  the exponent. `0 ** 0` is `1`.
+- Because saturation is defined here, `**` cannot trap on magnitude. A
+  program that needs to know whether a power overflowed has to compute the
+  bound itself; there is no builtin that reports it.
+
+**R3. A string is a sequence of characters, not of bytes.**
+Every operation that counts, indexes, slices or walks a `Str` uses the
+same unit, and no operation can split a character in half:
+- `len(s)` is a count of characters. A five-character "hello" whose `e`
+  carries an acute accent has length 5, whatever the source encoding of
+  the literal was.
+- `s[i]` is the one-character string at character index `i`, negative
+  indices counting from the end exactly as for a list (section 3.3).
+- A slice takes characters: `s[a:b]` starts at character `a`, and the
+  step counts characters.
+- `for c in s` yields one-character strings, one per character.
+- `x in s` tests membership in the character sequence. Matching never
+  starts or ends inside a character, so no substring test can match a
+  fragment of a multi-byte character.
+
+A character-counted string and a byte-counted string are different
+languages, which is why this is a rule and not an implementation detail.
+
+**R4. There is no loop-iteration limit and no recursion-depth limit.**
+Neither `while` nor `for` counts iterations against any constant, and
+call depth is not tracked. No program is refused for looping or
+recursing deeply. What eventually stops a runaway recursion is the
+native stack, which is a property of the machine, not a rule of the
+language: there is no diagnostic to catch and no limit to configure.
+
+**R5. `parallel:` produces its output in task (spawn) order.**
+Tasks run concurrently, but the order in which a `parallel:` block's
+effects become observable is the order the tasks are written in, not the
+order threads happen to finish. Two tasks in one block that both print are
+therefore executed one after the other in program order, on every run and
+on every scheduling. `fn conflicts` in `compiler/nx-ir/src/lib.rs` is what
+enforces it: two tasks that print conflict with each other ("keep stdout
+order deterministic"), and `fn partition` then lays tasks into batches in
+program order. It is a promise about observable behaviour, so a test can
+check it by running the block repeatedly and diffing the output.
+
 ### 3.2 Primary expressions
 
 ```text
@@ -478,7 +557,9 @@ q.x = 0.0      # p is unchanged
 This is why `self` is a copy and why writing through a read-only `self` is
 refused rather than permitted and ignored.
 
-Strings are shared but never mutated in place.
+Strings are shared but never mutated in place. A `Str` is a sequence of
+characters rather than of bytes, and `len`, indexing, slicing, iteration
+and `in` all count the same characters -- rule R3 in section 3.1.1.
 
 ### 4.3 Ambient builtins
 
@@ -549,6 +630,7 @@ Errors the checker reports, collected so the surface is legible:
 | Duplicate field, duplicate method, duplicate field name in a method | parse error |
 | String escape other than `\n \t \r \" \\` | lex error |
 | Negative exponent on an `Int` base; zero or negative slice step | **runtime** error |
+| `Int` overflow in `+`, `-`, `*`, `//`, `%`; `//` or `%` by zero | **runtime** error (section 3.1.1, R1) |
 
 ---
 
@@ -647,7 +729,7 @@ parallel:
     b = 2
 ```
 
-Output, verified:
+Expected output:
 
 ```text
 12
@@ -667,6 +749,15 @@ true true true
 1 negative zero positive
 -2
 ```
+
+The block above is the published expectation, and with no second
+execution path left to diff it against, the only machine check behind it
+is `tools/verify.ps1`: it builds every example natively twice, once by
+default and once with `NX_NOUNBOX=1`, and requires the two runs to be
+byte-identical, which proves the unboxing pass is a representation change
+and not a language change. Nothing compares a run against this block, so
+editing the block is a claim about the language that has to be re-run by
+hand to confirm.
 
 Two notes on the example:
 

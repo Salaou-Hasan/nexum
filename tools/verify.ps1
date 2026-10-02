@@ -22,18 +22,22 @@
 $ErrorActionPreference = 'Continue'
 
 $root = Split-Path -Parent $PSScriptRoot
-$nx = Join-Path (Join-Path (Join-Path $root 'target') 'debug') 'nx.exe'
 
 # Build the compiler under test. Using an installed copy from $CARGO_HOME\bin
 # would let this report all-green while testing a binary from many commits
 # ago, which is worse than not testing at all.
+# Honour an inherited CARGO_TARGET_DIR so this harness can run against an
+# out-of-tree build instead of fighting another process for target\debug.
+if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+    $env:CARGO_TARGET_DIR = Join-Path $root 'target'
+}
+$nx = Join-Path (Join-Path $env:CARGO_TARGET_DIR 'debug') 'nx.exe'
 Push-Location $root
-$env:CARGO_TARGET_DIR = Join-Path $root 'target'
 & cargo build -q -p nx-driver --offline 2>&1 | Out-Null
 $built = $LASTEXITCODE
 Pop-Location
 if ($built -ne 0 -or -not (Test-Path $nx)) {
-    Write-Host "FATAL: could not build the compiler under test at $nx"
+    Write-Host "FATAL: could not build the compiler under test at $nx (cargo exit $built)"
     exit 2
 }
 
@@ -79,14 +83,23 @@ foreach ($rel in $examples) {
     $work = Join-Path $env:TEMP "nxverify_$stem"
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $work | Out-Null
-    Copy-Item $src (Join-Path $work $name) -Force
-    # Module examples import from examples/modules.
-    $modDir = Join-Path (Join-Path $root 'examples') 'modules'
-    if (Test-Path $modDir) {
-        Copy-Item -Recurse -Force $modDir $work
+
+    # An entry inside a subdirectory (examples/modules/main.nx) must keep its
+    # siblings, because its imports resolve relative to its own directory.
+    # Flattening it to the work root breaks every import it has.
+    $relDir = Split-Path $rel -Parent
+    $entryDir = $work
+    if ($relDir) {
+        $entryDir = Join-Path $work $relDir
+        New-Item -ItemType Directory -Force -Path $entryDir | Out-Null
+        $srcDir = Join-Path (Join-Path $root 'examples') $relDir
+        Copy-Item -Recurse -Force (Join-Path $srcDir '*') $entryDir
+    }
+    else {
+        Copy-Item $src (Join-Path $work $name) -Force
     }
 
-    Push-Location $work
+    Push-Location $entryDir
     try {
         $exe = Join-Path $work "$stem.exe"
 
