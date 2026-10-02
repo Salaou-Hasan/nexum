@@ -132,7 +132,7 @@ pub fn run_in_dir(src: &str, nounbox: bool, dir: &Path) -> Outcome {
             ),
         };
     }
-    let ir = match nx_codegen::compile_entry(src, &base) {
+    let ir = match nx_codegen::compile_opts(src, &base, !nounbox) {
         Ok(ir) => ir,
         Err(e) => {
             return Outcome {
@@ -152,9 +152,6 @@ pub fn run_in_dir(src: &str, nounbox: bool, dir: &Path) -> Outcome {
     cmd.arg("-O2").arg(&ll).arg("-o").arg(&out);
     if cfg!(unix) {
         cmd.arg("-lm");
-    }
-    if nounbox {
-        cmd.env("NX_NOUNBOX", "1");
     }
     let clang = match cmd.output() {
         Ok(o) => o,

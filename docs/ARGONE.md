@@ -35,7 +35,7 @@ unchecked boxes, and a build that merely compiles.
 
 9 crates, 17,290 lines, **zero external dependencies**, 318 `#[test]`
 attributes over 317 functions, **zero integration tests**, **no test
-invokes clang**, 13 examples with a three-way differential, 5
+invokes clang**, 13 examples with a two-way differential, 5
 Rust-referenced benchmarks. Full detail in `docs/architecture/audit.md`.
 
 Duplication, measured (my earlier 100/133 figure was wrong):
@@ -43,20 +43,20 @@ Duplication, measured (my earlier 100/133 figure was wrong):
 | | Stmt arms | Expr arms |
 | --- | --- | --- |
 | total across 5 walkers | 146 | 118 |
-| of which exhaustive language interpreters | 105 (3x18, 3x17) | — |
+| of which exhaustive language interpreters | was 105 (3x18, 3x17); now 70 | — |
 | of which partial re-derivations | 159 combined | |
 
-The 105 are compile-time-enforced sync and stay. The 159 are the target.
+The remaining exhaustive walkers are compile-time-enforced sync and stay. The partial re-derivations are the target.
 
 ---
 
 ## TASK 0 — Semantic correctness (blocks D onward)
 
-The audit ran eleven programs that behave differently on the two existing
-execution paths. All are reachable from valid source. Fix them, and make
-each impossible to reintroduce unnoticed.
+The audit ran eleven programs whose semantics are wrong. All are reachable
+from valid source. Fix them, and make each impossible to reintroduce
+unnoticed.
 
-1. integer `+ - * /` overflow — interpreter traps, native wraps
+1. integer `+ - * /` overflow — the native path wraps silently, with no diagnostic. `@.msg.overflow` is declared in `runtime.ll` and never raised.
 2. integer `**` saturation and negative exponent
 3. `"" in s` and `s in s`
 4. non-ASCII `len`, index, slice, iteration — characters vs bytes
@@ -64,15 +64,15 @@ each impossible to reintroduce unnoticed.
 6. `del d[missing_key]` silently no-ops
 7. `del name` unbinds vs stores `none`
 8. compound-assignment evaluation order is reversed
-9. `LOOP_LIMIT` / `CALL_LIMIT` exist only in the interpreter
-10. `parallel:` task output order — spawn order vs cursor-claimed
+9. ~~`LOOP_LIMIT` / `CALL_LIMIT`~~ — resolved: the interpreter is gone, and neither limit was ever a language semantic
+10. `parallel:` task output order is not the order the specification promises (grammar.md R5)
 11. `-9223372036854775808` is a parse error; `i64::MIN` is unrepresentable
 
 ### Gate
 
 - [ ] Each rule has exactly one written owner, named in `docs/grammar.md`
 - [ ] `grammar.md` no longer names a backend as the authority for meaning
-- [ ] Every one of the eleven agrees across interpreter / native / `NX_NOUNBOX`
+- [ ] Every one of the eleven has one written owner, and a test that fails if a second implementation re-derives it
 - [ ] `examples/boundaries.nx` covers them permanently as a differential fixture
 - [ ] `tools/verify.ps1` is trustworthy: builds from the tree, ordered byte
       diff, no line-dropping, exit codes checked, `examples/modules/` included
@@ -80,8 +80,8 @@ each impossible to reintroduce unnoticed.
 - [ ] Short-circuit `and`/`or` has a test on both sides (currently zero coverage)
 
 **Why first.** Building HIR/MIR on top of a backend that silently wraps
-integers produces two wrong implementations instead of one. The oracle is
-not currently an oracle.
+integers produces a silent wrong answer. The specification is not yet an
+oracle for the runtime.
 
 ---
 
@@ -139,7 +139,7 @@ Two deliberate non-actions, both verified:
   Centralising trades a free build-time invariant for a runtime table and
   leaves the 90% of each arm that matters still per-crate.
 - **Do not centralise the dispatch *predicate*.** `nx-types` asks the static
-  type, `nx-interp` the runtime tag, `nx-codegen` the representation type —
+  type, `nx-codegen` the representation type —
   which is `Unknown` whenever `NX_NOUNBOX` is set. Sharing the predicate
   would make `NX_NOUNBOX` a different language. Share the resolution *order*
   and the *messages*; share nothing else.
@@ -209,7 +209,7 @@ recompute after a transformation that could change it.
       stays unboxed across a region
 - [ ] Each pass has an equivalence test and a before/after benchmark
 - [ ] Invalidation rules written down, not implied
-- [ ] 13 examples still agree on all three paths after every pass
+- [ ] 13 examples still produce identical output with and without `NX_NOUNBOX` after every pass
 
 ---
 
@@ -269,14 +269,13 @@ Nexum's semantics** — the eleven divergences are exactly that failure.
 
 ## J — Execution and differential verification
 
-The interpreter becomes the documented oracle, which requires Task 0 first.
+There is no second execution path to differential against any more. Correctness rests on the expected-value tests in `compiler/nx-e2e`, so Task 0 is what makes them trustworthy.
 
 ### Gate
-- [ ] 13 examples identical across interpreter / legacy native / new native /
-      `NX_NOUNBOX`
+- [ ] 13 examples identical across legacy native / new native / `NX_NOUNBOX`
 - [ ] The differential is a CI gate, not a local script
 - [ ] `verify.ps1` builds from the tree and cannot pass against a stale binary
-- [ ] A self-test proves the oracle can go red, so it cannot rot to always-green
+- [ ] A self-test proves the differential can go red, so it cannot rot to always-green
 
 ---
 

@@ -12,7 +12,7 @@
 #
 # Depth is capped at 350 on purpose. The native backend survives about
 # 7000 frames and then takes a real stack overflow with no diagnostic, and
-# the interpreter refuses at 500 frames by design (`CALL_LIMIT`). A
+# depth is bounded only by the native stack. A
 # workload that has to stay inside both ceilings cannot honestly claim to
 # measure deep recursion; 350 is the compromise, and the ceilings are
 # reported in the audit rather than hidden.

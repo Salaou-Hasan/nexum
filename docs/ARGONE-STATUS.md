@@ -31,12 +31,14 @@ Status: not started
 
 - [ ] Each of the 11 rules has exactly one written owner, named in docs/grammar.md
 - [ ] docs/grammar.md no longer names a backend as the authority for runtime meaning
-- [ ] All 11 agree across interpreter / native / NX_NOUNBOX
+- [ ] All 11 have one written owner, and a test that fails if a second implementation re-derives them
+- [ ] The runtime has no known memory-safety defect; ASan must cover hand-written runtime IR, not just Rust code
+- [ ] No native test asserts a known-bad behaviour
 - [ ] examples/boundaries.nx covers them as a permanent differential fixture
 - [ ] verify.ps1 builds from the tree, ordered byte diff, no line-dropping, exit codes checked
 - [ ] verify.ps1 includes examples/modules/
 - [ ] CI natively compiles all 13 examples, including records, methods, syntax
-- [ ] Short-circuit and/or has a test on both execution paths
+- [ ] Short-circuit and/or is tested on both the short-circuiting and non-short-circuiting branches
       Evidence:
 
 ## A - Full architecture audit
@@ -62,7 +64,7 @@ Status: not started
 
 Status: not started
 
-- [ ] Partial re-derivation arms measurably reduced from 159
+- [ ] Partial re-derivation arms measurably reduced from the 159 measured with the interpreter present
 - [ ] Dead Checker::writable_receiver deleted, not wired up
 - [ ] NX_NOUNBOX still produces identical output on all 13 examples
 - [ ] Module path resolution is one function; intra-crate duplicate removed
@@ -100,7 +102,7 @@ Status: not started
 - [ ] SCCP, constant propagation, DCE, CSE, copy propagation, CFG simplify present
 - [ ] Each pass has an equivalence test and a before/after benchmark
 - [ ] Analysis invalidation rules written down, not implied
-- [ ] 13 examples still agree on all three paths after every pass
+- [ ] 13 examples still produce identical output with and without NX_NOUNBOX after every pass
       Evidence:
 
 ## G - LLVM integration boundary
@@ -138,10 +140,10 @@ Status: not started
 
 Status: not started
 
-- [ ] 13 examples identical across interpreter / legacy native / new native / NX_NOUNBOX
+- [ ] 13 examples identical across legacy native / new native / NX_NOUNBOX
 - [ ] The differential is a CI gate, not a local script
 - [ ] verify.ps1 cannot pass against a stale binary
-- [ ] A self-test proves the oracle can go red, so it cannot rot always-green
+- [ ] A self-test proves the differential can go red, so it cannot rot always-green
       Evidence:
 
 ## K - Nexum-level optimization

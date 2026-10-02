@@ -2318,23 +2318,32 @@ str:
   %tlow2 = icmp slt i64 %t12, 0
   %t22 = select i1 %tlow2, i64 0, i64 %t12
   %cap2 = sub i64 %t22, %f22
-  %cnt2 = sdiv i64 %cap2, %step
+  ; The element count is ceil(cap/step). floor(cap/step) agrees with it when
+  ; cap divides evenly and is one short otherwise: over 6 bytes with step 2
+  ; both give 3, but over 5 bytes the answer is 3 and floor says 2. That
+  ; shortfall was a heap buffer overflow.
+  %sp1 = add i64 %cap2, %step
+  %sp2 = sub i64 %sp1, 1
+  %cnt2 = sdiv i64 %sp2, %step
   %buf = call ptr @malloc(i64 %cnt2)
   br label %sscan
 sscan:
   %si = phi i64 [%f22, %str], [%si2, %sbody]
+  %so = phi i64 [0, %str], [%so2, %sbody]
   %sdone = icmp sge i64 %si, %t22
   br i1 %sdone, label %sout, label %sbody
 sbody:
   %srcp = getelementptr i8, ptr %s, i64 %si
   %c = load i8, ptr %srcp
-  ; The destination is packed from zero, not mirrored from the source
-  ; offset -- otherwise a slice starting past zero would write past the
-  ; end of the buffer.
-  %rel = sub i64 %si, %f22
-  %dstp = getelementptr i8, ptr %buf, i64 %rel
+  ; The output offset advances by ONE per element. Mirroring the source
+  ; offset (si - f22) advanced it by step instead, so a step of 2 wrote at
+  ; 0, 2, 4... leaving every odd byte uninitialised and running off the end
+  ; of a buffer sized for the packed result. That is why slicing a list
+  ; worked (it allocates then pushes) and slicing a string did not.
+  %dstp = getelementptr i8, ptr %buf, i64 %so
   store i8 %c, ptr %dstp
   %si2 = add i64 %si, %step
+  %so2 = add i64 %so, 1
   br label %sscan
 sout:
   %sv = call %NxVal @nx_str(ptr %buf, i64 %cnt2)

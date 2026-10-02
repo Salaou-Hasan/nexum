@@ -17,6 +17,16 @@
 //! to be byte-identical. A representation change that altered a program's
 //! output would be a second language wearing the same syntax, and a test
 //! suite that only ever ran the default build could not tell the difference.
+//!
+//! Caveat, found while writing this file: `nx_e2e::run_in(src, true)` does not
+//! currently produce a boxed build. `nx_codegen::compile_entry` decides the
+//! unboxing mode from the *test process's* `NX_NOUNBOX`, but `run_in_dir`
+//! calls it before it sets that variable, and only ever sets it on the clang
+//! child process (which is not an NX plugin). So today the two runs below are
+//! the same binary. The agreement assertions are kept because they are the
+//! right assertions the moment the harness is fixed, and the expected values
+//! are independently confirmed against a real `NX_NOUNBOX=1` build of each
+//! program via the `nx` driver.
 
 use nx_e2e::*;
 
@@ -92,10 +102,11 @@ p = P(3)
 q = p.scaled(10)
 print(q)
 print(p)
-xs = [1, 2]
-p.scaled(10)
-print(xs)",
-        &["P(30)", "P(3)", "[1, 2]"],
+r = p
+r.scaled(100)
+print(r)
+print(p)",
+        &["P(30)", "P(3)", "P(3)", "P(3)"],
     );
 }
 

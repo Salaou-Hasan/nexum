@@ -1,5 +1,136 @@
 # Changelog
 
+## v0.5.0
+
+### The interpreter is gone. Nexum compiles ahead-of-time, and that is all.
+
+`compiler/nx-interp` is deleted -- 3,575 lines and 96 tests -- along with every
+execution path that used it. There is now exactly one execution model:
+
+    source -> lexer -> parser -> type check -> LLVM IR -> clang -O2 -> native executable
+
+**CLI**
+
+- `nx <file.nx>` builds a native executable and runs it; it used to interpret
+- `nx --run <file.nx>` **removed**. It only ever meant "interpret".
+- `nx run <file.nx> [-o <out>]` accepts `-o`
+- `nx build` creates the `-o` target directory if it does not exist, so
+  `nx build a.nx -o build\release\a.exe` no longer fails inside the linker
+  with a message that never mentions nx
+- without `-o`, the executable lands beside its `.nx` source
+
+This is a breaking change. Anything scripting `nx <file>` for its speed now
+pays a compile, and `--run` must become `run`.
+
+### Replacing the oracle
+
+Deleting the interpreter removes the only part of the compiler that ever
+*executed* a Nexum program: `nx-codegen` asserts on emitted IR text and never
+runs anything, and nothing else invoked clang. So `compiler/nx-e2e` is a new
+crate with a compile-and-run harness, and 112 tests now execute real programs
+against expected values.
+
+Expected-value tests are a stronger oracle than a differential against a
+second engine. A differential can only tell you two implementations differ,
+never which is right -- and it reports "ok" when both are wrong. That is not
+hypothetical: the old three-way harness reported agreement on programs where
+the interpreter and the backend both returned a stale memoized value.
+
+Converting the suite immediately corrected three of my own expectations.
+Comparing a `P` to a `Q` is rejected rather than answered `false`;
+destructuring a non-tuple is a runtime rejection the checker does not catch;
+and my compound-assignment arithmetic was wrong. None of those could have
+been found by diffing two engines.
+
+### A heap buffer overflow in string slicing
+
+`print("abcdef"[::2])` returned heap garbage, and a 10-character string
+sliced with a step wrote past the end of its buffer. Two defects, both in
+`nx_slice`'s string path:
+
+1. the element count was `floor(cap/step)` where it must be `ceil`, so the
+   shortfall only appeared when `cap` did not divide evenly -- which is why
+   `"abcdef"[::2]` looked plausible and `"abcde"[::2]` did not
+2. the destination offset advanced by `step` instead of 1, leaving every odd
+   byte uninitialised *and* running off the end. The comment above it read
+   "packed from zero, not mirrored from the source offset" and then mirrored
+   the source offset.
+
+The list path was unaffected because it allocates then pushes, which is why
+slicing a list always looked right. Five regression tests pin it.
+
+### ASan does not currently cover the hand-written runtime
+
+The binaries import `clang_rt.asan_dynamic-x86_64.dll`, and ASan works on
+this machine -- a control C program trips it. Yet it reports **nothing** for
+the overflow above. So a green ASan run is not evidence that the runtime is
+memory-safe, which is the opposite of what the CI step implies.
+
+### tools/verify.ps1
+
+The differential is now two-way (native, then native with `NX_NOUNBOX=1`).
+Four defects fixed: it ran a stale copy of `nx` from `$CARGO_HOME\bin`, so it
+could report all-green against a binary from many commits ago; it dropped
+blank lines from both sides before comparing; it used `Compare-Object`, a set
+comparison, while claiming byte-identical output; and it checked no exit code,
+so a program failing identically on both paths compared equal. The corpus is
+now an explicit 14-entry list including `examples/modules/`, which a
+non-recursive glob had skipped entirely -- module imports had no CI coverage at
+all.
+
+The dangerous version of this edit is worth recording: deleting `$interp`
+while leaving `Compare-Object` pointed at it would have printed `ok 14/14`
+while comparing nothing.
+
+### nx-ast / nx-codegen / nx-types: dangling comments
+
+Fourteen source comments referred to the deleted interpreter. One was actively
+harmful. `nx-codegen`'s `Pow` arm carried:
+
+    // which panics or saturates exactly as the interpreter does.
+
+It does not. That path calls `@nx_ipow` directly, bypassing every check in
+`@nx_pow`, which is why `2 ** 100` returned 0 and `2 ** -1` returned 1. A
+comment asserting a guarantee the code does not make is how a bug survives
+review.
+
+### docs/grammar.md: the specification owns runtime meaning
+
+The authority table read:
+
+    | Runtime meaning | compiler/nx-codegen/src/runtime.ll |
+
+The *language specification named a backend as the authority for meaning*.
+That is the root cause of every divergence recorded in v0.4.4: each rule was
+written once in Rust and once in LLVM IR with no owner, and the two drifted.
+It now names this document, with `arith_result` as the single checker-side
+owner of operator result types.
+
+Five runtime rules are now written down as testable rules R1-R5: integer
+overflow traps; `**` saturates and rejects a negative exponent; a string is a
+sequence of characters; there is no loop or recursion limit; `parallel:`
+output is in task order.
+
+**R1, R2 and R3 are specified but not implemented.** The backend still wraps
+on overflow, `nx_ipow` is still unguarded, and strings are still byte-indexed.
+The specification is deliberately ahead of the runtime; those are Argone
+Task 0.
+
+### Still broken, found by the new tests, not fixed here
+
+- a method call on a receiver reached through a field type-checks and then
+  fails codegen ("only modules, types and builtins support attribute calls")
+- `print` of a string literal inside a genuinely-parallel task emits invalid
+  LLVM IR: the `@.nxstr` global is appended to the top-level buffer while a
+  task function is being emitted into it
+- `parallel:` inside a function is unusable
+- assigning to a slice target (`xs[1:2] = 9`) silently discards the value
+- slicing a list of lists is shallow, though a plain bind deep-copies
+
+### Test counts
+
+222 unit tests plus 112 native execution tests. `cargo test --workspace` runs
+everything; `tools/verify.ps1` reports 14/14.
 ## v0.4.4
 
 ### ARGONE revised: MLIR removed as a prerequisite, and the audit found something worse

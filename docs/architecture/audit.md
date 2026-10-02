@@ -31,7 +31,7 @@ native backend.** All eleven are VERIFIED by execution.
 
 Plus, code-proven but not executed here:
 
-- `LOOP_LIMIT` (10M) and `CALL_LIMIT` (500) exist only in the interpreter.
+- `LOOP_LIMIT` (10M) and `CALL_LIMIT` (500) existed only in the interpreter. The team has since ruled that neither was ever a language semantic, and both died with the crate (grammar.md R4).
   `parallel:` task output order is spawn order on the interpreter and
   cursor-claimed on native.
 - Compound assignment evaluates the RHS before the target on native

@@ -1148,7 +1148,7 @@ pub fn compile_entry(source: &str, base: &std::path::Path) -> Result<String, Cod
 /// Compile with an explicit unboxing switch. `compile_entry` reads
 /// NX_NOUNBOX; tests use this directly so they do not race on the
 /// process environment.
-fn compile_opts(
+pub fn compile_opts(
     source: &str,
     base: &std::path::Path,
     unbox_on: bool,

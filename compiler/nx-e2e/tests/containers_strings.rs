@@ -914,3 +914,56 @@ print(y.yf())
         "circular import",
     );
 }
+// --- string slicing with a step: regression -------------------------
+//
+// These were a heap buffer overflow. nx_slice's string path malloc'd
+// floor(cap/step) and wrote the result at source-relative offsets, so a
+// step of 2 wrote at 0, 2, 4... into a buffer sized for the packed
+// answer: every odd byte stayed uninitialised and the tail ran off the
+// end. The list path was unaffected because it allocates then pushes,
+// which is why slicing a list always looked right.
+
+#[test]
+fn string_slice_with_a_step_packs_the_output() {
+    // cap divides evenly: the case that hid the bug, because floor agrees
+    assert_one(r#"print("abcdef"[::2])"#, "ace");
+    assert_one(r#"print("abcdef"[1::2])"#, "bdf");
+    // cap does NOT divide evenly: this is what floor got wrong
+    assert_one(r#"print("abcde"[::2])"#, "ace");
+    assert_one(r#"print("xyz"[::2])"#, "xz");
+    assert_one(r#"print("abcdef"[::3])"#, "ad");
+    assert_one(r#"print("abcdef"[::5])"#, "af");
+    assert_one(r#"print("abcdefghij"[::2])"#, "acegi");
+}
+
+#[test]
+fn string_slice_step_of_one_is_the_whole_slice() {
+    assert_one(r#"print("abcdef"[::1])"#, "abcdef");
+    assert_one(r#"print("abcdef"[1::1])"#, "bcdef");
+}
+
+#[test]
+fn string_slice_without_a_step_is_unaffected() {
+    assert_one(r#"print("abcdef"[1:])"#, "bcdef");
+    assert_one(r#"print("abcdef"[:3])"#, "abc");
+    assert_one(r#"print("abcdef"[2:4])"#, "cd");
+    assert_one(r#"print("abcdef"[:])"#, "abcdef");
+}
+
+#[test]
+fn the_list_step_slice_still_works() {
+    // The list path allocates then pushes, so it was never affected. Pin it
+    // anyway: the string fix must not have disturbed the sibling path.
+    assert_one("print([0,1,2,3,4,5][::2])", "[0, 2, 4]");
+    assert_one("print([0,1,2,3,4,5][1::2])", "[1, 3, 5]");
+    assert_one("print([0,1,2,3,4,5][::3])", "[0, 3]");
+}
+
+#[test]
+fn a_stepped_string_slice_is_packed_not_strided() {
+    // Guards the specific defect: if the destination offset regresses to
+    // mirroring the source offset, this prints a string longer than the
+    // source, which is the observable symptom of the overflow.
+    let o = run(r#"print(len("abcdefgh"[::2]))"#);
+    assert_eq!(o.lines(), vec!["4".to_string()]);
+}
