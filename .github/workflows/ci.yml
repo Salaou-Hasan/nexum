@@ -129,6 +129,15 @@ jobs:
           # Same pipeline as every other step, plus ASan via NX_CFLAGS. The
           # program must run clean: exit 0 and no sanitizer diagnostic
           # anywhere in its output. ASan writes to stderr, so capture it.
+          #
+          # Honest scope: clang links the ASan runtime for .ll inputs but
+          # emits no load/store checks into them (measured: a volatile
+          # runtime-index OOB is silent from .ll while identical C trips),
+          # so this step only catches interceptor-visible libc misuse
+          # (e.g. an over-long %.*s at printf time), never a heap/stack OOB
+          # inside NX code. A green run is not memory-safety evidence for
+          # the hand-written runtime -- see CHANGELOG.md and the Task 0
+          # gate item, which stays open until coverage is real.
           for f in $EXAMPLES; do
             safe="$(echo "$f" | tr '/.' '__')"
             NX_CFLAGS="-fsanitize=address -g" cargo run -q -p nx-driver -- build "$f" -o "asan-$safe"

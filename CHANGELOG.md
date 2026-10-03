@@ -55,6 +55,29 @@ The binaries import `clang_rt.asan_dynamic-x86_64.dll`, and ASan works on
 this machine -- a control C program trips it. Yet it reports **nothing** for
 the overflow above. So a green ASan run is not evidence that the runtime is
 memory-safe, which is the opposite of what the CI step implies.
+Measured, and now precisely explained: when clang is handed a `.ll` file,
+`-fsanitize=address` links the ASan runtime but emits **zero** load/store
+checks into the output. A minimal `.ll` with an unfoldable heap OOB
+(`volatile` store+load at a runtime index into `malloc(3)`) exits silently
+at both `-O0` and `-O2`, with and without `datalayout`/`target triple`,
+while the identical C program trips `heap-buffer-overflow ... WRITE of size
+1`. Symbol check confirms it: the `.ll` binary contains `__asan_init` and
+no `__asan_report_*` at all; the C binary has them. The only live ASan
+machinery in an NX binary is the libc interceptors -- which is why a
+garbage string trips at `printf` time (`%.*s` argument validation) while
+the OOB writes that produced it stay invisible. Reintroducing the old
+`nx_slice` sizing bug reproduces exactly that shape: silent writes, abort
+only at print.
+Two consequences. First, the CI `asan check` step can only catch
+interceptor-visible libc misuse, never a heap/stack/global OOB inside NX
+code; real coverage of the hand-written IR needs something that works on
+uninstrumented binaries (Valgrind on Linux) or an instrumenting middle
+step this toolchain does not ship (`opt` is absent here). Second, on
+Windows an ASan binary does not start at all unless the clang runtime dir
+(`...\LLVM\lib\clang\23\lib\windows`) is on `PATH` -- without it the exit
+is `0xC0000135`, not a sanitizer report. The Task 0 gate item ("ASan must
+cover hand-written runtime IR, not just Rust code") stays open, and now
+says what would close it.
 ### tools/verify.ps1
 The differential is now two-way (native, then native with `NX_NOUNBOX=1`).
 Four defects fixed: it ran a stale copy of `nx` from `$CARGO_HOME\bin`, so it
