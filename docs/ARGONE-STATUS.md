@@ -122,7 +122,7 @@ Status: not started
 - [ ] A Rust crate builds a module and function via LLVM-C.dll with zero new dependencies
 - [ ] It emits IR text for inspection and an object file for linking
 - [ ] Output matches the legacy text path for one example
-- [ ] A second example exercising records and parallel: also matches
+- [ ] A second example exercising records and methods: also matches
 - [ ] LLVM version and version-compatibility policy recorded
       Evidence:
 

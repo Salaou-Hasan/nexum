@@ -12,7 +12,7 @@ the rule is stated normatively and this document is the authority.
 | Statements, expressions, precedence | `compiler/nx-parser/src/lib.rs` |
 | Types, methods, ambient builtins | `compiler/nx-types/src/lib.rs` |
 | Operator result types | `fn arith_result`, `compiler/nx-types/src/lib.rs` |
-| Runtime meaning (arithmetic, strings, limits, `parallel:`) | this document: sections 3.1.1, 2.3, 4.2 |
+| Runtime meaning (arithmetic, strings, limits) | this document: sections 3.1.1, 4.2 |
 
 Runtime meaning is owned by this specification, not by a backend. There
 is one execution model (ahead-of-time compilation to a native
@@ -37,7 +37,7 @@ identifiers):
 
 ```text
 if elif else while for in fn return break continue
-import from as parallel
+import from as
 true false None del assert type impl self mut own
 and or not
 ```
@@ -172,7 +172,7 @@ statement ::= type_decl
             | if_stmt
             | while_stmt
             | for_stmt
-            | parallel_stmt
+
             | import_stmt
             | from_import_stmt
             | return_stmt
@@ -248,7 +248,7 @@ else          ::= "else" ":" block
 
 while_stmt    ::= "while" expr ":" block
 for_stmt      ::= "for" ident "in" expr ":" block
-parallel_stmt ::= "parallel" ":" block
+
 
 return_stmt   ::= "return" expr_list?
 break_stmt    ::= "break"
@@ -264,12 +264,18 @@ expression. Only one loop variable: there is no `for a, b in pairs`.
 
 A block may not be empty.
 
-`parallel:` takes a block of task statements, not a list of expressions. Its
-tasks are analysed for conflicts: conflict-free tasks run on a thread pool,
-conflicting ones serialise in program order. Output is byte-identical
-either way, and it comes out in task order regardless of which way the
-block was scheduled -- that is rule R5 in section 3.1.1. A task may not
-`return`, and may not write a name that is local to the enclosing function.
+`parallel:` was removed. It ran conflict-free tasks on a thread pool while
+serialising conflicting ones, and it promised output in task order whatever the
+scheduler did. That promise was enforced by a static approximation of
+race-freedom, and the approximation had holes: a name bound inside a `parallel:`
+block is a module global in the compiled program, but the dependency analysis
+did not know that, so dependent tasks were emitted into one concurrent batch.
+A program could then print the wrong answer whenever it lost the race -- and it
+usually passed its own test, because the race is usually won. Correctness was
+worth more than the throughput, so the feature is gone rather than the claim.
+There is no `spawn`, no thread pool and no atomic in the language. Real
+concurrency is a Stage 6 question, once ownership exists to make sharing
+explicit rather than inferred.
 
 Neither loop form counts iterations against a limit and call depth is not
 tracked, so there is no iteration budget and no recursion limit to
@@ -391,7 +397,7 @@ is stated so that a single test can check it, and each is owned by this
 document: an implementation that disagrees with one of them is a bug, not
 an alternative reading of the language. They live here because this is
 where the operator rules live; the string rule is also summarised in
-section 4.2 and the `parallel:` rule in section 2.3.
+section 4.2.
 
 **R1. Integer overflow traps. It never wraps.**
 `+`, `-`, `*`, `//` and `%` on two `Int`s compute exactly in `i64`. If
@@ -445,16 +451,13 @@ recursing deeply. What eventually stops a runaway recursion is the
 native stack, which is a property of the machine, not a rule of the
 language: there is no diagnostic to catch and no limit to configure.
 
-**R5. `parallel:` produces its output in task (spawn) order.**
-Tasks run concurrently, but the order in which a `parallel:` block's
-effects become observable is the order the tasks are written in, not the
-order threads happen to finish. Two tasks in one block that both print are
-therefore executed one after the other in program order, on every run and
-on every scheduling. `fn conflicts` in `compiler/nx-ir/src/lib.rs` is what
-enforces it: two tasks that print conflict with each other ("keep stdout
-order deterministic"), and `fn partition` then lays tasks into batches in
-program order. It is a promise about observable behaviour, so a test can
-check it by running the block repeatedly and diffing the output.
+**R5. Execution is single-threaded and in program order.**
+There is no concurrency in the language, so nothing can be reordered or
+observed out of order. This was previously the `parallel:` ordering rule; it
+survives the removal of `parallel:` because the guarantee is still worth
+stating, and a single-threaded model is the one thing a compiler can promise
+without a proof obligation. It is also what makes R4's "the native stack is
+what stops runaway recursion" an honest answer rather than a gap.
 
 ### 3.2 Primary expressions
 
@@ -625,7 +628,7 @@ Errors the checker reports, collected so the surface is legible:
 | Several targets against one non-tuple value | type error |
 | A name shared between a type and a variable/function/param | type error |
 | `break`/`continue` outside a loop, `return` outside a function | type error |
-| `return` or an outer write inside a `parallel:` task | type error |
+
 | Empty block, inconsistent indentation, tab indentation | parse error |
 | Duplicate field, duplicate method, duplicate field name in a method | parse error |
 | String escape other than `\n \t \r \" \\` | lex error |
@@ -723,10 +726,6 @@ fn main():
     print(t)
 
 main()
-
-parallel:
-    a = 1
-    b = 2
 ```
 
 Expected output:

@@ -19,13 +19,6 @@ use nx_types::Ty;
 
 const PRELUDE: &str = include_str!("runtime.ll");
 
-/// OS thread bindings. Only the two shims differ between platforms; the
-/// pool itself is shared, so it is tested identically everywhere.
-#[cfg(windows)]
-const THREADS: &str = include_str!("runtime_threads_win.ll");
-#[cfg(not(windows))]
-const THREADS: &str = include_str!("runtime_threads_unix.ll");
-
 /// A compiled value. Two facts, deliberately kept apart:
 /// - `raw` is the *physical* form: Some(t) means `reg` holds a bare scalar
 ///   of type t, None means it holds a boxed `%NxVal`.
@@ -129,9 +122,9 @@ fn mangle_desc(module: &str, name: &str) -> String {
 ///
 /// Only what becomes a *global*: a plain name bound at the top level, an
 /// import alias, and — the reason this recurses — a name assigned inside
-/// a `parallel:` task. A task is emitted as its own function, so a name it
-/// binds is still module-visible and still needs its global declared up
-/// front, before any function body exists to emit it into.
+/// a nested block at module level. A name bound inside one is still
+/// module-visible and still needs its global declared up front, before any
+/// function body exists to emit it into.
 ///
 /// Loop variables, comprehension variables and function-local bindings are
 /// deliberately not collected: those are slots inside the function that
@@ -163,16 +156,7 @@ fn collect_module_globals(s: &Stmt, out: &mut Vec<String>) {
         Stmt::Import { module: m, alias, .. } => {
             push(alias.as_ref().unwrap_or(m));
         }
-        // The case this exists for: a task body is outlined into its own
-        // function mid-module, so anything it binds has to be a global that
-        // was already declared. Nested blocks inside a task are followed
-        // too, because `if`/`while`/`for` inside a task still bind module
-        // names.
-        Stmt::Parallel { tasks, .. } => {
-            for t in tasks {
-                collect_module_globals(t, out);
-            }
-        }
+
         Stmt::If { then_body, elifs, else_body, .. } => {
             for t in then_body {
                 collect_module_globals(t, out);
@@ -228,8 +212,8 @@ mod tests {
     ///
     /// Both halves of this have been violated at different times. An
     /// outlined function emitted mid-body was the first. The second was a
-    /// global: a name first assigned inside a `parallel:` task is a module
-    /// global, but the task is outlined into its own function, so the name
+    /// global: a name first assigned inside a nested block is a module
+    /// global, but the block is emitted after the globals section, so the name
     /// was discovered *during* emission and the declaration landed between
     /// an `entry:` label and the instruction after it -- which clang
     /// rejects with "expected instruction opcode", long before anything
@@ -255,37 +239,20 @@ mod tests {
         }
     }
 
-    /// A trailing `parallel:` block is the shape that exposed the global
-    /// bug: when the block is last, nothing afterwards re-enters the
-    /// globals section, so a task-bound name declared mid-function has
-    /// nowhere to be fixed up.
-    #[test]
-    fn a_trailing_parallel_block_declares_its_globals_up_front() {
-        for src in [
-            "x = 0\nparallel:\n    a = 1\n    b = 2\n",
-            "x = 0\nparallel:\n    if x > 0:\n        a = 1\n    b = 2\n",
-            "x = 0\nparallel:\n    for i in 0..3:\n        a = i\n    b = 2\n",
-            "x = 0\nparallel:\n    a = 1\n",
-        ] {
-            let ir = compile_entry(src, std::path::Path::new(".")).unwrap();
-            assert_top_level_defines(&ir);
-        }
-    }
 
     /// A loop variable is scoped to its loop, so it is a local slot and
     /// never a module global.
     ///
     /// It used to be a global at top level, because `store_fresh` takes the
     /// `in_init` path for anything bound while emitting module-level code.
-    /// That leaked the variable into every later statement and let two
-    /// loops collide on the name -- and inside a `parallel:` task the
-    /// collision is a data race, which breaks the determinism contract.
+    /// That leaked the variable into every later statement and let two loops
+    /// collide on the name.
     #[test]
     fn a_loop_variable_is_never_a_global() {
         for src in [
             "for i in 0..3:\n    print(i)\n",
             "for i in 0..3:\n    for j in [1]:\n        print(i)\n",
-            "x = 0\nparallel:\n    for i in 0..3:\n        x = i\n",
+            "x = 0\nfor i in 0..3:\n    x = i\n",
         ] {
             let ir = compile_entry(src, std::path::Path::new(".")).unwrap();
             assert!(
@@ -446,103 +413,34 @@ mod tests {
         }
     }
 
+    /// `parallel:` was removed rather than deprecated. It asked the scheduler
+    /// to prove race-freedom statically, and the proof had holes: a name
+    /// bound inside a `parallel:` block is a module global in the emitted
+    /// code, but the dependency analysis did not know that, so dependent
+    /// tasks were emitted into one concurrent batch. A program could then
+    /// print the wrong answer whenever it lost the race -- a miscompile that
+    /// passed its own test more often than not.
+    ///
+    /// This test now pins the removal: the block is a compile error and no
+    /// threading primitive survives anywhere in the output.
     #[test]
-    fn parallel_outlines_at_top_level() {
-        let ir = compile_entry(
-            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
-            std::path::Path::new("."),
-        )
-        .unwrap();
-        assert_top_level_defines(&ir);
-    }
-
-    /// A real batch must actually start workers, not fall back to running
-    /// the tasks inline. Windows used to lower sequentially here, which
-    /// made `parallel:` a no-op on the platform most users are on.
-    #[test]
-    fn parallel_batch_starts_a_pool() {
-        let ir = compile_entry(
-            "a = 0\nb = 0\nc = 0\nparallel:\n    a = 1\n    b = 2\n    c = 3\nprint(a, b, c)\n",
-            std::path::Path::new("."),
-        )
-        .unwrap();
-        // The shim wraps the OS call, so the pool is what codegen targets.
-        let starts = ir.matches("call ptr @nx_thread_start").count();
-        let joins = ir.matches("call void @nx_thread_join").count();
-        assert_eq!(starts, 3, "one worker per task expected in:\n{ir}");
-        assert_eq!(joins, 3, "every worker must be joined:\n{ir}");
-        assert_top_level_defines(&ir);
-    }
-
-    /// The calling thread works too, which both saves a thread and
-    /// guarantees the batch drains even if a spawn were to fail.
-    #[test]
-    fn calling_thread_joins_the_pool() {
-        let ir = compile_entry(
-            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
-            std::path::Path::new("."),
-        )
-        .unwrap();
-        assert_eq!(ir.matches("call ptr @nx_pool_worker(ptr").count(), 1);
-    }
-
-    /// Every worker must be started before any join, and the caller must
-    /// have finished its own share before joining, or the batch would
-    /// partly run inline and lose the overlap.
-    #[test]
-    fn parallel_starts_all_before_joining_any() {
-        let ir = compile_entry(
-            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
-            std::path::Path::new("."),
-        )
-        .unwrap();
-        let last_start = ir.rfind("call ptr @nx_thread_start").expect("a start call");
-        let first_join = ir.find("call void @nx_thread_join").expect("a join call");
-        let self_work = ir.find("call ptr @nx_pool_worker(ptr").expect("self work");
-        assert!(last_start < self_work, "start every worker before working");
-        assert!(self_work < first_join, "finish your own share before joining");
-    }
-
-    /// The pool hands out each task index exactly once, so no task runs
-    /// twice and none is skipped. The count is stored, not recomputed,
-    /// so it has to match the number of workers.
-    #[test]
-    fn pool_publishes_task_count() {
-        let ir = compile_entry(
-            "a = 0\nb = 0\nparallel:\n    a = 1\n    b = 2\nprint(a, b)\n",
-            std::path::Path::new("."),
-        )
-        .unwrap();
-        // The count lives in field 1. Anchor on the caller's own pool
-        // alloca so the prelude's unrelated %NxPool uses cannot match.
-        let anchor = ir.find("= alloca %NxPool").expect("pool alloca");
-        let after = &ir[anchor..];
-        let field1 = after.find("i32 1").expect("pool count field") + "i32 1".len();
-        let rest = &after[field1..];
-        let store = rest.find("store i64").expect("pool count store") + "store i64".len();
-        let line = &rest[store..];
-        let line = &line[..line.find('\n').unwrap_or(0)];
-        assert!(line.trim_start().starts_with('2'), "two tasks queued: {line}");
-    }
-
-    /// Conflicting tasks must serialize rather than race, so a batch of
-    /// one is emitted inline with no pool at all. Making both tasks write
-    /// the same name is what forces the conflict.
-    #[test]
-    fn conflicting_tasks_stay_inline() {
-        let ir = compile_entry(
-            "a = 0\nparallel:\n    a = 1\n    a = 2\nprint(a)\n",
-            std::path::Path::new("."),
-        )
-        .unwrap();
-        assert_eq!(
-            ir.matches("call ptr @nx_thread_start").count(),
-            0,
-            "conflicting tasks serialize, so no pool:\n{ir}"
+    fn parallel_is_gone() {
+        assert!(
+            compile_entry("a = 0\nparallel:\n    a = 1\n", std::path::Path::new(".")).is_err(),
+            "parallel: must not compile"
         );
-        assert_top_level_defines(&ir);
+        // Nothing in the runtime may spawn a thread any more.
+        let ir = compile_entry("a = 1\nprint(a)\n", std::path::Path::new(".")).unwrap();
+        for gone in [
+            "nx_thread_start",
+            "nx_thread_join",
+            "nx_pool_worker",
+            "nx_pool_claim",
+            "%NxPool",
+        ] {
+            assert!(!ir.contains(gone), "{gone} survived in:\n{ir}");
+        }
     }
-
     /// Body of one emitted function, so a test can assert on its code
     /// without matching the prelude.
     fn body_of(ir: &str, mangled: &str) -> String {
@@ -857,8 +755,12 @@ mod tests {
         )
         .unwrap();
         let b = body_of(&ir, &mangle_fn("__main__", "f"));
-        assert!(b.contains("mul i64"), "Int arithmetic must be a raw mul:\n{b}");
-        assert!(b.contains("add i64"), "Int arithmetic must be a raw add:\n{b}");
+        // An llvm.*.with.overflow intrinsic is raw machine arithmetic, not a
+        // call: LLVM lowers it to the same add/mul plus overflow flags. What
+        // this test actually guards is that the operands never get boxed,
+        // which is what the two assertions below say.
+        assert!(b.contains("@llvm.smul.with.overflow.i64"), "Int multiply must stay unboxed and checked:\n{b}");
+        assert!(b.contains("@llvm.sadd.with.overflow.i64"), "Int add must stay unboxed and checked:\n{b}");
         assert!(!b.contains("@nx_mul"), "boxed mul helper must be gone:\n{b}");
         assert!(!b.contains("@nx_add"), "boxed add helper must be gone:\n{b}");
     }
@@ -986,7 +888,7 @@ mod tests {
                 assert!(!touches, "typed slot {slot} used as a box: {t}\n{b}");
             }
         }
-        assert!(b.contains("mul i64"), "loop body should be raw arithmetic:\n{b}");
+        assert!(b.contains("@llvm.smul.with.overflow.i64"), "loop body should be raw checked arithmetic:\n{b}");
     }
 
     #[test]
@@ -1516,8 +1418,6 @@ impl Gen {
 
     fn emit_prelude(&mut self) {
         self.pre.push_str(PRELUDE);
-        self.pre.push('\n');
-        self.pre.push_str(THREADS);
         self.pre.push('\n');
     }
 
@@ -2110,9 +2010,8 @@ impl Gen {
         // First pass: every name that needs a module-level global, so all of
         // them can be declared before any function body is emitted.
         //
-        // This has to reach inside a `parallel:` block. Its tasks are
-        // outlined into their own functions, and a name first assigned
-        // inside a task is still a module global. If the pass only saw
+        // This has to reach inside nested blocks. A name first assigned
+        // inside one is still a module global. If the pass only saw
         // top-level statements, the global would be discovered *during*
         // emission and appended to `top` in the middle of a function body,
         // which clang rejects with "expected instruction opcode".
@@ -2699,7 +2598,6 @@ impl Gen {
                 }
                 Ok(())
             }
-            Stmt::Parallel { tasks, span } => self.emit_parallel(tasks, *span),
             Stmt::Expr(e) => {
                 self.emit_expr(e)?;
                 Ok(())
@@ -3099,8 +2997,7 @@ impl Gen {
         // compiled, ran, and printed the wrong thing.
         //
         // A genuine module variable has no local slot, so it still reaches
-        // the global branch, which other modules and parallel tasks read by
-        // address.
+        // the global branch, which other modules read by address.
         if self.locals.contains_key(name) {
             // Rebinding a Unique local: release the old buffers first. An
             // unboxed slot holds a bare scalar with nothing to free.
@@ -3147,8 +3044,8 @@ impl Gen {
     /// where `store_fresh` would take the `in_init` path. A loop variable is
     /// not visible after the loop, so giving it module scope leaks it into
     /// every later statement and lets two loops collide on the name. Inside
-    /// a `parallel:` task that collision is a data race, which would break
-    /// the determinism contract outright.
+    /// a nested scope that the collision would make two bindings share one
+    /// slot.
     fn bind_loop_var(&mut self, name: &str, v: &NV) -> LoopVarScope {
         let saved_slot = self.locals.remove(name);
         let saved_rep = self.rep.remove(name);
@@ -3903,6 +3800,36 @@ impl Gen {
             .unwrap_or(Ty::Unknown)
     }
 
+    /// One checked i64 operation, leaving the result in `out`.
+    ///
+    /// `intrin` is an llvm.*.with.overflow intrinsic, which returns the value
+    /// and the overflow flag from a single operation -- so the check costs
+    /// nothing the arithmetic did not already cost, and LLVM folds the whole
+    /// thing away whenever it can prove the range. That covers most loop
+    /// counters and index arithmetic, which is where a checked add would
+    /// otherwise cost the most.
+    ///
+    /// The failing path is a separate block for the same reason the assertion
+    /// path is: an operation that does not overflow costs one never-taken
+    /// branch and nothing else.
+    fn emit_i64_checked(&mut self, intrin: &str, a: &str, b: &str, out: &str) {
+        let pair = self.reg();
+        let flag = self.reg();
+        let bad = self.lab("ovf");
+        let ok = self.lab("ovf_ok");
+        let done = self.lab("ovf_done");
+        self.w(&format!("  {pair} = call {{ i64, i1 }} @{intrin}(i64 {a}, i64 {b})"));
+        self.w(&format!("  {out} = extractvalue {{ i64, i1 }} {pair}, 0"));
+        self.w(&format!("  {flag} = extractvalue {{ i64, i1 }} {pair}, 1"));
+        self.w(&format!("  br i1 {flag}, label %{bad}, label %{ok}"));
+        self.w(&format!("{ok}:"));
+        self.w(&format!("  br label %{done}"));
+        self.w(&format!("{bad}:"));
+        self.w("  call void @nx_panic(ptr @.msg.overflow)");
+        self.w("  unreachable");
+        self.w(&format!("{done}:"));
+    }
+
     /// Arithmetic and comparison on two proven scalars, straight to LLVM
     /// instructions with no box in between. Returns None when either
     /// operand is not statically known, so the caller falls back to the
@@ -3929,9 +3856,14 @@ impl Gen {
                 let b = self.coerce(&r, &ty);
                 let out = self.reg();
                 match (op, float) {
-                    (BinOp::Add, false) => self.w(&format!("  {out} = add i64 {a}, {b}")),
-                    (BinOp::Sub, false) => self.w(&format!("  {out} = sub i64 {a}, {b}")),
-                    (BinOp::Mul, false) => self.w(&format!("  {out} = mul i64 {a}, {b}")),
+                    // R1 (docs/grammar.md 3.1.1): an Int result that does not
+                    // fit in i64 traps rather than wrapping. Checked inline
+                    // because that is where the operands are still proven
+                    // scalars -- boxing them to reach a helper would undo the
+                    // unboxing this whole path exists for.
+                    (BinOp::Add, false) => self.emit_i64_checked("llvm.sadd.with.overflow.i64", &a, &b, &out),
+                    (BinOp::Sub, false) => self.emit_i64_checked("llvm.ssub.with.overflow.i64", &a, &b, &out),
+                    (BinOp::Mul, false) => self.emit_i64_checked("llvm.smul.with.overflow.i64", &a, &b, &out),
                     // Division keeps the runtime's divide-by-zero panic.
                     (BinOp::Div, false) => {
                         self.w(&format!("  {out} = call i64 @nx_div_i64(i64 {a}, i64 {b})"))
@@ -4531,336 +4463,5 @@ impl Gen {
         Ok(NV::boxed_known(r, ty))
     }
 
-    fn emit_parallel(&mut self, tasks: &[Stmt], span: Span) -> Result<(), CodegenError> {
-        if tasks.is_empty() {
-            return Ok(());
-        }
-        let module = self.cur_module.clone();
-        let locals: HashSet<String> = self.locals.keys().cloned().collect();
-        let sums = nx_ir::task_summaries(&self.programs, &module, &locals, tasks).map_err(|e| {
-            CodegenError { message: e.message, line: span.line, col: span.col }
-        })?;
-        for batch in nx_ir::partition(&sums) {
-            if batch.len() == 1 {
-                self.emit_stmt(&tasks[batch[0]])?;
-                if self.term.is_some() {
-                    // Return inside a task: rejected by the checker.
-                    return Err(err(span, "return inside parallel task is not supported".to_string()));
-                }
-                continue;
-            }
-            self.emit_threaded_batch(&module, tasks, &batch, span)?;
-        }
-        Ok(())
-    }
-
-    /// Outline each task in `batch` as its own function, run them all
-    /// concurrently, then join. Reads of enclosing locals are snapshotted
-    /// into globals first, so a task only ever sees a consistent copy.
-    fn emit_threaded_batch(
-        &mut self,
-        module: &str,
-        tasks: &[Stmt],
-        batch: &[usize],
-        span: Span,
-    ) -> Result<(), CodegenError> {
-        // Snapshot the enclosing locals each task reads (read-only sharing).
-        let mut reads: Vec<String> = Vec::new();
-        for &i in batch {
-            collect_outer_reads(&tasks[i], &self.locals, &mut reads);
-        }
-        let site = self.lab("par");
-        let mut snap_globals = Vec::new();
-        for (k, name) in reads.iter().enumerate() {
-            let g = format!("nx__snap_{site}_{k}");
-            self.top.push_str(&format!("@{g} = global %NxVal zeroinitializer\n"));
-            let v = self.emit_expr(&Expr::Var(name.clone(), span))?;
-            // Tasks read the snapshot through globals, so it stays boxed.
-            let vb = self.unbox(&v);
-            self.w(&format!("  store %NxVal {vb}, ptr @{g}"));
-            snap_globals.push(g);
-        }
-        // Outline each task; save ambient codegen state around it.
-        let saved_locals = self.locals.clone();
-        let saved_rep = self.rep.clone();
-        let saved_modrefs = self.modrefs.clone();
-        let saved_falias = self.falias.clone();
-        let saved_loops = std::mem::take(&mut self.loops);
-        let mut fnames = Vec::new();
-        for &i in batch {
-            let fname = format!("nx__task_{site}_{i}");
-            self.locals.clear();
-            // Task bodies run on another thread: every slot they see is
-            // boxed, regardless of the enclosing function's unboxing.
-            self.rep.clear();
-            self.term = None;
-            self.to_top = true;
-            self.w(&format!("define ptr @{fname}(ptr %_) {{"));
-            self.w("entry:");
-            self.begin_allocs();
-            // Rehydrate snapshot reads as task locals. Each worker clones
-            // container storage: the snapshot global is shared read-only
-            // traffic, and a task that mutates through it (push, `a[i] =
-            // v`) must not corrupt the parent's value or race with another
-            // worker: each worker gets its own deep copy, because the
-            // same way.
-            for (k, name) in reads.iter().enumerate() {
-                let v = self.reg();
-                let slot = self.alloca("%NxVal");
-                self.w(&format!("  store %NxVal zeroinitializer, ptr {slot}"));
-                self.w(&format!("  {v} = load %NxVal, ptr @{}", snap_globals[k]));
-                let c = self.reg();
-                self.w(&format!("  {c} = call %NxVal @nx_clone(%NxVal {v})"));
-                self.w(&format!("  store %NxVal {c}, ptr {slot}"));
-                self.locals.insert(name.clone(), slot);
-            }
-            self.emit_stmt(&tasks[i])?;
-            if self.term.is_some() {
-                return Err(err(span, "return inside parallel task is not supported".to_string()));
-            }
-            self.w("  ret ptr null");
-            self.w("}");
-            self.end_allocs();
-            self.to_top = false;
-            fnames.push(fname);
-        }
-        self.locals = saved_locals;
-        self.rep = saved_rep;
-        self.modrefs = saved_modrefs;
-        self.falias = saved_falias;
-        self.loops = saved_loops;
-        self.term = None;
-        self.run_pool(&fnames);
-        let _ = module;
-        Ok(())
-    }
-
-    /// Run a batch through a pool sized to the batch: one worker per
-    /// task, each claiming from a shared cursor until it is drained, then
-    /// join everyone. A worker that finishes early picks up the next
-    /// task, so uneven tasks still balance.
-    ///
-    /// The pool is per-block rather than global on purpose: no process
-    /// wide mutable state, nothing to shut down, and no question about
-    /// whether a pool outlives the code that queued work into it.
-    fn run_pool(&mut self, fnames: &[String]) {
-        let n = fnames.len() as i64;
-
-        // The pool block lives in the caller's frame, so it outlives every
-        // worker: they are all joined before this function returns.
-        let pool = self.alloca("%NxPool");
-        let arr = self.alloca(&format!("[{n} x ptr]"));
-        for (i, fname) in fnames.iter().enumerate() {
-            let slot = self.reg();
-            self.w(&format!("  {slot} = getelementptr [{n} x ptr], ptr {arr}, i64 0, i64 {i}"));
-            self.w(&format!("  store ptr @{fname}, ptr {slot}"));
-        }
-        let cursor = self.reg();
-        self.w(&format!("  {cursor} = getelementptr %NxPool, ptr {pool}, i64 0, i32 0"));
-        self.w(&format!("  store i64 0, ptr {cursor}"));
-        let cnt = self.reg();
-        self.w(&format!("  {cnt} = getelementptr %NxPool, ptr {pool}, i64 0, i32 1"));
-        self.w(&format!("  store i64 {n}, ptr {cnt}"));
-        let tasks = self.reg();
-        self.w(&format!("  {tasks} = getelementptr %NxPool, ptr {pool}, i64 0, i32 2"));
-        self.w(&format!("  store ptr {arr}, ptr {tasks}"));
-
-        // Start the workers. All of them before any join, so the batch
-        // overlaps instead of running one task at a time.
-        let mut handles = Vec::new();
-        for _ in fnames {
-            let h = self.reg();
-            self.w(&format!("  {h} = call ptr @nx_thread_start(ptr @nx_pool_worker, ptr {pool})"));
-            handles.push(h);
-        }
-        // The calling thread is a worker too: with n tasks it saves a
-        // thread, and it guarantees forward progress even if a spawn
-        // were to fail.
-        let me = self.reg();
-        self.w(&format!("  {me} = call ptr @nx_pool_worker(ptr {pool})"));
-        for h in handles {
-            self.w(&format!("  call void @nx_thread_join(ptr {h})"));
-        }
-    }
 }
 
-/// Enclosing-local names read anywhere inside a task statement.
-fn collect_outer_reads(s: &Stmt, locals: &HashMap<String, String>, out: &mut Vec<String>) {
-    match s {
-        Stmt::Assign { targets, values, .. } => {
-            // `a[i] = v` reads the container, so the enclosing name is
-            // still captured; a plain bind is not a read.
-            for t in targets {
-                match t {
-                    nx_ast::Target::Index { base, .. } | nx_ast::Target::Attr { base, .. } => {
-                        collect_outer_reads_expr(base, locals, out)
-                    }
-                    nx_ast::Target::Name(_) => {}
-                }
-            }
-            for v in values {
-                collect_expr_reads(v, locals, out);
-            }
-        }
-        Stmt::AssignOp { target, value, .. } => {
-            match target {
-                nx_ast::Target::Name(name) => {
-                    if locals.contains_key(name) && !out.contains(name) {
-                        out.push(name.clone());
-                    }
-                }
-                nx_ast::Target::Index { base, index } => {
-                    collect_outer_reads_expr(base, locals, out);
-                    collect_expr_reads(index, locals, out);
-                }
-                nx_ast::Target::Attr { base, .. } => collect_outer_reads_expr(base, locals, out),
-            }
-            collect_expr_reads(value, locals, out);
-        }
-        Stmt::Del { targets, .. } => {
-            for t in targets {
-                match t {
-                    nx_ast::Target::Index { base, .. } | nx_ast::Target::Attr { base, .. } => {
-                        collect_outer_reads_expr(base, locals, out)
-                    }
-                    nx_ast::Target::Name(_) => {}
-                }
-            }
-        }
-        Stmt::Assert { cond, message, .. } => {
-            collect_expr_reads(cond, locals, out);
-            if let Some(m) = message {
-                collect_expr_reads(m, locals, out);
-            }
-        }
-        Stmt::Print { values, .. } => {
-            for v in values {
-                collect_expr_reads(v, locals, out);
-            }
-        }
-        Stmt::If { cond, then_body, elifs, else_body, .. } => {
-            collect_expr_reads(cond, locals, out);
-            for t in then_body {
-                collect_outer_reads(t, locals, out);
-            }
-            for (_, b) in elifs {
-                for t in b {
-                    collect_outer_reads(t, locals, out);
-                }
-            }
-            if let Some(b) = else_body {
-                for t in b {
-                    collect_outer_reads(t, locals, out);
-                }
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            collect_expr_reads(cond, locals, out);
-            for t in body {
-                collect_outer_reads(t, locals, out);
-            }
-        }
-        Stmt::For { var, iter, body, .. } => {
-            match iter {
-                nx_ast::ForIter::Range { start, end } => {
-                    collect_expr_reads(start, locals, out);
-                    collect_expr_reads(end, locals, out);
-                }
-                nx_ast::ForIter::Each(e) => collect_expr_reads(e, locals, out),
-            }
-            // The loop var shadows; reads of it inside are task-local.
-            let mut inner = locals.clone();
-            inner.remove(var);
-            for t in body {
-                collect_outer_reads(t, &inner, out);
-            }
-        }
-        Stmt::Return { values, .. } => {
-            for e in values {
-                collect_expr_reads(e, locals, out);
-            }
-        }
-        Stmt::Parallel { tasks, .. } => {
-            for t in tasks {
-                collect_outer_reads(t, locals, out);
-            }
-        }
-        Stmt::Expr(e) => collect_expr_reads(e, locals, out),
-        _ => {}
-    }
-}
-
-/// Captured enclosing-local reads under an expression used as an
-/// assignment base (`a[i] = v`). Kept separate from `collect_expr_reads`
-/// because the name it finds is the container's, not a plain read.
-fn collect_outer_reads_expr(
-    e: &Expr,
-    locals: &HashMap<String, String>,
-    out: &mut Vec<String>,
-) {
-    collect_expr_reads(e, locals, out)
-}
-
-fn collect_expr_reads(e: &Expr, locals: &HashMap<String, String>, out: &mut Vec<String>) {
-    match e {
-        Expr::Var(n, _) => {
-            if locals.contains_key(n) && !out.contains(n) {
-                out.push(n.clone());
-            }
-        }
-        Expr::Attr { base, .. } => collect_expr_reads(base, locals, out),
-        Expr::Index { base, index, .. } => {
-            collect_expr_reads(base, locals, out);
-            collect_expr_reads(index, locals, out);
-        }
-        Expr::List(items, _) => {
-            for it in items {
-                collect_expr_reads(it, locals, out);
-            }
-        }
-        Expr::Dict(pairs, _) => {
-            for (k, v) in pairs {
-                collect_expr_reads(k, locals, out);
-                collect_expr_reads(v, locals, out);
-            }
-        }
-        Expr::Range { start, end, .. } => {
-            collect_expr_reads(start, locals, out);
-            collect_expr_reads(end, locals, out);
-        }
-        Expr::Slice { base, from, to, step, .. } => {
-            collect_expr_reads(base, locals, out);
-            for part in [from, to, step].into_iter().flatten() {
-                collect_expr_reads(part, locals, out);
-            }
-        }
-        Expr::IfExpr { cond, then_value, else_value, .. } => {
-            collect_expr_reads(cond, locals, out);
-            collect_expr_reads(then_value, locals, out);
-            collect_expr_reads(else_value, locals, out);
-        }
-        Expr::Comprehension { element, var, iter, cond, .. } => {
-            // The loop variable is bound inside the comprehension, so it
-            // must not be counted as a read of an enclosing binding.
-            let mut inner = locals.clone();
-            inner.remove(var);
-            collect_expr_reads(iter, locals, out);
-            collect_expr_reads(element, &inner, out);
-            if let Some(c) = cond {
-                collect_expr_reads(c, &inner, out);
-            }
-        }
-        Expr::Unary { expr, .. } => collect_expr_reads(expr, locals, out),
-        Expr::Binary { left, right, .. } => {
-            collect_expr_reads(left, locals, out);
-            collect_expr_reads(right, locals, out);
-        }
-        Expr::Call { callee, args, .. } => {
-            collect_expr_reads(callee, locals, out);
-            for a in args {
-                collect_expr_reads(a, locals, out);
-            }
-        }
-        _ => {}
-    }
-}

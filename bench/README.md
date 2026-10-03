@@ -78,10 +78,11 @@ a benchmark to be written a particular way:
 
 - **No indexed assignment.** `a[i] = v` does not parse. Every list here
   is built with `push` and then read-only.
-- **No `%` operator.** The fills use `x - (x / m) * m`, which is exact
-  for the non-negative values involved.
+- **`%` was avoided for no good reason.** The fills used to compute
+  `x - (x / m) * m` on the theory that NX had no `%`. It does, and it is the
+  exact form for these non-negative values, so the detour only measured itself.
 - **No structs or tuples.** n-body would need a contrived
-  parallel-list layout, so it was dropped rather than benchmarked
+  columnar layout, so it was dropped rather than benchmarked
   through a workaround that measures the workaround.
 - **Comments are `#`, not `//`.**
 

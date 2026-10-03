@@ -3,15 +3,11 @@
 # boxed values behind a pointer, and Rust's Vec<i64> is a flat allocation.
 # Included precisely so the comparison is not only flattering.
 
-# NX has no % operator: this is x - (x / m) * m, exact for these values.
-fn mod(x, m):
-    return x - (x / m) * m
-
 n = 2000000
 xs = []
 i = 0
 while i < n:
-    push(xs, mod(i * 31, 1000))
+    push(xs, i * 31 % 1000)
     i = i + 1
 
 total = 0

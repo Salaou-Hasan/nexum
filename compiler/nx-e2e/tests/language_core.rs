@@ -777,3 +777,84 @@ fn floor_division_and_modulo_do_not_widen_to_float() {
         "operator '%' not supported for Float and Float",
     );
 }
+  // ---------------------------------------------------------------------------
+  // 13. R1 and R2: integer arithmetic has a defined answer or none at all
+  // ---------------------------------------------------------------------------
+  //
+  // Both rules used to hold only on the boxed path. The default build unboxes,
+  // and the unboxed helpers inherited neither rule, so an ordinary program got
+  // a silently wrapped number instead of an answer. Every case below is the
+  // default build.
+
+  #[test]
+  fn integer_arithmetic_that_does_not_fit_traps() {
+      assert_runtime_error("print(9223372036854775807 + 1)", "integer overflow");
+      assert_runtime_error("print(-9223372036854775807 - 2)", "integer overflow");
+      assert_runtime_error("print(9223372036854775807 * 2)", "integer overflow");
+      assert_runtime_error("print(-9223372036854775807 * 2)", "integer overflow");
+  }
+
+  #[test]
+  fn the_minimum_divided_by_minus_one_traps() {
+      // sdiv i64 INT64_MIN, -1 is poison rather than a wrapped value: the
+      // quotient does not exist. All three division spellings must refuse it,
+      // because each one reaches a different helper.
+      let min = "x = -9223372036854775807 - 1\n";
+      assert_runtime_error(&format!("{min}print(x / -1)"), "integer overflow");
+      assert_runtime_error(&format!("{min}print(x // -1)"), "integer overflow");
+      assert_runtime_error(&format!("{min}print(x % -1)"), "integer overflow");
+  }
+
+  #[test]
+  fn arithmetic_that_fits_is_unaffected() {
+      assert_output("print(2 + 3, 7 - 9, 6 * 7)", &["5 -2 42"]);
+      assert_output("print(7 // 2, -7 // 2, 7 // -2, -7 // -2)", &["3 -4 -4 3"]);
+      assert_output("print(7 % 3, -7 % 3, 7 % -3, -7 % -3)", &["1 2 -2 -1"]);
+      // Float printing trims to 15 significant digits with no trailing `.0`,
+      // so 4.0 prints as `4`. That is the formatting examples/methods.nx and
+      // examples/records.nx already depend on; 4.0 and 4 printing alike is a
+      // real wart, but changing it is a formatting decision, not an
+      // arithmetic one.
+      assert_output("print(1.5 + 2.5, 1.5 * 2.0)", &["4 3"]);
+  }
+
+  #[test]
+  fn a_bounded_accumulator_never_trips_the_overflow_check() {
+      // The check has to be free when it cannot fire. Summing a range and
+      // running a countdown both stay far inside i64 and must not trap.
+      assert_output(
+          "t = 0\nfor i in 1..100001:\n    t = t + i\nprint(t)",
+          &["5000050000"],
+      );
+      assert_output(
+          "n = 100000\nt = 0\nwhile n > 0:\n    t = t + n\n    n = n - 1\nprint(t)",
+          &["5000050000"],
+      );
+  }
+
+  #[test]
+  fn an_integer_power_saturates_rather_than_wrapping() {
+      assert_one("print(2 ** 63)", "9223372036854775807");
+      assert_one("print(2 ** 100)", "9223372036854775807");
+      assert_one("print((-2) ** 63)", "-9223372036854775808");
+      assert_one("print(3 ** 62)", "5069619362125685561");
+  }
+
+  #[test]
+  fn an_integer_power_answers_the_exact_cases_instead_of_saturating() {
+      // 0, 1 and -1 never grow, so clamping them would be a lie.
+      assert_one("print(0 ** 100)", "0");
+      assert_one("print(1 ** 100)", "1");
+      assert_one("print((-1) ** 100)", "1");
+      assert_one("print((-1) ** 101)", "-1");
+      assert_one("print(2 ** 0)", "1");
+      assert_one("print(0 ** 0)", "1");
+  }
+
+  #[test]
+  fn a_negative_exponent_on_ints_is_rejected() {
+      assert_runtime_error("print(2 ** -1)", "negative exponent");
+      // The Float path asks a different question and still answers it.
+      assert_one("print(2.0 ** -1)", "0.5");
+      assert_one("print(2.0 ** 10)", "1024");
+  }

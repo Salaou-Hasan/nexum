@@ -5,23 +5,14 @@
 # Sizes are small enough that the result is exactly representable in f64,
 # so Rust's output must match digit for digit.
 #
-# Note: NX has no indexed assignment (`a[i] = v`), so every list here is
-# built with push and consumed read-only. Rust builds the same vectors
-# with indexing, which is a real difference in expressiveness that this
-# benchmark is shaped around rather than measuring.
-
-# NX has no % operator: this is x - (x / m) * m, exact for these values.
-fn mod(x, m):
-    return x - (x / m) * m
-
 n = 260
 
 a = []
 b = []
 i = 0
 while i < n * n:
-    push(a, mod(i * 7919, 1000) * 0.5 - 250.0)
-    push(b, mod(i * 6271, 997) * 0.25 - 124.0)
+    push(a, i * 7919 % 1000 * 0.5 - 250.0)
+    push(b, i * 6271 % 997 * 0.25 - 124.0)
     i = i + 1
 
 c = []
@@ -43,7 +34,7 @@ while i < n:
 check = 0.0
 i = 0
 while i < n * n:
-    check = check + c[i] * (1.0 + mod(i, 7))
+    check = check + c[i] * (1.0 + i % 7)
     i = i + 1
 
 print(check)

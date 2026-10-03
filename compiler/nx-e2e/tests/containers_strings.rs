@@ -7,8 +7,8 @@
 //! Three areas get deliberately more attention than their size suggests:
 //!
 //! * **Dict insertion order** is a contract, not an accident of the hash map.
-//!   `parallel:` promises spawn-order output, and it can only keep that promise
-//!   if a dict iterates deterministically, so the order is asserted three ways.
+//!   Programs print dicts, sort them and zip them against other containers, so
+//!   the order has to be the order the writes happened in. Asserted three ways.
 //! * **Slice copying.** A slice that aliased its parent would make the value
 //!   model a lie for the most common container operation there is.
 //! * **`del`.** Deleting is where "out of range" and "not a container" and
@@ -362,8 +362,7 @@ print(d["a"][1], d["b"]["c"], len(d["a"]), len(d["b"]))
 
 #[test]
 fn dict_insertion_order_is_iteration_order() {
-    // Not sorted, not hashed: the order writes happened in. This is what
-    // `parallel:` output determinism rests on, so it is asserted by reading
+    // Not sorted, not hashed: the order writes happened in. Asserted by reading
     // the keys back in iteration order, not just by printing the dict.
     assert_output(
         r#"

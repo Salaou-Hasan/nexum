@@ -131,7 +131,6 @@ impl Parser {
                 let t = self.next();
                 Ok(Stmt::Continue { span: Span { line: t.line, col: t.col } })
             }
-            TokenKind::Parallel => self.parse_parallel(),
             TokenKind::Del => self.parse_del(),
             TokenKind::Assert => self.parse_assert(),
             TokenKind::Type => self.parse_type_decl(),
@@ -387,13 +386,6 @@ impl Parser {
         Ok(Stmt::While { cond, body, span })
     }
 
-    fn parse_parallel(&mut self) -> Result<Stmt, ParseError> {
-        let kw = self.next(); // parallel
-        let span = Span { line: kw.line, col: kw.col };
-        self.expect(TokenKind::Colon, "':'")?;
-        let tasks = self.parse_block()?;
-        Ok(Stmt::Parallel { tasks, span })
-    }
 
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
         let kw = self.next(); // for
@@ -1148,7 +1140,7 @@ impl Parser {
     }
 
     /// `{k: v, ...}` and `{}`. Insertion order is preserved, so iterating a
-    /// dict is deterministic -- the same guarantee `parallel:` relies on.
+    /// dict is deterministic.
     fn parse_dict_literal(&mut self) -> Result<Expr, ParseError> {
         let lb = self.next(); // {
         let span = Span { line: lb.line, col: lb.col };
@@ -1314,12 +1306,16 @@ mod tests {
     }
 
     #[test]
-    fn parallel_block() {
-        let p = prog("parallel:\n    a()\n    b()\n");
-        match &p.stmts[0] {
-            Stmt::Parallel { tasks, .. } => assert_eq!(tasks.len(), 2),
-            other => panic!("{other:?}"),
-        }
+    fn parallel_is_not_a_keyword() {
+        // `parallel:` was removed rather than deprecated. It never had a
+        // sound implementation: the scheduler proved race-freedom by static
+        // approximation and the approximation had holes, so a program could
+        // print the wrong answer whenever it lost a race. `parallel` is now
+        // an ordinary identifier, and the old spelling is a syntax error
+        // rather than a silent no-op.
+        assert!(parse_source("parallel:\n    a()\n    b()\n").is_err());
+        // ...and the name itself is free to use.
+        assert!(parse_source("parallel = 1\nprint(parallel)\n").is_ok());
     }
 
     #[test]

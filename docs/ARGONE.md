@@ -65,7 +65,7 @@ unnoticed.
 7. `del name` unbinds vs stores `none`
 8. compound-assignment evaluation order is reversed
 9. ~~`LOOP_LIMIT` / `CALL_LIMIT`~~ — resolved: the interpreter is gone, and neither limit was ever a language semantic
-10. `parallel:` task output order is not the order the specification promises (grammar.md R5)
+10. ~~`parallel:` task output order~~ - resolved by removal: the feature needed a static proof of race-freedom that had holes, so it went rather than the claim
 11. `-9223372036854775808` is a parse error; `i64::MIN` is unrepresentable
 
 ### Gate
@@ -239,7 +239,7 @@ Prove the LLVM C API route before building on it. Smallest experiment first.
       zero new dependencies
 - [ ] It emits IR text for inspection and an object file for linking
 - [ ] Output matches what the legacy text path produces for one example
-- [ ] A second example, exercising records and `parallel:`, also matches
+- [ ] A second example, exercising records and methods, also matches
 - [ ] Recorded LLVM version, and the version-compatibility policy
 
 If this fails, the documented outcome is a fallback to the text path with an

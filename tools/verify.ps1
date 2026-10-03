@@ -47,7 +47,7 @@ if ($built -ne 0 -or -not (Test-Path $nx)) {
 # are not entry points.
 $examples = @(
     'comments.nx', 'control.nx', 'fib.nx', 'flex.nx', 'funcs.nx',
-    'hello.nx', 'lists.nx', 'methods.nx', 'parallel.nx', 'records.nx',
+    'hello.nx', 'lists.nx', 'methods.nx', 'records.nx',
     'search.nx', 'syntax.nx', 'unbox.nx',
     'modules/main.nx'
 )

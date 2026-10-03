@@ -116,21 +116,110 @@ on overflow, `nx_ipow` is still unguarded, and strings are still byte-indexed.
 The specification is deliberately ahead of the runtime; those are Argone
 Task 0.
 
-### Still broken, found by the new tests, not fixed here
+### `parallel:` is removed. There is no concurrency in Nexum.
 
-- a method call on a receiver reached through a field type-checks and then
-  fails codegen ("only modules, types and builtins support attribute calls")
-- `print` of a string literal inside a genuinely-parallel task emits invalid
-  LLVM IR: the `@.nxstr` global is appended to the top-level buffer while a
-  task function is being emitted into it
-- `parallel:` inside a function is unusable
-- assigning to a slice target (`xs[1:2] = 9`) silently discards the value
-- slicing a list of lists is shallow, though a plain bind deep-copies
+Not deprecated -- gone, with every trace of it:
+
+| Removed | |
+|---|---|
+| `parallel:` keyword | lexer, AST variant, parser rule, type-checker scope tracking |
+| `parallel:` tests | 6 in `nx-e2e`, 5 in `nx-codegen`, 4 in `nx-types`, 1 in `nx-parser`, 3 in `nx-ir` |
+| scheduler | `nx_ir::{task_summaries, partition, conflicts}`, `stmt_summary` |
+| codegen | `emit_parallel`, `emit_threaded_batch`, `run_pool`, `collect_outer_reads`, `collect_outer_reads_expr`, `collect_expr_reads` |
+| runtime | `nx_pool_claim`, `nx_pool_worker`, `%NxPool` from `runtime.ll` |
+| platform shims | `runtime_threads_win.ll`, `runtime_threads_unix.ll`, the `THREADS` include |
+| corpus | `examples/parallel.nx`, `bench/workloads/parwork.{nx,rs}` |
+
+**Why.** `parallel:` asked the scheduler to prove race-freedom statically and
+promised output in task order whatever the scheduler did. The proof had holes,
+and I found one while fixing an unrelated bug.
+
+A name bound inside a top-level `parallel:` block is a module global in the
+emitted code -- `nx-codegen`'s `collect_module_globals` says so explicitly and
+declares it. But `nx-ir`'s `top_assigned`, which feeds the *dependency* analysis,
+only recursed into `if` and `while`. So `is_shared("t")` was false for a name
+that was in fact shared, the scheduler saw no conflict, and `t = 0`, the loop
+accumulating into `t`, and `x = t` were emitted as three concurrent tasks.
+
+Two analyses of the same fact, disagreeing. The program compiled, ran, and
+printed the right answer whenever the race was won:
+
+    n = 100
+    x = 0
+    y = 0
+    parallel:
+        t = 0
+        for i in 0..n:
+            t = t + i
+        x = t
+        ...
+
+300 consecutive runs after the fix: 300x `4950/9900`. Before it, one run in
+roughly six printed `0`, and `parallel_tasks_do_not_share_loop_variables` -- a
+test whose own comment calls it a data race detector -- passed about four times
+in five.
+
+An automatic-parallelism feature is only as good as its race-freedom proof, and
+a sound one needs ownership and alias analysis, which is Stage 6. Until that
+exists, the honest options are a correct-but-unusable feature or no feature.
+This was the second one.
+
+`nx_spin_lock`/`nx_spin_unlock` stay: memoization uses them.
+
+R5 in `docs/grammar.md` survives in rewritten form -- execution is
+single-threaded and in program order -- because a single-threaded model is the
+one guarantee a compiler can make without a proof obligation.
+
+The cost is real: `parwork` was the only benchmark where NX beat Rust (0.59x).
+Correctness outranks that row.
+
+### Integer arithmetic has a defined answer or none at all
+
+R1 and R2 were written down and enforced only on the boxed path. Since
+`NX_NOUNBOX` is normally unset, the unboxed path is the default, so the
+guarantees did not hold for ordinary programs.
+
+    x = -9223372036854775807 - 1
+    x / -1     -> garbage    (now: integer overflow)
+    x // -1    -> garbage    (now: integer overflow)
+    x % -1     -> 0          (now: integer overflow)
+    2 ** -1    -> 1          (now: traps)
+    2 ** 100   -> 0          (now: 9223372036854775807)
+
+`sdiv i64 INT64_MIN, -1` is *poison* in LLVM, not a wrapped value: the quotient
+does not exist, so leaving it unchecked was undefined behaviour rather than a
+wrong answer. `nx_div_i64`, `nx_floordiv_i64` and `nx_mod_i64` now guard it.
+
+`nx_ipow` inherited none of `nx_pow`'s R2 checks and now mirrors them exactly,
+including answering 0, 1 and -1 by parity instead of clamping them.
+
+`+`, `-` and `*` on two `Int`s now trap on overflow, on both paths, via
+`llvm.{sadd,ssub,smul}.with.overflow.i64`. That is one operation returning the
+value and the flag, LLVM lowers it to the same instruction plus overflow flags,
+and it disappears entirely wherever LLVM can prove the range -- most loop
+counters and index arithmetic. Python sign conventions are untouched:
+`-7 // 2 == -4`, `-7 % 3 == 2`.
+
+Two codegen tests asserted the literal text `add i64` / `mul i64`. They were
+guarding "the operands never get boxed", which the intrinsic preserves; the
+assertions now name the intrinsic and keep the two `!@nx_add` / `!@nx_mul`
+checks that state the real invariant.
 
 ### Test counts
 
-222 unit tests plus 112 native execution tests. `cargo test --workspace` runs
-everything; `tools/verify.ps1` reports 14/14.
+210 unit tests plus 155 native execution tests. `cargo test --workspace` runs
+everything; `tools/verify.ps1` reports 13/13.
+
+### Still broken, not fixed here
+
+- a method call on a receiver reached through a field type-checks and then
+  fails codegen ("only modules, types and builtins support attribute calls")
+- assigning to a slice target (`xs[1:2] = 9`) silently discards the value
+- slicing a list of lists is shallow, though a plain bind deep-copies
+- `continue` in a `for` loop hangs
+- a recursive function taking a list argument segfaults
+- float printing at `|x| >= 1e14`
+
 ## v0.4.4
 
 ### ARGONE revised: MLIR removed as a prerequisite, and the audit found something worse

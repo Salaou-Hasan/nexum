@@ -67,7 +67,6 @@ pub enum Stmt {
     },
     Break { span: Span },
     Continue { span: Span },
-    Parallel { tasks: Vec<Stmt>, span: Span },
     /// `type Point:` followed by an indented list of `name: Type` fields.
     ///
     /// Module-level only. A declaration is a compile-time fact, so it

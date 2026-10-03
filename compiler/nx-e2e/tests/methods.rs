@@ -1,7 +1,4 @@
-//! Methods, `parallel:` blocks and error handling.
-//!
-//! Two features carry most of the language's weight and get the most space
-//! here.
+//! Methods and error handling.
 //!
 //! **`mut self` write-back.** `p.moved(1, 2)` means `p = moved(p, 1, 2)`.
 //! That is a genuinely unusual rule: the receiver is a copy, and the copy
@@ -12,22 +9,15 @@
 //!
 //! **Unboxing must not be a language.** `NX_NOUNBOX=1` selects an all-boxed
 //! representation. It is supposed to be a compiler detail, so anything that
-//! touches method resolution, receiver write-back or `parallel:` scheduling
-//! is compiled and run in *both* representations and the outputs are required
-//! to be byte-identical. A representation change that altered a program's
-//! output would be a second language wearing the same syntax, and a test
-//! suite that only ever ran the default build could not tell the difference.
+//! touches method resolution or receiver write-back is compiled and run in
+//! *both* representations and the outputs are required to be byte-identical. A
+//! representation change that altered a program's output would be a second
+//! language wearing the same syntax, and a test suite that only ever ran the
+//! default build could not tell the difference.
 //!
-//! Caveat, found while writing this file: `nx_e2e::run_in(src, true)` does not
-//! currently produce a boxed build. `nx_codegen::compile_entry` decides the
-//! unboxing mode from the *test process's* `NX_NOUNBOX`, but `run_in_dir`
-//! calls it before it sets that variable, and only ever sets it on the clang
-//! child process (which is not an NX plugin). So today the two runs below are
-//! the same binary. The agreement assertions are kept because they are the
-//! right assertions the moment the harness is fixed, and the expected values
-//! are independently confirmed against a real `NX_NOUNBOX=1` build of each
-//! program via the `nx` driver.
-
+//! `parallel:` used to be tested here too. It was removed: it asked the
+//! scheduler to prove race-freedom statically, the proof had holes, and a
+//! program could print the wrong answer whenever it lost a race.
 use nx_e2e::*;
 
 /// Compile and run `src` twice -- once in the default build, once with
@@ -682,129 +672,6 @@ print(xs.len())",
             "[1, 2, 3]",
             "3",
         ],
-    );
-}
-
-// --- parallel: -------------------------------------------------------
-
-#[test]
-fn parallel_tasks_writing_distinct_globals_are_both_visible_after_the_join() {
-    // Output is printed after the join on purpose: the spec promises the
-    // *effects* of a parallel block are joined, and a test that asserted an
-    // order for anything printed inside a block would be asserting a
-    // scheduling detail.
-    both_ways(
-        "fn work(n):
-    t = 0
-    for i in 0..n:
-        t = t + i
-    return t
-
-a = 0
-b = 0
-c = 0
-
-parallel:
-    a = work(100)
-    b = work(200)
-    c = work(300)
-
-print(a)
-print(b)
-print(c)",
-        &["4950", "19900", "44850"],
-    );
-}
-
-#[test]
-fn parallel_tasks_writing_the_same_global_serialise_and_total_correctly() {
-    // Two tasks both write `tot`, so they conflict and run one after the
-    // other in program order. The arithmetic is not commutative in general,
-    // so this also pins the order: 100 increments then 50 tens is 600, and
-    // the other way round would be a different program.
-    both_ways(
-        "tot = 0
-parallel:
-    for i in 0..100:
-        tot = tot + 1
-    for i in 0..50:
-        tot = tot + 10
-print(tot)",
-        &["600"],
-    );
-}
-
-#[test]
-fn parallel_tasks_call_plain_functions() {
-    both_ways(
-        "fn fib(n):
-    if n <= 1:
-        return n
-    else:
-        return fib(n - 1) + fib(n - 2)
-x = 0
-y = 0
-parallel:
-    x = fib(18)
-    y = fib(18)
-print(x)
-print(y)
-print(x + y)",
-        &["2584", "2584", "5168"],
-    );
-}
-
-#[test]
-fn parallel_tasks_do_not_share_loop_variables() {
-    // A data race detector. Both tasks use a loop variable named `i`; if the
-    // loop state were shared, the two sums would interfere and this would
-    // stop being a constant.
-    both_ways(
-        "n = 100
-x = 0
-y = 0
-parallel:
-    t = 0
-    for i in 0..n:
-        t = t + i
-    x = t
-    u = 0
-    for i in 0..n:
-        u = u + 2 * i
-    y = u
-print(x)
-print(y)",
-        &["4950", "9900"],
-    );
-}
-
-#[test]
-fn a_parallel_task_may_not_write_an_enclosing_local() {
-    // A task runs on another thread, so a write to a name owned by the
-    // enclosing function's frame has no synchronisation behind it.
-    assert_rejected(
-        "fn driver():
-    local = 5
-    g = 0
-    parallel:
-        local = 7
-    print(local, g)
-driver()",
-        "cannot assign to outer local 'local' inside parallel",
-    );
-}
-
-#[test]
-fn names_bound_by_a_parallel_task_outlive_the_block() {
-    // Task-bound names are globals, not block-scoped, so they are readable
-    // after the join.
-    both_ways(
-        "parallel:
-    u = 5
-    v = u + 1
-print(u)
-print(v)",
-        &["5", "6"],
     );
 }
 

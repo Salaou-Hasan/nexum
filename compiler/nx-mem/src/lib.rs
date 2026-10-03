@@ -424,11 +424,6 @@ fn escaping_roots(body: &[Stmt], out: &mut HashSet<Root>) {
             }
             Stmt::While { body, .. } => escaping_roots(body, out),
             Stmt::For { body, .. } => escaping_roots(body, out),
-            Stmt::Parallel { tasks, .. } => {
-                for t in tasks {
-                    escaping_roots(std::slice::from_ref(t), out);
-                }
-            }
             // A type declaration binds nothing at runtime, so it
             // contributes no roots.
             Stmt::TypeDecl { .. } => {}

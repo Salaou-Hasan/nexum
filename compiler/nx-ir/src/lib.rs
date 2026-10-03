@@ -3,7 +3,7 @@
 //! Tracks only *shared* state (module globals, heap lists). Function
 //! locals are private by construction and never appear here.
 //! Unknown/dynamic targets go `opaque` (may touch everything) —
-//! never silently Pure. Consumed by stage 16 (parallel scheduler).
+//! never silently Pure. Consumed by nx-codegen's memoization decision.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use nx_ast::{Expr, Program, Stmt};
@@ -310,8 +310,9 @@ fn top_assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
                     }
                 }
             }
-            Stmt::For { var, .. } => {
+            Stmt::For { var, body, .. } => {
                 out.insert(var.clone());
+                top_assigned(body, out);
             }
             Stmt::If { then_body, elifs, else_body, .. } => {
                 top_assigned(then_body, out);
@@ -323,6 +324,8 @@ fn top_assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
                 }
             }
             Stmt::While { body, .. } => top_assigned(body, out),
+            // A function or impl body is a separate scope: nothing bound in
+            // one is a module global.
             _ => {}
         }
     }
@@ -505,99 +508,14 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Import { .. } => {}
         Stmt::FromImport { .. } => {}
-        Stmt::Parallel { tasks, .. } => {
-            for t in tasks {
-                let mut ts = Summary::default();
-                stmt_summary(scope, t, &mut ts);
-                out.merge(&ts);
-            }
-        }
+
         Stmt::Expr(e) => {
             expr(scope, e, out);
         }
     }
 }
 
-/// Summary of a single statement (used for parallel task partitioning).
-fn stmt_summary(scope: &Scope, s: &Stmt, out: &mut Summary) {
-    stmt(scope, s, out);
-}
 
-/// One summary per task statement of a `parallel:` block.
-/// `locals` are names bound in the enclosing scope (reads/writes to them
-/// are task-private and ignored); everything else is shared traffic.
-pub fn task_summaries(
-    programs: &HashMap<String, Program>,
-    module: &str,
-    locals: &HashSet<String>,
-    tasks: &[Stmt],
-) -> Result<Vec<Summary>, IrError> {
-    let ir = analyze_map(programs.clone())?;
-    let menv = Env::for_body(
-        module,
-        &programs
-            .get(module)
-            .map(|p| p.stmts.clone())
-            .unwrap_or_default(),
-    );
-    let cx_bodies: HashMap<Place, Vec<Stmt>> = HashMap::new();
-    let cx_sums: HashMap<Place, Summary> = ir
-        .funcs
-        .iter()
-        .map(|(k, f)| (k.clone(), f.summary.clone()))
-        .collect();
-    let cx = Cx { bodies: &cx_bodies, sums: &cx_sums };
-    let scope = Scope {
-        module,
-        locals: locals.clone(),
-        mglobals: module_globals(programs, module),
-        env: &menv,
-        cx: &cx,
-    };
-    let mut out = Vec::new();
-    for t in tasks {
-        let mut s = Summary::default();
-        stmt(&scope, t, &mut s);
-        out.push(s);
-    }
-    Ok(out)
-}
-
-/// Do two task summaries conflict (must not run concurrently)?
-pub fn conflicts(a: &Summary, b: &Summary) -> bool {
-    // Write-write or read-write on a shared global.
-    if a.writes.iter().any(|w| b.reads.contains(w) || b.writes.contains(w)) {
-        return true;
-    }
-    if b.writes.iter().any(|w| a.reads.contains(w)) {
-        return true;
-    }
-    // Unknown targets serialize with everything except pure silence.
-    if a.opaque && (b.opaque || b.prints || b.heap || !b.reads.is_empty() || !b.writes.is_empty()) {
-        return true;
-    }
-    if b.opaque && (a.prints || a.heap || !a.reads.is_empty() || !a.writes.is_empty()) {
-        return true;
-    }
-    // Heap mutation conflicts with any shared traffic or printing.
-    if a.heap && (b.heap || b.prints || !b.reads.is_empty() || !b.writes.is_empty()) {
-        return true;
-    }
-    if b.heap && (a.prints || !a.reads.is_empty() || !a.writes.is_empty()) {
-        return true;
-    }
-    // Keep stdout order deterministic.
-    if a.prints && b.prints {
-        return true;
-    }
-    if a.prints && (!b.reads.is_empty() || !b.writes.is_empty() || b.heap) {
-        return true;
-    }
-    if b.prints && (!a.reads.is_empty() || !a.writes.is_empty() || a.heap) {
-        return true;
-    }
-    false
-}
 
 /// Memoizable: provably independent of mutable state — no shared
 /// reads or writes, no printing, no heap traffic, no opaque calls.
@@ -608,25 +526,6 @@ pub fn memoizable(sum: &Summary) -> bool {
         && !sum.prints
         && !sum.heap
         && !sum.opaque
-}
-/// Greedy in-order batching: each task joins the earliest batch it does
-/// not conflict with. Deterministic; preserves program order.
-pub fn partition(sums: &[Summary]) -> Vec<Vec<usize>> {
-    let mut batches: Vec<Vec<usize>> = Vec::new();
-    for (i, s) in sums.iter().enumerate() {
-        let mut placed = false;
-        for b in batches.iter_mut() {
-            if b.iter().all(|&j| !conflicts(s, &sums[j])) {
-                b.push(i);
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
-            batches.push(vec![i]);
-        }
-    }
-    batches
 }
 
 fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
@@ -865,24 +764,4 @@ mod tests {
         assert!(m[&("__main__".to_string(), "f".to_string())].opaque);
     }
 
-    #[test]
-    fn disjoint_tasks_share_batch() {
-        let a = Summary { writes: [("__main__".into(), "x".into())].into(), ..Default::default() };
-        let b = Summary { writes: [("__main__".into(), "y".into())].into(), ..Default::default() };
-        assert_eq!(partition(&[a, b]), vec![vec![0, 1]]);
-    }
-
-    #[test]
-    fn conflicting_tasks_serialize() {
-        let a = Summary { writes: [("__main__".into(), "x".into())].into(), ..Default::default() };
-        let b = Summary { reads: [("__main__".into(), "x".into())].into(), ..Default::default() };
-        assert_eq!(partition(&[a, b]), vec![vec![0], vec![1]]);
-    }
-
-    #[test]
-    fn prints_serialize() {
-        let a = Summary { prints: true, ..Default::default() };
-        let b = Summary { prints: true, ..Default::default() };
-        assert_eq!(partition(&[a, b]), vec![vec![0], vec![1]]);
-    }
 }

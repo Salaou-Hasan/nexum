@@ -31,7 +31,6 @@ representation with its own justification.
 | `%NxRec.nfields` | `i64` | 8 | Arity | KEEP — padding trap |
 | `%NxDesc` | `{ ptr, i64, i64, ptr }` | 32 | Type descriptor | KEEP — padding trap |
 | `%NxRecName` | `{ i64 len, ptr bytes }` | 16 | Name in a descriptor | KEEP |
-| `%NxPool` | `{ i64 total, i64 done, ptr fn }` | 24 | One parallel batch | SPECIALIZE (deferred) — see §6.2 |
 | `%NxMemoSlot` | `{ i64, i64, [8 x %NxVal], %NxVal, i1 }` | 240 | One memo cache entry | KEEP — see §4.5 |
 | `@nx_memo_table` | `[4096 x %NxMemoSlot]` | 960 KiB | Static BSS in every binary | BENCHMARK_FIRST — see §6.3 |
 | `@nx_memo_count`, `@nx_memo_lock` | `i64` | — | Entries, spinlock | KEEP — atomic, see §4.6 |

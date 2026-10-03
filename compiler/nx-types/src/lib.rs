@@ -6,7 +6,7 @@
 //! - Function params start Unknown; bodies must return consistently.
 //! - `import`/`from` are followed into files; members are checked.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use nx_ast::{BinOp, Expr, Program, Span, Stmt, Target, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -154,13 +154,7 @@ struct Checker {
     inferred: HashMap<(String, String), FnInfo>,
     /// Module the checker is currently inside, for inference keys.
     module_name: String,
-    /// Inside `parallel:` tasks: names bound in the enclosing function
-    /// (writing them would be a cross-thread lost update).
-    parallel_outer: Option<HashSet<String>>,
-    /// Names bound so far inside the current parallel task.
-    task_bound: HashSet<String>,
-    /// Enclosing function's scope (params + assigned), for parallel tasks.
-    fn_outer: Option<HashSet<String>>,
+
     /// Declared `type` layouts: type name to (field name, field type name
     /// as written), in declaration order. Field types resolve lazily at
     /// each use, so a field may name a record declared later in the module
@@ -251,14 +245,7 @@ impl Checker {
     fn bind_target(&mut self, target: &Target, t: Ty, value: &Expr, span: Span) {
         match target {
             Target::Name(name) => {
-                if let Some(outer) = &self.parallel_outer {
-                    if outer.contains(name) && !self.task_bound.contains(name) {
-                        self.err(span, format!("cannot assign to outer local '{name}' inside parallel (use a module global)"));
-                        return;
-                    }
-                }
                 self.mark_copy(name, value);
-                self.task_bound.insert(name.clone());
                 // `None` means "no value here", so it must not pin a
                 // variable to a type or conflict with one. Widening to
                 // unresolved is what lets `x = 1` / `x = None` / `x = 2`
@@ -645,7 +632,6 @@ impl Checker {
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_in_fn = self.in_function;
         let saved_returns = std::mem::take(&mut self.returns);
-        let saved_outer = self.fn_outer.take();
         let saved_params = std::mem::take(&mut self.param_names);
         let saved_self = self.self_param.take();
         self.in_function = true;
@@ -660,10 +646,7 @@ impl Checker {
         }
         all_params.extend(params.iter().cloned());
         self.param_names = all_params.clone();
-        // Outer scope for parallel tasks: params + all assigned names.
-        let mut outer: HashSet<String> = all_params.iter().cloned().collect();
-        collect_assigned(body, &mut outer);
-        self.fn_outer = Some(outer);
+
         // Two passes. A parameter's type comes from how the body
         // uses it, so pass one discovers the types and pass two
         // checks the body with them already known. Without the
@@ -789,7 +772,6 @@ impl Checker {
         self.vars = saved_vars;
         self.in_function = saved_in_fn;
         self.returns = saved_returns;
-        self.fn_outer = saved_outer;
         self.param_names = saved_params;
         self.self_param = saved_self;
         (param_tys, ret, fn_locals)
@@ -941,7 +923,6 @@ impl Checker {
                             if self.vars.remove(name).is_none() {
                                 self.err(*span, format!("undefined variable '{name}'"));
                             }
-                            self.task_bound.insert(name.clone());
                         }
                         Target::Index { base, index } => {
                             let bt = self.check_expr(base);
@@ -1011,14 +992,6 @@ impl Checker {
                 }
             }
             Stmt::AssignOp { target, op, value, span } => {
-                if let Target::Name(name) = target {
-                    if let Some(outer) = &self.parallel_outer.clone() {
-                        if outer.contains(name) && !self.task_bound.contains(name) {
-                            self.err(*span, format!("cannot assign to outer local '{name}' inside parallel (use a module global)"));
-                            return;
-                        }
-                    }
-                }
                 let rhs = self.check_expr(value);
                 let label = target_label(target);
                 if let Some(cur) = self.target_ty(target, *span) {
@@ -1107,8 +1080,6 @@ impl Checker {
                     Some(old) if compatible(&old, &elem) => {}
                     Some(old) => self.err(*span, format!("loop variable '{var}' is {old}, cannot iterate {elem}")),
                 }
-                // A for-var shadows: later assigns in this task are fine.
-                self.task_bound.insert(var.clone());
                 self.loop_depth += 1;
                 self.check_block(body);
                 self.loop_depth -= 1;
@@ -1225,10 +1196,7 @@ impl Checker {
                     self.err(*span, "return outside function".to_string());
                     return;
                 }
-                if self.parallel_outer.is_some() {
-                    self.err(*span, "return inside parallel task is not supported".to_string());
-                    return;
-                }
+
                 if values.is_empty() {
                     self.returns.push(Ty::None);
                     return;
@@ -1254,22 +1222,7 @@ impl Checker {
                 }
                 self.returns.push(Ty::List(Box::new(elem)));
             }
-            Stmt::Parallel { tasks, span } => {
-                if self.parallel_outer.is_some() {
-                    self.err(*span, "nested parallel blocks are not supported".to_string());
-                    return;
-                }
-                let outer = self.fn_outer.clone().unwrap_or_default();
-                self.parallel_outer = Some(outer);
-                for t in tasks {
-                    self.task_bound.clear();
-                    let saved_loop = self.loop_depth;
-                    self.loop_depth = 0;
-                    self.check_stmt(t);
-                    self.loop_depth = saved_loop;
-                }
-                self.parallel_outer = None;
-            }
+
             Stmt::Break { span } => {
                 if self.loop_depth == 0 {
                     self.err(*span, "break outside loop".to_string());
@@ -1287,12 +1240,7 @@ impl Checker {
                         self.err(*span, format!("'{bind}' is already a type; a variable cannot share the name"));
                         return;
                     }
-                    if let Some(outer) = &self.parallel_outer {
-                        if outer.contains(&bind) && !self.task_bound.contains(&bind) {
-                            self.err(*span, format!("cannot assign to outer local '{bind}' inside parallel (use a module global)"));
-                        }
-                    }
-                    self.task_bound.insert(bind.clone());
+
                     self.vars.insert(bind, Ty::Module(module.clone()));
                 }
             }
@@ -1303,13 +1251,7 @@ impl Checker {
                 let info = self.modules.get(module).cloned().unwrap_or_default();
                 for (name, alias) in names {
                     let bind = alias.clone().unwrap_or_else(|| name.clone());
-                    if let Some(outer) = &self.parallel_outer {
-                        if outer.contains(&bind) && !self.task_bound.contains(&bind) {
-                            self.err(*span, format!("cannot assign to outer local '{bind}' inside parallel (use a module global)"));
-                            continue;
-                        }
-                    }
-                    self.task_bound.insert(bind.clone());
+
                     if let Some(t) = info.vars.get(name) {
                         self.define(&bind, t.clone(), *span);
                     } else if let Some((p, r)) = info.funcs.get(name) {
@@ -2051,9 +1993,7 @@ impl Default for Checker {
             copies: Vec::new(),
             inferred: HashMap::new(),
             module_name: String::new(),
-            parallel_outer: None,
-            task_bound: HashSet::new(),
-            fn_outer: None,
+
             records: HashMap::new(),
             record_spans: HashMap::new(),
             type_alias: HashMap::new(),
@@ -2063,102 +2003,6 @@ impl Default for Checker {
     }
 }
 
-/// Names bound inside an expression, which only happens in a comprehension
-/// or one part of a multiple assignment. Walks just enough of the tree to
-/// find a `for` loop variable.
-fn collect_assigned_expr(e: &Expr, out: &mut HashSet<String>) {
-    match e {
-        Expr::Comprehension { element, var, iter, cond, .. } => {
-            out.insert(var.clone());
-            collect_assigned_expr(element, out);
-            collect_assigned_expr(iter, out);
-            if let Some(c) = cond {
-                collect_assigned_expr(c, out);
-            }
-        }
-        Expr::Index { base, index, .. } => {
-            collect_assigned_expr(base, out);
-            collect_assigned_expr(index, out);
-        }
-        Expr::Attr { base, .. } => collect_assigned_expr(base, out),
-        Expr::Slice { base, from, to, step, .. } => {
-            collect_assigned_expr(base, out);
-            for part in [from, to, step].into_iter().flatten() {
-                collect_assigned_expr(part, out);
-            }
-        }
-        Expr::Unary { expr, .. } => collect_assigned_expr(expr, out),
-        Expr::Binary { left, right, .. } => {
-            collect_assigned_expr(left, out);
-            collect_assigned_expr(right, out);
-        }
-        Expr::IfExpr { cond, then_value, else_value, .. } => {
-            collect_assigned_expr(cond, out);
-            collect_assigned_expr(then_value, out);
-            collect_assigned_expr(else_value, out);
-        }
-        Expr::Call { callee, args, .. } => {
-            collect_assigned_expr(callee, out);
-            for a in args {
-                collect_assigned_expr(a, out);
-            }
-        }
-        Expr::List(items, _) => {
-            for i in items {
-                collect_assigned_expr(i, out);
-            }
-        }
-        Expr::Dict(pairs, _) => {
-            for (k, v) in pairs {
-                collect_assigned_expr(k, out);
-                collect_assigned_expr(v, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// All assigned names in a body (for parallel outer-scope computation).
-fn collect_assigned(body: &[Stmt], out: &mut HashSet<String>) {
-    for s in body {
-        match s {
-            Stmt::Assign { targets, .. } => {
-                for target in targets {
-                    match target {
-                        Target::Name(n) => {
-                            out.insert(n.clone());
-                        }
-                        // `a[i] = v` reads `a`, so `a` has to be treated as
-                        // bound by the enclosing scope.
-                        Target::Index { base, .. } | Target::Attr { base, .. } => {
-                            collect_assigned_expr(base, out)
-                        }
-                    }
-                }
-            }
-            Stmt::For { var, body, .. } => {
-                out.insert(var.clone());
-                collect_assigned(body, out);
-            }
-            Stmt::If { then_body, elifs, else_body, .. } => {
-                collect_assigned(then_body, out);
-                for (_, b) in elifs {
-                    collect_assigned(b, out);
-                }
-                if let Some(b) = else_body {
-                    collect_assigned(b, out);
-                }
-            }
-            Stmt::While { body, .. } => collect_assigned(body, out),
-            Stmt::Parallel { tasks, .. } => {
-                for t in tasks {
-                    collect_assigned(std::slice::from_ref(t), out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -2460,23 +2304,14 @@ mod tests {
     }
 
     #[test]
-    fn parallel_outer_write_errors() {
+    fn parallel_blocks_are_gone() {
+        // `parallel:` was removed, not deprecated. It asked the scheduler to
+        // prove race-freedom statically and the proof had holes, so a program
+        // could print the wrong answer whenever it lost a race. The block is
+        // now a syntax error, and `parallel` is an ordinary identifier.
+        assert!(!err("parallel:\n    a = 1\n").is_empty());
         assert!(!err("fn f():\n    x = 1\n    parallel:\n        x = 2\n").is_empty());
-    }
-
-    #[test]
-    fn parallel_return_errors() {
-        assert!(!err("fn f():\n    parallel:\n        return 1\n").is_empty());
-    }
-
-    #[test]
-    fn parallel_nested_errors() {
-        assert!(!err("parallel:\n    parallel:\n        print(1)\n").is_empty());
-    }
-
-    #[test]
-    fn parallel_ok() {
-        ok("a = 0\nparallel:\n    a = 1\n    print(2)\n");
+        ok("parallel = 1\nprint(parallel)\n");
     }
 
     #[test]
