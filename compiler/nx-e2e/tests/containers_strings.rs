@@ -23,11 +23,12 @@
 //! * `"" in s` and a needle exactly as long as the haystack both report
 //!   `false`.
 //!
-//! A third bug was found while writing this file and is also left unasserted:
-//! slicing a *string* with an explicit step overflows its destination buffer
-//! and returns heap garbage. That is memory unsafety rather than a semantics
-//! disagreement, so it is a bug report and not a pinned expectation. See the
-//! note on `slice_of_a_string_is_a_string`.
+//! Two more were found while writing this file and have since been fixed:
+//! slicing a string with an explicit step overflowed its destination buffer
+//! (`ceil` where the code said `floor`, and an output offset advancing by
+//! `step` instead of 1), and a slice of a list of lists shared its elements
+//! with the parent. Both are asserted now -- see
+//! `slice_copies_nested_containers_too`.
 
 use nx_e2e::*;
 
@@ -560,6 +561,71 @@ push(ys, 99)
 print(xs, ys)
 "#,
         &["[1, 2, 3, 4, 5] [2, 3, 4, 99]"],
+    );
+}
+
+#[test]
+fn slice_copies_nested_containers_too() {
+    // The test above only reaches top-level `Int` elements, which a shallow
+    // slice already handled. The elements of a list of lists are themselves
+    // mutable, so sharing them makes the slice write through into its parent --
+    // and then `ys = xs` and `ys = xs[0:2]` mean different things, which is
+    // the one thing value semantics is not allowed to do.
+    assert_output(
+        r#"
+xs = [[1, 2], [3, 4], [5, 6]]
+ys = xs[0:2]
+ys[0][0] = 99
+print(xs)
+print(ys)
+"#,
+        &["[[1, 2], [3, 4], [5, 6]]", "[[99, 2], [3, 4]]"],
+    );
+    // Dicts.
+    assert_output(
+        r#"
+xs = [{"a": 1}, {"b": 2}]
+ys = xs[0:1]
+ys[0]["a"] = 9
+print(xs)
+print(ys)
+"#,
+        &["[{a: 1}, {b: 2}]", "[{a: 9}]"],
+    );
+    // Records.
+    assert_output(
+        r#"
+type P:
+    x: Int
+
+xs = [P(1), P(2)]
+ys = xs[0:1]
+ys[0].x = 9
+print(xs[0].x)
+print(ys[0].x)
+"#,
+        &["1", "9"],
+    );
+    // Two levels down, and through a slice of a slice.
+    assert_output(
+        r#"
+xs = [[[1]]]
+ys = xs[0:1]
+ys[0][0][0] = 7
+print(xs)
+print(ys)
+"#,
+        &["[[[1]]]", "[[[7]]]"],
+    );
+    assert_output(
+        r#"
+xs = [[1, 2], [3, 4], [5, 6]]
+ys = xs[0:3][1:3]
+ys[0][0] = 99
+print(xs)
+print(ys)
+"#,
+        &["[[1, 2], [3, 4], [5, 6]]", "[[99, 4], [5, 6]]"],
     );
 }
 

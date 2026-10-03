@@ -2331,7 +2331,19 @@ scan:
 body:
   %ep = getelementptr %NxVal, ptr %data, i64 %i
   %v = load %NxVal, ptr %ep
-  call void @nx_listpush(ptr %slot, %NxVal %v)
+  ; Deep-copy container elements. A slice yields a new list, so a list of
+  ; lists whose elements were shared would let `ys = xs[0:2]; ys[0][0] = 9`
+  ; write through into `xs`. A plain bind already deep-copies, so the
+  ; shallow version made one expression mean two different things depending
+  ; only on whether a slice appeared.
+  ;
+  ; nx_clone returns Int, Float, Bool, Str and Func unchanged and deep-copies
+  ; List, Dict and Record, so one call covers both cases. The tag test is
+  ; left inside it rather than duplicated here: a scalar slice pays a call
+  ; it does not need, but a branch here would need its own blocks, and the
+  ; extra predecessor would have to be threaded through the `scan` phi.
+  %cv = call %NxVal @nx_clone(%NxVal %v)
+  call void @nx_listpush(ptr %slot, %NxVal %cv)
   %i2 = add i64 %i, %step
   br label %scan
 exit:

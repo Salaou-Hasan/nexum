@@ -205,6 +205,42 @@ guarding "the operands never get boxed", which the intrinsic preserves; the
 assertions now name the intrinsic and keep the two `!@nx_add` / `!@nx_mul`
 checks that state the real invariant.
 
+### Slicing a list of lists no longer writes through to the parent
+
+    xs = [[1, 2], [3, 4], [5, 6]]
+    ys = xs[0:2]
+    ys[0][0] = 99
+    print(xs)      # was [[99, 2], [3, 4], [5, 6]]
+
+`nx_slice`'s list path pushed each element as it found it, so a list of lists
+shared its inner lists with the parent. A plain bind, a literal and a function
+argument all deep-copied, so `ys = xs` and `ys = xs[0:2]` meant different
+things and only one of them was what `docs/grammar.md` says.
+
+It now clones each element through the existing `nx_clone`, which returns Int,
+Float, Bool, Str and Func unchanged and deep-copies List, Dict and Record. One
+call per element, no new blocks in the loop body.
+
+Worth recording how this one went. The first attempt branched on the element's
+tag inside the loop body to avoid the call for scalars. That needed new basic
+blocks, which meant the `scan` loop's `phi` had to name the new back-edge, and
+LLVM rejected the result with `expected instruction opcode` pointing at a
+label. Three wrong diagnoses followed: a duplicate SSA name (`%c` was already
+taken by the string path in the same function -- that one was real), then a
+suspicion that `push:`/`adv:` were reserved words, then a bisect whose string
+replacements never matched because the pattern had LF and the file had CRLF,
+so every "variant" was really the original file with only the `phi` changed.
+Reading the whole function first, and keeping the change to three lines, is
+what worked. Four failures to one correct edit.
+
+`slice_copies_rather_than_aliases` passed throughout, because it only reaches
+top-level `Int` elements -- which a shallow slice already handled. The nested
+case is now `slice_copies_nested_containers_too`.
+
+Also verified: the `1e14 -> 1` float-printing bug in my notes does not
+reproduce. `print(1e14)` is `100000000000000`, and `1e-4 .. 1e15` all print in
+the documented fixed notation with `%.17g` taking over outside it.
+
 ### Test counts
 
 210 unit tests plus 155 native execution tests. `cargo test --workspace` runs
