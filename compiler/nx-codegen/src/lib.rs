@@ -1052,12 +1052,7 @@ fn module_dir(base: &std::path::Path, module: &str) -> std::path::PathBuf {
 }
 
 fn nx_codegen_loader_path(base: &std::path::Path, module: &str) -> Option<std::path::PathBuf> {
-    let file = format!("{module}.nx");
-    let mut dirs = vec![base.to_path_buf()];
-    if let Ok(p) = std::env::var("NX_PATH") {
-        dirs.extend(std::env::split_paths(&p));
-    }
-    dirs.iter().map(|d| d.join(&file)).find(|p| p.is_file())
+    nx_ast::shape::resolve_module_file(&[base.to_path_buf()], module)
 }
 
 pub fn compile_entry(source: &str, base: &std::path::Path) -> Result<String, CodegenError> {
@@ -1191,12 +1186,7 @@ impl Loader {
     }
 
     fn resolve(&self, name: &str) -> Option<std::path::PathBuf> {
-        let file = format!("{name}.nx");
-        let mut dirs = vec![self.base.clone()];
-        if let Ok(p) = std::env::var("NX_PATH") {
-            dirs.extend(std::env::split_paths(&p));
-        }
-        dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+        nx_ast::shape::resolve_module_file(&[self.base.clone()], name)
     }
 }
 
@@ -1237,12 +1227,11 @@ pub fn dependencies(
         let mut deps = Vec::new();
         collect_imports(&prog, &mut deps);
         for dep in deps {
-            let file = format!("{dep}.nx");
-            let mut dirs = vec![dir.clone(), base.to_path_buf()];
-            if let Ok(p) = std::env::var("NX_PATH") {
-                dirs.extend(std::env::split_paths(&p));
-            }
-            if let Some(p) = dirs.iter().map(|d| d.join(&file)).find(|p| p.is_file()) {
+            // The importing file's own dir first, then the entry dir,
+            // then NX_PATH -- the only copy that ever searched two bases.
+            if let Some(p) =
+                nx_ast::shape::resolve_module_file(&[dir.clone(), base.to_path_buf()], &dep)
+            {
                 out.push(p.clone());
                 queue.push(p);
             }

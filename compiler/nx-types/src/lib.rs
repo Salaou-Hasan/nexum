@@ -560,19 +560,6 @@ impl Checker {
         }
     }
 
-    /// Whether `base` in `base.method(...)` has storage a `mut self`
-    /// result can be written back into: a plain variable, an index, or a
-    /// field. Used by the backends to decide whether to write back; a
-    /// `mut self` call on anything else still evaluates normally, it just
-    /// has nowhere to put the update.
-    #[allow(dead_code)]
-    fn writable_receiver(base: &Expr) -> bool {
-        matches!(
-            base,
-            Expr::Var(..) | Expr::Index { .. } | Expr::Attr { .. }
-        )
-    }
-
     /// The canonical (declared) name for a possibly-aliased type. Unknown
     /// names pass through unchanged; the caller reports them.
     fn canonical_name(&self, name: &str) -> String {
@@ -1293,12 +1280,7 @@ impl Checker {
             self.err(span, format!("circular import of '{name}'"));
             return false;
         }
-        let file = format!("{name}.nx");
-        let mut dirs = vec![self.base.clone()];
-        if let Ok(p) = std::env::var("NX_PATH") {
-            dirs.extend(std::env::split_paths(&p));
-        }
-        let path = match dirs.iter().map(|d| d.join(&file)).find(|p| p.is_file()) {
+        let path = match nx_ast::shape::resolve_module_file(&[self.base.clone()], name) {
             Some(p) => p,
             None => {
                 self.err(span, format!("cannot find module '{name}.nx'"));

@@ -156,3 +156,37 @@ jobs:
             echo "asan clean $f"
             rm -f "asan-$safe"
           done
+      - name: memcheck every example (linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          # -O1 with debug info is the recommended memcheck build: -O2
+          # reuses registers in ways that blur uninit tracking, and -g
+          # puts file:line on every report. Appended after the driver's
+          # own -O2, so the last -O wins. Not the shipped binary; this
+          # step is a memory-safety gate, not a perf run.
+          NX_CFLAGS: -g -O1
+        run: |
+          # Valgrind Memcheck is the coverage ASan cannot give this
+          # pipeline: it works on uninstrumented binaries, so the
+          # hand-written runtime IR is really checked. NX never frees by
+          # design, so leaks are excluded and only invalid reads/writes,
+          # bad frees and uninit-dependent branches fail the gate.
+          if ! command -v valgrind >/dev/null; then
+            sudo apt-get update && sudo apt-get install -y valgrind
+          fi
+          for f in $EXAMPLES; do
+            safe="$(echo "$f" | tr '/.' '__')"
+            cargo run -q -p nx-driver -- build "$f" -o "mc-$safe"
+            rc=0
+            valgrind --tool=memcheck --error-exitcode=42 \
+              --errors-for-leaks=no --track-origins=yes \
+              "./mc-$safe" > mc-out.txt 2> mc-err.txt || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "MEMCHECK FAILED $f (rc=$rc)"
+              tail -30 mc-err.txt
+              exit 1
+            fi
+            echo "memcheck clean $f"
+            rm -f "mc-$safe"
+          done

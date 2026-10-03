@@ -722,12 +722,7 @@ impl Loader {
     }
 
     fn resolve(&self, name: &str) -> Option<std::path::PathBuf> {
-        let file = format!("{name}.nx");
-        let mut dirs = vec![self.base.clone()];
-        if let Ok(p) = std::env::var("NX_PATH") {
-            dirs.extend(std::env::split_paths(&p));
-        }
-        dirs.into_iter().map(|d| d.join(&file)).find(|p| p.is_file())
+        nx_ast::shape::resolve_module_file(&[self.base.clone()], name)
     }
 }
 

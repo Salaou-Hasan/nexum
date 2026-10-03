@@ -15,6 +15,9 @@
 /// A line number, re-exported from the lexer where positions are born.
 pub use nx_lexer::{ColNo, LineNo};
 
+/// Shared semantic shapes: one owner for facts several stages re-derive.
+pub mod shape;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub line: LineNo,
