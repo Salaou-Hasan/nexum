@@ -55,7 +55,8 @@ position.
 
 `LexError`, `ParseError`, `CheckError`, `RuntimeError`, `CodegenError` and
 the interpreter's internal call frames all carried `line: usize, col:
-usize`. These are 16 bytes each, on objects that exist only to report a
+usize`. (The interpreter has since been deleted, so that row is
+history.) These are 16 bytes each, on objects that exist only to report a
 problem.
 
 | Field | Before | After | Verdict |
@@ -71,8 +72,10 @@ problem.
 | `Parser` | `pos` | `usize` | DO_NOT_CHANGE — indexes a `Vec` |
 | `Gen` | `tmp`, `label`, `strc` | `u64` | DO_NOT_CHANGE — see §4.7 |
 | `Gen` | `AllocFrame.at` | `usize` | DO_NOT_CHANGE — byte offset into a `String`, used for slicing |
-| `nx-ir` | `batches: Vec<Vec<usize>>` | `usize` | DO_NOT_CHANGE — task indices |
 | `nx-types` | `arity`, `builtin_arity` | `usize` | DO_NOT_CHANGE — one field per function |
+
+(`nx-ir`'s `batches: Vec<Vec<usize>>` task indices from the audit are gone
+with `parallel:` -- the scheduler was removed rather than repaired.)
 
 ---
 
@@ -333,8 +336,9 @@ clone, equality, iteration and unboxing paths, not a numeric tweak.
 
 | Gate | Result |
 | --- | --- |
-| `cargo test --workspace` | 307 pass, 0 fail |
-| `tools/verify.ps1` — 13 examples × interpreter / native / `NX_NOUNBOX` | all agree |
+| `cargo test --workspace` | 212 unit + 165 native execution, 0 fail |
+| `tools/verify.ps1` - 13 examples, unboxed vs `NX_NOUNBOX` | all agree |
+| `tools/argone-gate-tests.ps1` - 10 adversarial gate tests | all pass |
 | `bench/run.ps1` — 5 benchmarks vs Rust | all MATCH |
 | LLVM type checking of every touched field | clean — a missed `load`/`store` width is a compile error, not a silent bug |
 | Structure-size assertions | new tests in `nx-ast` and `nx-codegen` pin every width above |

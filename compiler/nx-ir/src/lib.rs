@@ -579,6 +579,39 @@ fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
             expr(scope, left, out);
             expr(scope, right, out);
         }
+        Expr::Dict(pairs, _) => {
+            // A dict literal reads every key and value it holds, so a
+            // function reading a global only here still depends on it.
+            // Missing this arm memoized such a function and served stale
+            // values after the global changed.
+            for (k, v) in pairs {
+                expr(scope, k, out);
+                expr(scope, v, out);
+            }
+        }
+        Expr::Slice { base, from, to, step, .. } => {
+            expr(scope, base, out);
+            for bound in [from, to, step].into_iter().flatten() {
+                expr(scope, bound, out);
+            }
+        }
+        Expr::IfExpr { cond, then_value, else_value, .. } => {
+            expr(scope, cond, out);
+            expr(scope, then_value, out);
+            expr(scope, else_value, out);
+        }
+        Expr::Comprehension { element, var, iter, cond, .. } => {
+            expr(scope, iter, out);
+            // The loop variable shadows any shared name inside the
+            // element and the filter, so those are walked with it
+            // marked local rather than shared.
+            let mut inner = scope.clone();
+            inner.locals.insert(var.clone());
+            expr(&inner, element, out);
+            if let Some(c) = cond {
+                expr(&inner, c, out);
+            }
+        }
         Expr::Call { callee, args, .. } => {
             for a in args {
                 expr(scope, a, out);
@@ -762,6 +795,42 @@ mod tests {
     fn unknown_call_is_opaque() {
         let m = sums_of("fn f(g):\n    g(1)\n");
         assert!(m[&("__main__".to_string(), "f".to_string())].opaque);
+    }
+
+    #[test]
+    fn global_read_inside_a_dict_literal_blocks_memoization() {
+        // A function reading a global only inside a dict literal used to
+        // look pure: `expr` had no `Dict` arm, so the read was dropped and
+        // a stale memoized value survived the global changing.
+        let m = sums_of("g = 5\nfn f(k):\n    d = {\"a\": g}\n    return d[\"a\"]\n");
+        let s = &m[&("__main__".to_string(), "f".to_string())];
+        assert!(s.reads.contains(&("__main__".to_string(), "g".to_string())));
+        assert!(!memoizable(s));
+    }
+
+    #[test]
+    fn global_reads_inside_slice_ifexpr_and_comprehension_block_memoization() {
+        let m = sums_of(
+            "g = 5\nfn f(k):\n    return [g, 1][0:2]\nfn h(k):\n    return g if k else 0\nfn c(k):\n    return [x for x in [g]]\n",
+        );
+        for name in ["f", "h", "c"] {
+            let s = &m[&("__main__".to_string(), name.to_string())];
+            assert!(
+                s.reads.contains(&("__main__".to_string(), "g".to_string())),
+                "{name} missed its read of g"
+            );
+            assert!(!memoizable(s), "{name} must not memoize");
+        }
+    }
+
+    #[test]
+    fn comprehension_loop_var_shadows_a_global() {
+        // The `x` in the element is the loop variable, not the module
+        // global, so no shared read happens and purity survives.
+        let m = sums_of("x = 9\nfn f(k):\n    return [x for x in 0..3]\n");
+        let s = &m[&("__main__".to_string(), "f".to_string())];
+        assert!(s.reads.is_empty());
+        assert!(memoizable(s));
     }
 
 }

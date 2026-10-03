@@ -117,53 +117,43 @@ are shaped the way they are rather than the way they would ideally be.
   variable writes back into the loop variable and leaves the collection
   untouched, silently. `records` measures the working spelling (indexed)
   and the non-working one (loop variable) side by side.
-- **Recursion has a hard ceiling.** The interpreter refuses at 500 frames
-  (`CALL_LIMIT` in `nx-interp`); the native backend survives about 7000 and
-  then takes a real stack overflow with no diagnostic. `recursion` is capped
-  at depth 350 so it stays inside both.
+- **Recursion is bounded by the machine stack.** There is no call-depth limit
+  and no diagnostic; deep enough recursion takes a real stack overflow.
+  `recursion` is capped at depth 350 to stay well inside it.
 - **No file I/O.** Every workload generates its own data, which keeps them
   deterministic and keeps I/O out of the timings.
-
-## Defects found while writing these
-
-Reproduced on the native backend; each is a program the interpreter gets
-right.
-
-- **Stepped string slices read uninitialised memory and write out of
-  bounds.** In `runtime.ll`'s `nx_slice`, the string path computes the
-  destination offset as `source_index - from` instead of the packed output
-  offset, so `s[::2]` on `"abcdef"` returns `"a"` natively and `"ace"` under
-  the interpreter. With `step > 1` the write positions run past the end of
-  the `malloc(cnt)` buffer. `strscan` deliberately uses only unit-step
-  slices.
-- **A recursive function with a list argument can crash the native
-  backend.** With the default flag settings the process dies with an access
-  violation; `NX_NOUNBOX=1` or `NX_NOMEMO=1` avoids it, and so does making
-  the recursive function impure so the memoization pass skips it. Minimal
-  reproducer is a four-line n-queens guard. `flowctl` uses three bitmasks
-  instead of a column list, and `recursion` reads its table from a global.
-- **`i64::MIN / -1` returns garbage natively.** `nx_index` is fine, but
-  integer division overflow is unchecked, so the value that comes back is
-  whatever the hardware divide left behind. No workload divides by -1.
-- **Float printing trims trailing zeros from the integer part.** `1e14`
-  prints as `1` and `9.007199254740992e15` prints with a spurious `.0`
-  suffix (`fmt_float` in `nx-interp`, `nx_fmt_float` in `runtime.ll`).
-  Every float result in `sieve`-style workloads is therefore printed as an
-  exact integer, which both toolchains format identically.
-- **The interpreter rejects a chained assignment into a dict.**
-  `m["k"][0] = v` is refused with "index must be Int, found k" while the
-  native backend accepts it and does the right thing. `d[0]["x"] = v` and
-  `g[0][1] = v` work in both.
-- **Integer overflow is checked by the interpreter and ignored natively.**
-  The interpreter raises "integer overflow"; the native backend wraps like
-  `rustc -O`. No workload overflows.
-
-## What was not covered
-
-- `bench/README.md` claims NX has no `%` operator and no indexed
-  assignment. Both are wrong: `%` follows Python's sign convention and
-  `a[i] = v` works. The two existing benchmarks work around limitations
-  that do not exist. This directory's workloads use both freely.
-- No workload uses `modules`, `del` on a name, `assert`, the ternary, or
-  comprehension over a dict, because none of them is a performance
+- **No workload uses `modules`, `del` on a name, `assert`, the ternary, or**
+  **a comprehension over a dict**, because none of them is a performance
   question. They are in `examples/syntax.nx`.
+## Defects found while writing these, and what happened to them
+
+This directory was written while the tree-walking interpreter still existed,
+and the interpreter was the oracle: each of these was a program the
+interpreter got right and the native backend got wrong. The interpreter has
+since been deleted, so they can no longer be reproduced against it. Here is
+what became of each.
+
+- **Stepped string slices read uninitialised memory and wrote out of bounds.**
+  Fixed. `nx_slice` computed the destination offset as `source_index - from`
+  instead of the packed output offset, and sized the buffer with `floor`
+  where it needs `ceil`. `s[::2]` on `"abcdef"` returned `"a"`; it returns
+  `"ace"`. Five regression tests pin it.
+- **`i64::MIN / -1` returned garbage.** Fixed. `sdiv i64 INT64_MIN, -1` is
+  poison in LLVM rather than a wrapped value, so leaving it unchecked was
+  undefined behaviour. It now traps with "integer overflow", in all three of
+  `/`, `//` and `%`.
+- **Integer overflow wrapped natively.** Fixed. `+`, `-` and `*` on two
+  `Int`s now trap via `llvm.{sadd,ssub,smul}.with.overflow`, which costs
+  nothing wherever LLVM can prove the range.
+- **Float printing trimmed the integer part of large values.** This one does
+  not reproduce. `print(1e14)` is `100000000000000`, and `1e-4` through
+  `1e15` all print in the documented fixed notation. Float printing does trim
+  trailing zeros, so `4.0` prints as `4`; that is the intended
+  15-significant-digit formatting rather than a truncation.
+- **A recursive function with a list argument could crash the native
+  backend.** This one does not reproduce either: a function recursing over a
+  slice of its own list argument works.
+- **The interpreter rejected a chained assignment into a dict.**
+  `m["k"][0] = v` worked natively and is still rejected, because a dict is
+  keyed by value and that key is not an `Int`. It was never a native defect,
+  so nothing was changed here.

@@ -114,6 +114,39 @@ print(b)",
 }
 
 #[test]
+fn multiple_element_targets_assign_positionally() {
+    // `xs[0], xs[1] = 7, 8` used to be rejected: the parser only
+    // accepted one target before the comma. Right-hand sides still
+    // evaluate before any store, so this swaps too.
+    assert_output(
+        "xs = [1, 2, 3]
+xs[0], xs[2] = xs[2], xs[0]
+print(xs)",
+        &["[3, 2, 1]"],
+    );
+    assert_output(
+        "xs = [0, 0]
+a = 9
+a, xs[1] = xs[0], a
+print(a, xs)",
+        &["0 [0, 9]"],
+    );
+}
+
+#[test]
+fn multiple_field_targets_assign_positionally() {
+    assert_output(
+        "type P:
+    x: Int
+    y: Int
+p = P(1, 2)
+p.x, p.y = p.y, p.x
+print(p)",
+        &["P(2, 1)"],
+    );
+}
+
+#[test]
 fn multiple_return_is_destructured() {
     assert_output(
         "fn pair():

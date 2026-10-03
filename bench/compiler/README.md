@@ -311,14 +311,20 @@ before timing each program the harness requires:
 1. `nx build` succeeds and the exe produces non-empty output;
 2. a second, independent build from scratch produces byte-identical output
    (codegen determinism);
-3. for programs up to `-VerifyMaxBytes` (default 150,000 B), the built exe's
-   output matches `nx <file>` running the same program on the interpreter.
+3. for programs up to `-VerifyMaxBytes` (default 150,000 B), a second build
+   with unboxing disabled produces byte-identical output, so a representation
+   change is not also a semantics change.
 
 If any check fails the harness aborts and discards all timings.
 
-Requirement 3 is size-limited on purpose: the interpreter's cost is
-superlinear in function count, so it stops being a usable oracle. See
-"What could not be measured".
+Requirement 3 used to compare against the tree-walking interpreter, which is
+what made it a real oracle rather than a self-consistency check. That
+interpreter has since been deleted, so the check is now unboxed against
+boxed. It is weaker, and honestly so: it cannot catch a bug both
+representations share -- and a bug of exactly that shape did exist. A
+function reading a global only inside a dict literal was memoized and
+returned a stale value, and both builds agreed on the wrong answer. That is
+why `compiler/nx-e2e` asserts expected values rather than agreement.
 
 ---
 

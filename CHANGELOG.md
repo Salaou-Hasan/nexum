@@ -1,16 +1,17 @@
 # Changelog
 
-## v0.5.0
+## v0.4.0
+
+The first release since v0.3.0. The work below was labelled v0.4.0 through
+v0.4.4 in draft and none of those labels was ever published, so it all
+ships as one release. Sections are newest first; the draft labels are
+kept as headings so the cross-references between entries still resolve.
 
 ### The interpreter is gone. Nexum compiles ahead-of-time, and that is all.
-
 `compiler/nx-interp` is deleted -- 3,575 lines and 96 tests -- along with every
 execution path that used it. There is now exactly one execution model:
-
     source -> lexer -> parser -> type check -> LLVM IR -> clang -O2 -> native executable
-
 **CLI**
-
 - `nx <file.nx>` builds a native executable and runs it; it used to interpret
 - `nx --run <file.nx>` **removed**. It only ever meant "interpret".
 - `nx run <file.nx> [-o <out>]` accepts `-o`
@@ -18,36 +19,28 @@ execution path that used it. There is now exactly one execution model:
   `nx build a.nx -o build\release\a.exe` no longer fails inside the linker
   with a message that never mentions nx
 - without `-o`, the executable lands beside its `.nx` source
-
 This is a breaking change. Anything scripting `nx <file>` for its speed now
 pays a compile, and `--run` must become `run`.
-
 ### Replacing the oracle
-
 Deleting the interpreter removes the only part of the compiler that ever
 *executed* a Nexum program: `nx-codegen` asserts on emitted IR text and never
 runs anything, and nothing else invoked clang. So `compiler/nx-e2e` is a new
-crate with a compile-and-run harness, and 112 tests now execute real programs
+crate with a compile-and-run harness, and 165 tests now execute real programs
 against expected values.
-
 Expected-value tests are a stronger oracle than a differential against a
 second engine. A differential can only tell you two implementations differ,
 never which is right -- and it reports "ok" when both are wrong. That is not
 hypothetical: the old three-way harness reported agreement on programs where
 the interpreter and the backend both returned a stale memoized value.
-
 Converting the suite immediately corrected three of my own expectations.
 Comparing a `P` to a `Q` is rejected rather than answered `false`;
 destructuring a non-tuple is a runtime rejection the checker does not catch;
 and my compound-assignment arithmetic was wrong. None of those could have
 been found by diffing two engines.
-
 ### A heap buffer overflow in string slicing
-
 `print("abcdef"[::2])` returned heap garbage, and a 10-character string
 sliced with a step wrote past the end of its buffer. Two defects, both in
 `nx_slice`'s string path:
-
 1. the element count was `floor(cap/step)` where it must be `ceil`, so the
    shortfall only appeared when `cap` did not divide evenly -- which is why
    `"abcdef"[::2]` looked plausible and `"abcde"[::2]` did not
@@ -55,71 +48,54 @@ sliced with a step wrote past the end of its buffer. Two defects, both in
    byte uninitialised *and* running off the end. The comment above it read
    "packed from zero, not mirrored from the source offset" and then mirrored
    the source offset.
-
 The list path was unaffected because it allocates then pushes, which is why
 slicing a list always looked right. Five regression tests pin it.
-
 ### ASan does not currently cover the hand-written runtime
-
 The binaries import `clang_rt.asan_dynamic-x86_64.dll`, and ASan works on
 this machine -- a control C program trips it. Yet it reports **nothing** for
 the overflow above. So a green ASan run is not evidence that the runtime is
 memory-safe, which is the opposite of what the CI step implies.
-
 ### tools/verify.ps1
-
 The differential is now two-way (native, then native with `NX_NOUNBOX=1`).
 Four defects fixed: it ran a stale copy of `nx` from `$CARGO_HOME\bin`, so it
 could report all-green against a binary from many commits ago; it dropped
 blank lines from both sides before comparing; it used `Compare-Object`, a set
 comparison, while claiming byte-identical output; and it checked no exit code,
 so a program failing identically on both paths compared equal. The corpus is
-now an explicit 14-entry list including `examples/modules/`, which a
+now an explicit 13-entry list including `examples/modules/`, which a
 non-recursive glob had skipped entirely -- module imports had no CI coverage at
 all.
-
 The dangerous version of this edit is worth recording: deleting `$interp`
-while leaving `Compare-Object` pointed at it would have printed `ok 14/14`
+while leaving `Compare-Object` pointed at it would have printed `ok 13/13`
 while comparing nothing.
-
 ### nx-ast / nx-codegen / nx-types: dangling comments
-
 Fourteen source comments referred to the deleted interpreter. One was actively
 harmful. `nx-codegen`'s `Pow` arm carried:
-
     // which panics or saturates exactly as the interpreter does.
-
 It does not. That path calls `@nx_ipow` directly, bypassing every check in
 `@nx_pow`, which is why `2 ** 100` returned 0 and `2 ** -1` returned 1. A
 comment asserting a guarantee the code does not make is how a bug survives
 review.
-
 ### docs/grammar.md: the specification owns runtime meaning
-
 The authority table read:
-
     | Runtime meaning | compiler/nx-codegen/src/runtime.ll |
-
 The *language specification named a backend as the authority for meaning*.
 That is the root cause of every divergence recorded in v0.4.4: each rule was
 written once in Rust and once in LLVM IR with no owner, and the two drifted.
 It now names this document, with `arith_result` as the single checker-side
 owner of operator result types.
-
 Five runtime rules are now written down as testable rules R1-R5: integer
 overflow traps; `**` saturates and rejects a negative exponent; a string is a
-sequence of characters; there is no loop or recursion limit; `parallel:`
-output is in task order.
-
-**R1, R2 and R3 are specified but not implemented.** The backend still wraps
-on overflow, `nx_ipow` is still unguarded, and strings are still byte-indexed.
-The specification is deliberately ahead of the runtime; those are Argone
-Task 0.
-
+sequence of characters; there is no loop or recursion limit; execution is
+single-threaded and in program order.
+**R1, R2 and R3 were specified first and are enforced below.** The boxed path
+had them first; the unboxed path -- the default, since `NX_NOUNBOX` is normally
+unset -- did not, so the guarantees did not hold for ordinary programs. The
+`Integer arithmetic`, `Slicing a list of lists` and `Strings are addressed by
+character` sections record the enforcement; the specification led the runtime
+by design, and those are Argone Task 0.
 ### `parallel:` is removed. There is no concurrency in Nexum.
-
 Not deprecated -- gone, with every trace of it:
-
 | Removed | |
 |---|---|
 | `parallel:` keyword | lexer, AST variant, parser rule, type-checker scope tracking |
@@ -129,21 +105,17 @@ Not deprecated -- gone, with every trace of it:
 | runtime | `nx_pool_claim`, `nx_pool_worker`, `%NxPool` from `runtime.ll` |
 | platform shims | `runtime_threads_win.ll`, `runtime_threads_unix.ll`, the `THREADS` include |
 | corpus | `examples/parallel.nx`, `bench/workloads/parwork.{nx,rs}` |
-
 **Why.** `parallel:` asked the scheduler to prove race-freedom statically and
 promised output in task order whatever the scheduler did. The proof had holes,
 and I found one while fixing an unrelated bug.
-
 A name bound inside a top-level `parallel:` block is a module global in the
 emitted code -- `nx-codegen`'s `collect_module_globals` says so explicitly and
 declares it. But `nx-ir`'s `top_assigned`, which feeds the *dependency* analysis,
 only recursed into `if` and `while`. So `is_shared("t")` was false for a name
 that was in fact shared, the scheduler saw no conflict, and `t = 0`, the loop
 accumulating into `t`, and `x = t` were emitted as three concurrent tasks.
-
 Two analyses of the same fact, disagreeing. The program compiled, ran, and
 printed the right answer whenever the race was won:
-
     n = 100
     x = 0
     y = 0
@@ -153,74 +125,57 @@ printed the right answer whenever the race was won:
             t = t + i
         x = t
         ...
-
 300 consecutive runs after the fix: 300x `4950/9900`. Before it, one run in
 roughly six printed `0`, and `parallel_tasks_do_not_share_loop_variables` -- a
 test whose own comment calls it a data race detector -- passed about four times
 in five.
-
 An automatic-parallelism feature is only as good as its race-freedom proof, and
 a sound one needs ownership and alias analysis, which is Stage 6. Until that
 exists, the honest options are a correct-but-unusable feature or no feature.
 This was the second one.
-
 `nx_spin_lock`/`nx_spin_unlock` stay: memoization uses them.
-
 R5 in `docs/grammar.md` survives in rewritten form -- execution is
 single-threaded and in program order -- because a single-threaded model is the
 one guarantee a compiler can make without a proof obligation.
-
 The cost is real: `parwork` was the only benchmark where NX beat Rust (0.59x).
 Correctness outranks that row.
-
 ### Integer arithmetic has a defined answer or none at all
-
 R1 and R2 were written down and enforced only on the boxed path. Since
 `NX_NOUNBOX` is normally unset, the unboxed path is the default, so the
 guarantees did not hold for ordinary programs.
-
     x = -9223372036854775807 - 1
     x / -1     -> garbage    (now: integer overflow)
     x // -1    -> garbage    (now: integer overflow)
     x % -1     -> 0          (now: integer overflow)
     2 ** -1    -> 1          (now: traps)
     2 ** 100   -> 0          (now: 9223372036854775807)
-
 `sdiv i64 INT64_MIN, -1` is *poison* in LLVM, not a wrapped value: the quotient
 does not exist, so leaving it unchecked was undefined behaviour rather than a
 wrong answer. `nx_div_i64`, `nx_floordiv_i64` and `nx_mod_i64` now guard it.
-
 `nx_ipow` inherited none of `nx_pow`'s R2 checks and now mirrors them exactly,
 including answering 0, 1 and -1 by parity instead of clamping them.
-
 `+`, `-` and `*` on two `Int`s now trap on overflow, on both paths, via
 `llvm.{sadd,ssub,smul}.with.overflow.i64`. That is one operation returning the
 value and the flag, LLVM lowers it to the same instruction plus overflow flags,
 and it disappears entirely wherever LLVM can prove the range -- most loop
 counters and index arithmetic. Python sign conventions are untouched:
 `-7 // 2 == -4`, `-7 % 3 == 2`.
-
 Two codegen tests asserted the literal text `add i64` / `mul i64`. They were
 guarding "the operands never get boxed", which the intrinsic preserves; the
 assertions now name the intrinsic and keep the two `!@nx_add` / `!@nx_mul`
 checks that state the real invariant.
-
 ### Slicing a list of lists no longer writes through to the parent
-
     xs = [[1, 2], [3, 4], [5, 6]]
     ys = xs[0:2]
     ys[0][0] = 99
     print(xs)      # was [[99, 2], [3, 4], [5, 6]]
-
 `nx_slice`'s list path pushed each element as it found it, so a list of lists
 shared its inner lists with the parent. A plain bind, a literal and a function
 argument all deep-copied, so `ys = xs` and `ys = xs[0:2]` meant different
 things and only one of them was what `docs/grammar.md` says.
-
 It now clones each element through the existing `nx_clone`, which returns Int,
 Float, Bool, Str and Func unchanged and deep-copies List, Dict and Record. One
 call per element, no new blocks in the loop body.
-
 Worth recording how this one went. The first attempt branched on the element's
 tag inside the loop body to avoid the call for scalars. That needed new basic
 blocks, which meant the `scan` loop's `phi` had to name the new back-edge, and
@@ -232,130 +187,117 @@ replacements never matched because the pattern had LF and the file had CRLF,
 so every "variant" was really the original file with only the `phi` changed.
 Reading the whole function first, and keeping the change to three lines, is
 what worked. Four failures to one correct edit.
-
 `slice_copies_rather_than_aliases` passed throughout, because it only reaches
 top-level `Int` elements -- which a shallow slice already handled. The nested
 case is now `slice_copies_nested_containers_too`.
-
 Also verified: the `1e14 -> 1` float-printing bug in my notes does not
 reproduce. `print(1e14)` is `100000000000000`, and `1e-4 .. 1e15` all print in
 the documented fixed notation with `%.17g` taking over outside it.
-
 ### `continue` in a `for` loop no longer hangs
-
     t = 0
     for i in 0..5:
         if i == 2:
             continue
         t = t + i
     print(t)      # hung forever; now 8
-
 `continue` branched to the loop's *condition*, which is right for `while` and
 wrong for `for`: a `for` owns its induction variable, so re-testing the
 condition re-tests the same index and the loop never advances. It never
 advanced at all, so it did not terminate.
-
 Both `for` arms now branch to a latch that runs the increment and then goes
 back to the condition, and the normal fall-through goes through the same latch
 so there is one increment site rather than two.
-
 `continue_skips_the_rest_of_the_body_in_a_while_loop` incremented by hand
 *before* its `continue`, which is what the rule requires in a `while` loop --
 and it meant the suite had no `for`-loop `continue` test at all, which is how
 this survived. Covered now for the range form, the descending form, list
 iteration and string iteration, plus innermost-loop targeting and shadow
 restore on the `continue` path.
-
 ### `xs[1:3] = 9` is rejected instead of silently doing nothing
-
     xs = [1, 2, 3, 4, 5]
     xs[1:3] = 9
     print(xs)      # printed [1, 2, 3, 4, 5], as though it had worked
-
 `target_from_expr` had a catch-all that produced `Target::Name("")` for
 anything that was not a name, element or field, so a slice target became an
 assignment to a variable with an empty name. Its own comment claimed the case
 was "unreachable through the grammar", which is what made it safe to leave
 alone: a slice *is* an `Expr`, and the parser reaches this function having just
 seen `=`.
-
 `target_from_expr` now returns a `Result` and names the offending shape:
-
     cannot assign to a slice; a target is a name, an element, or a field
     cannot assign to a call; a target is a name, an element, or a field
-
 This is a rejection rather than an implementation. `docs/grammar.md` 2.5 says
 "A target is a name, an element, or a field", and Python and Rust reject slice
 assignment too. Slice assignment would be a language addition with real
 semantics -- length changes, element-type unification -- and it belongs in the
 spec before it belongs in the backend.
-
 Still not supported, and now visible rather than silent: `xs[0], xs[1] = 7, 8`.
 The grammar has `target_list ::= target ("," target)*` but the parser only
 accepts a single target before the comma.
-
 ### Strings are addressed by character, and there is a way to spell them in ASCII
-
 R3, the last of the correctness bugs:
-
     print(len("héllo"))        was 6, now 5
     print("héllo"[1])          was one byte of é, now é
     print("日本語"[1])          was one byte, now 本
     for c in "日本語": ...     was nine broken bytes, now three characters
-
 Three helpers in the runtime find character boundaries. A UTF-8 character
 starts wherever a byte is not `10xxxxxx`, and its width comes from the lead
 byte, so none of them decodes a code point:
-
 - `nx_utf8_count` counts non-continuation bytes
 - `nx_utf8_offset` walks characters to a byte offset
 - `nx_utf8_charlen` reads the width from the lead byte
-
 `nx_len`, `nx_index` and `nx_slice` route through them, and iteration follows
 `nx_index` for free. `nx_slice` now sizes its buffer in bytes from the span
 between the two bounds, because sizing it in characters -- which is what it
 did -- is up to 4x too small for anything non-ASCII.
-
 The cost is honest: `len` is O(n) and `s[i]` is O(i), where a byte-addressed
 string is O(1) for both. Caching a character count next to the byte length is
 the fix, and it wants a string header the way a list already has one.
-
 ### `\uXXXX`, `\UXXXXXXXX`, `\u{...}`
-
 The escapes exist because of the cost above being unmeasurable otherwise. A
 literal non-ASCII glyph in a source file is UTF-8, and a diff, a terminal with
 the wrong code page, and a patch applied as bytes all decode it differently --
 and none of them reports an error when they disagree, they report mojibake.
 `\u65e5` cannot do that, because its six bytes say what they are.
-
 All three spellings are Python's. A surrogate or an out-of-range value is a lex
 error rather than a string holding something no UTF-8 encoder will accept.
-
 I hit this while writing the R3 tests: raw glyphs in the test sources came back
 through the console as CJK. The right response was to make the test sources
 ASCII, not to strip every non-ASCII byte from the repository -- an em-dash in
 a comment is not the problem and was never implicated. Every source file under
 `compiler/` and `tools/` is ASCII apart from eleven pre-existing em-dashes,
 which stay.
-
 ### Test counts
-
-212 unit tests plus 165 native execution tests. `cargo test --workspace` runs
+222 unit tests plus 173 native execution tests. `cargo test --workspace` runs
 everything; `tools/verify.ps1` reports 13/13.
+### Still open
 
-### Still broken, not fixed here
+Correctness. The nine bugs from the audit are closed, and so are the four
+that were left after it: a method call through a field now resolves through
+the field's declared type (with `mut self` writing back through it),
+`xs[0], xs[1] = 7, 8` assigns positionally, `"" in s` is true, and a needle
+as long as the haystack matches. What is left, measured rather than
+assumed:
 
-- a method call on a receiver reached through a field type-checks and then
-  fails codegen ("only modules, types and builtins support attribute calls")
-- assigning to a slice target (`xs[1:2] = 9`) silently discards the value
-- slicing a list of lists is shallow, though a plain bind deep-copies
-- `continue` in a `for` loop hangs
-- a recursive function taking a list argument segfaults
-- float printing at `|x| >= 1e14`
+- a method call on a parameter the checker cannot resolve. NX has no type
+  annotations (grammar.md 4.1), so a parameter takes its type from how the
+  body uses it, and a body that only forwards `p.get()` resolves nothing.
+  Annotating the parameter would be a language addition, not a fix.
 
-## v0.4.4
+Performance, stated rather than hidden:
 
-### ARGONE revised: MLIR removed as a prerequisite, and the audit found something worse
+- a bind deep-copies a container and argument passing deep-copies again, so
+  container-heavy code runs 3x to 22x slower than the Rust equivalent measured
+  in `bench/`. Copy-on-write would close most of that and needs reference
+  counting, which is Stage 6.
+- `len` on a string is O(n) and `s[i]` is O(i), because a character count is
+  not cached beside the byte length. Caching it wants a string header the way
+  a list already has one.
+- malloc-ed memory lives for the process lifetime. There is no collector and
+  no arena yet, so a program that churns grows without bound.
+### Draft v0.4.4
+
+#### ARGONE revised: MLIR removed as a prerequisite, and the audit found something worse
 
 A ten-agent parallel investigation, reconciled against the tree. Full
 report in `docs/architecture/audit.md`; plan in `docs/ARGONE.md`; gate in
@@ -368,7 +310,7 @@ generation through the LLVM C API, and pipeline integration. MLIR may be
 added later if a concrete requirement justifies it. JIT, ORC and LLJIT are
 permanently out of scope.
 
-### Corrections to v0.4.3, on the record
+#### Corrections to v0.4.3, on the record
 
 Three claims in the previous entry were wrong.
 
@@ -389,7 +331,7 @@ on this machine. That is no longer a blocker.
 The AST-arm duplication figure (100 `Stmt` / 133 `Expr`) was also wrong.
 Measured: 146 and 118 — and the total was the wrong target anyway.
 
-### Eleven verified interpreter/native divergences
+#### Eleven verified interpreter/native divergences
 
 Every one executed on this host.
 
@@ -422,7 +364,7 @@ This is now **Task 0**, gating every representation change: building a typed
 HIR while the backend silently wraps integers produces two wrong
 implementations instead of one.
 
-### A bug the differential cannot see by construction
+#### A bug the differential cannot see by construction
 
 `nx_ir::expr` has a `_ => {}` arm that silently drops `Dict`, `Slice`,
 `IfExpr` and `Comprehension`, so a function reading a global only inside a
@@ -447,7 +389,7 @@ A related claim — that memoization caches a freed container pointer — was
 **not reproduced**: the function is not memoized in that shape, and an
 AddressSanitizer build reports no error.
 
-### Harness defects found
+#### Harness defects found
 
 `tools/verify.ps1`, the oracle:
 
@@ -464,7 +406,7 @@ CI natively compiles 11 of 13 examples, omitting `records.nx`, `methods.nx`
 and `syntax.nx` — the only coverage of records, `mut self`, `del`,
 comprehensions, slices and `None`.
 
-### Fixes in this entry
+#### Fixes in this entry
 
 - `tools/argone-gate.ps1` and `tools/argone-gate-tests.ps1` built paths with
   literal `\`, which PowerShell on Unix treats as a filename character. The
@@ -480,9 +422,10 @@ comprehensions, slices and `None`.
 No compiler behaviour changed. 318 tests pass; the 13 examples still agree
 across interpreter / native / `NX_NOUNBOX`.
 
-## v0.4.3
 
-### ARGONE: the architecture stage is planned, gated, and started
+### Draft v0.4.3
+
+#### ARGONE: the architecture stage is planned, gated, and started
 
 `Nexum_Argone_Unified_AOT_Prompt.md` defines ARGONE as a hard stage gate:
 the compiler moves from an AST-heavy, directly-to-textual-LLVM design to a
@@ -509,7 +452,7 @@ complete.
 - CI gains an `argone-gate` job that runs the gate's self-tests and prints
   the stage state.
 
-### Task 0: a prerequisite Argone discovered
+#### Task 0: a prerequisite Argone discovered
 
 Measuring this host before committing to an architecture:
 
@@ -535,7 +478,7 @@ work. If no route is viable, the correct outcome is a documented
 renegotiation with the user — not a quietly narrowed Argone that reports
 success for the easy parts.
 
-### Measured duplication Argone targets
+#### Measured duplication Argone targets
 
 Five crates walk the AST independently, re-deriving the same facts:
 
@@ -555,9 +498,10 @@ Baseline for comparison: 17,290 Rust lines across 9 crates, 318 tests,
 2,956-line runtime, zero external dependencies, 13 examples with a 3-way
 differential, 5 Rust-referenced benchmarks.
 
-## v0.4.2
 
-### The grammar, written down
+### Draft v0.4.2
+
+#### The grammar, written down
 `docs/grammar.md` documents the whole language, derived from the lexer,
 parser and checker rather than from intent, with every rule naming the
 function that enforces it. Lexical grammar, the full statement and
@@ -567,7 +511,7 @@ ways.
 
 Writing it turned up **five real bugs**, four of them pre-existing.
 
-### Fixed: `free()` on a read-only string constant
+#### Fixed: `free()` on a read-only string constant
 `nx_str` does not copy -- it stores the caller's pointer, so a string
 literal's payload points straight into read-only static memory. But
 `nx_free_val` called `free` on it. Any function whose Unique local held a
@@ -587,14 +531,14 @@ with many owners cannot be freed by any of them. `nx_free_val` no longer
 frees strings. `nx_strcat` and `nx_slice` do allocate, so those now leak,
 which is the documented model for this release.
 
-### Fixed: a loop variable was a module global
+#### Fixed: a loop variable was a module global
 A `for` variable took the `in_init` path and became a module global, so it
 leaked into every later statement and two loops collided on the name.
 Inside a `parallel:` task that collision is a data race, which would break
 the determinism contract outright. Loop variables are now always local
 slots.
 
-### Fixed: a nested loop destroyed the outer loop's variable
+#### Fixed: a nested loop destroyed the outer loop's variable
 `for i in 0..3:` containing `for i in 0..2:` left the outer `i` holding the
 inner loop's last value. Observable, in both the interpreter and the
 backend:
@@ -611,7 +555,7 @@ restored on every exit -- normal, `break`, `continue`, `return` and error
 -- in both the frame path (inside a function) and the globals path (module
 level), which are two different binding paths.
 
-### Fixed: a trailing `parallel:` block emitted invalid LLVM
+#### Fixed: a trailing `parallel:` block emitted invalid LLVM
 ```
 x = 0
 parallel:
@@ -624,7 +568,7 @@ only scanned top-level statements, so a name first assigned inside a task
 was discovered *during* emission and its declaration landed between an
 `entry:` label and the next instruction. The pass now walks task bodies.
 
-### Fixed: a `mut self` write-back could be silently dropped
+#### Fixed: a `mut self` write-back could be silently dropped
 `store_name` tested `in_init` before checking for a local slot, so a
 write-back to a loop variable went to a module global while the next read
 used the local slot. The update vanished: the code compiled, ran, and
@@ -636,22 +580,23 @@ unboxing, method dispatch on a local, the memory plan -- missed. Top-level
 code was never unboxed at all, and a method call on a top-level local could
 not resolve. Both now work.
 
-### Known gaps, not fixed here
+#### Known gaps, not fixed here
 - `del p` after a `mut self` write-back on a record fails to compile
   ("only modules, types and builtins support attribute calls"). Plain
   `del p`, `del xs[0]` and `del d["a"]` are all fine.
 - `del d["a"]` on a single-key dict makes the checker report `d` as
   undefined afterwards.
 
-### Verification
+#### Verification
 322 tests pass. All 13 examples agree across interpreter / native /
 `NX_NOUNBOX`. All 5 benchmarks match their Rust reference output. The
 grammar's example program runs identically on all three paths and its
 documented output is machine-checked.
 
-## v0.4.1
 
-### Numeric representation audit
+### Draft v0.4.1
+
+#### Numeric representation audit
 Full audit in `docs/numeric-audit.md`. Every numeric width in the compiler
 and the emitted runtime is classified with a measurement or a reason.
 
@@ -684,7 +629,7 @@ and the emitted runtime is classified with a measurement or a reason.
 - New structure-size tests in `nx-ast` and `nx-codegen` pin every width
   above, so a widening is a test failure rather than a quiet regression.
 
-### Not done, and why
+#### Not done, and why
 Deleting `%NxVal.extra` would take every NX value from 24 to 16 bytes --
 33% off every list element, dict entry, memo slot and call argument array.
 It is 53 sites in `runtime.ll` in the core value representation of a
@@ -693,15 +638,16 @@ sanitizer sweep rather than an audit applied in passing. Also deferred:
 the 960 KiB memo table in every binary, constant-range narrowing below
 `i64`, and flat scalar array storage. See `docs/numeric-audit.md` §6.
 
-### Verification
+#### Verification
 307 tests pass. All 13 examples agree across interpreter / native /
 `NX_NOUNBOX`. All 5 benchmarks match their Rust reference output. A
 same-session A/B of the benchmark suite shows mixed signs across five
 benchmarks (two faster), i.e. noise rather than a regression.
 
-## v0.4.0
 
-### Stage 3: `impl` blocks and methods
+### Draft v0.4.0
+
+#### Stage 3: `impl` blocks and methods
 - `impl T:` attaches functions to a type declared in the same module.
   `fn name(self)` is a method, called `v.name(...)`; `fn name(mut self)`
   additionally writes its result back into the receiver, so
@@ -733,7 +679,7 @@ benchmarks (two faster), i.e. noise rather than a regression.
   decision. `NX_NOUNBOX=1` keeps working method for method, so the opt-out
   stays a debug switch instead of becoming a second language.
 
-### Fixed
+#### Fixed
 - A method receiver was emitted twice in the backend -- once to learn its
   static type, once to build the argument list. For a `mut self` receiver
   that ran the write-back twice, so `q.moved(1, 1).moved(1, 1)` advanced
@@ -751,11 +697,12 @@ benchmarks (two faster), i.e. noise rather than a regression.
 - `self` was a keyword the expression parser did not accept, so
   `self.x = 1` -- the whole reason `mut self` exists -- did not parse.
 
-### Tooling
+#### Tooling
 - `tools/verify.ps1` runs every example three ways -- interpreter, native,
   and native with `NX_NOUNBOX=1` -- and diffs the output. All 13 examples
   must agree; a disagreement is a build failure.
 - All five benchmarks still match their Rust reference output.
+
 
 ## v0.3.0
 

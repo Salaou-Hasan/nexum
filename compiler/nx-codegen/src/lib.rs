@@ -747,6 +747,23 @@ mod tests {
         assert!(!b.contains("@nx_memo_put"), "no cache write:\n{b}");
     }
 
+    /// A receiver reached through a field resolves through the field's
+    /// declared type: the field read itself is dynamically typed, so the
+    /// method table cannot come from the value's representation type.
+    #[test]
+    fn method_through_a_field_dispatches_on_the_declared_field_type() {
+        let ir = compile_entry(
+            &format!("{POINT}impl P:\n    fn total(self):\n        return self.x + self.y\ntype Q:\n    p: P\nq = Q(P(1, 2))\nprint(q.p.total())\n"),
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        assert!(
+            top.contains(&mangle_method("__main__", "P", "total")),
+            "the call must reach P.total, not sugar or an error:\n{top}"
+        );
+    }
+
     #[test]
     fn int_param_stays_unboxed() {
         let ir = compile_entry(
@@ -1310,6 +1327,12 @@ struct Gen {
     /// declaration order. Harvested from every program before emission,
     /// so a constructor in one module can use a layout from another.
     layouts: HashMap<(String, String), Vec<String>>,
+    /// Declared field types: (module, type, field) to the type name as
+    /// written (`"Any"` when the field is unannotated). Harvested with the
+    /// layouts. Lets method dispatch see through a field access (`q.p.get()`)
+    /// without re-reading the AST: the field's declared record type is
+    /// resolved exactly the way the checker resolves it.
+    field_types: HashMap<(String, String, String), String>,
     /// `from m import T [as U]` in module `cur`: (cur, alias) to
     /// (declaring module, type). A bare `T(...)` in `cur` resolves
     /// through this exactly the way the checker does.
@@ -1410,6 +1433,7 @@ impl Gen {
             alloc_frames: Vec::new(),
             memo_id: None,
             layouts: HashMap::new(),
+            field_types: HashMap::new(),
             type_alias: HashMap::new(),
             methods: HashMap::new(),
             desc_emitted: HashSet::new(),
@@ -1439,6 +1463,12 @@ impl Gen {
                             (module.clone(), name.clone()),
                             fields.iter().map(|f| f.name.clone()).collect(),
                         );
+                        for f in fields {
+                            self.field_types.insert(
+                                (module.clone(), name.clone(), f.name.clone()),
+                                f.ty.clone(),
+                            );
+                        }
                     }
                     // Methods harvest like layouts: the checker has already
                     // enforced the orphan rule, so the named type is declared
@@ -1542,10 +1572,16 @@ impl Gen {
     /// a program only when the declaration exists somewhere, and the
     /// sorted search keeps the choice deterministic.
     fn resolve_type(&self, name: &str) -> Option<(String, String, Vec<String>)> {
-        if let Some(fields) = self.layouts.get(&(self.cur_module.clone(), name.to_string())) {
-            return Some((self.cur_module.clone(), name.to_string(), fields.clone()));
+        self.resolve_type_in(&self.cur_module.clone(), name)
+    }
+
+    /// `resolve_type` against an explicit module, so a field's declared
+    /// type resolves in its own type's context rather than the caller's.
+    fn resolve_type_in(&self, module: &str, name: &str) -> Option<(String, String, Vec<String>)> {
+        if let Some(fields) = self.layouts.get(&(module.to_string(), name.to_string())) {
+            return Some((module.to_string(), name.to_string(), fields.clone()));
         }
-        if let Some((m, t)) = self.type_alias.get(&(self.cur_module.clone(), name.to_string())) {
+        if let Some((m, t)) = self.type_alias.get(&(module.to_string(), name.to_string())) {
             if let Some(fields) = self.layouts.get(&(m.clone(), t.clone())) {
                 return Some((m.clone(), t.clone(), fields.clone()));
             }
@@ -1559,6 +1595,45 @@ impl Gen {
             }
         }
         None
+    }
+
+    /// The static type of a field read from a value of a known record
+    /// type, from the declaration alone. Mirrors the checker's `field_ty`:
+    /// scalars map directly, a name that resolves to a declared type is
+    /// that record, and anything else (`Any`, containers, unknown names)
+    /// is not statically known here.
+    fn declared_field_ty(&self, type_name: &str, field: &str) -> Option<Ty> {
+        let (decl_module, canon, _) = self.resolve_type(type_name)?;
+        let written = self
+            .field_types
+            .get(&(decl_module.clone(), canon, field.to_string()))?;
+        match written.as_str() {
+            "Int" => Some(Ty::Int),
+            "Float" => Some(Ty::Float),
+            "Bool" => Some(Ty::Bool),
+            "Str" => Some(Ty::Str),
+            "None" => Some(Ty::None),
+            other => {
+                let (_, other_canon, _) = self.resolve_type_in(&decl_module, other)?;
+                Some(Ty::Record(other_canon))
+            }
+        }
+    }
+
+    /// The static record type behind an arbitrary receiver expression.
+    /// A bare variable asks the checker's inference; a field read recurses
+    /// through the holder into the field's declared type, so `q.p` is
+    /// known when `q` is a record with a record-typed field. Anything
+    /// else is dynamic, exactly as before.
+    fn static_ty_of(&self, e: &Expr) -> Ty {
+        match e {
+            Expr::Var(n, _) => self.ty_dispatch(n),
+            Expr::Attr { base, attr, .. } => match self.static_ty_of(base) {
+                Ty::Record(t) => self.declared_field_ty(&t, attr).unwrap_or(Ty::Unknown),
+                _ => Ty::Unknown,
+            },
+            _ => Ty::Unknown,
+        }
     }
 
     /// Descriptor global for a resolved type.
@@ -4187,7 +4262,12 @@ impl Gen {
             // directly, which is what keeps `self.area()` working.
             let bt = match &recv.ty {
                 Ty::Unknown => match base.as_ref() {
-                    Expr::Var(n, _) => self.ty_dispatch(n),
+                    // A field read is always dynamically typed (unboxed
+                    // fields arrive with ownership), so a receiver reached
+                    // through one re-derives its static type from the
+                    // declaration instead. Anything still unknown stays
+                    // unknown and takes sugar or the error below.
+                    Expr::Var(..) | Expr::Attr { .. } => self.static_ty_of(base),
                     _ => Ty::Unknown,
                 },
                 t => t.clone(),

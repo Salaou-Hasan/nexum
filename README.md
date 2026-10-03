@@ -6,7 +6,7 @@ Python-simple syntax. Native compiler. LLVM backend.
 nx run examples\hello.nx      # build if stale, then run native
 nx check examples\hello.nx    # static type check
 nx build examples\hello.nx    # native exe via LLVM (needs clang)
-nx build --emit-ir            # print the generated LLVM IR
+nx build examples\hello.nx --emit-ir   # print the generated LLVM IR
 nx dump-ir examples\hello.nx  # effect summaries (reads/writes/prints)
 nx update                     # self-update exe + extension
 nx setup --apply              # wire .nx icons into your VS Code theme
@@ -14,11 +14,24 @@ nx setup --apply              # wire .nx icons into your VS Code theme
 
 Write it once, the compiler ships the machine:
 
+```nexum
+fn collatz(n):
+    steps = 0
+    while n != 1:
+        if n % 2 == 0:
+            n = n / 2
+        else:
+            n = 3 * n + 1
+        steps = steps + 1
+    return steps
+
+print(collatz(27))     # 111
 ```
-parallel:          # tasks run on threads when conflict-free
-    a = fib(20)    # (deterministic: same output every run)
-    b = fib(20)
-```
+
+`collatz` is pure, so it is memoized automatically, and `n` is a statically
+known `Int`, so it is unboxed into a bare register and the arithmetic is raw.
+Neither is written in the source: both are consequences of what the code
+means.
 
 ## One execution model
 
@@ -31,9 +44,11 @@ source -> lexer -> parser -> type check -> effect summary + memory plan
 
 `nx <file.nx>` and `nx run <file.nx>` both end at that executable, and
 with no `-o` the executable is written next to its `.nx` source file.
-There is no second way to execute NX: the tree-walking interpreter was
-deleted rather than kept alongside the compiler, so every rule in
-`docs/grammar.md` has exactly one implementation behind it.
+There is no second way to execute NX: the tree-walking interpreter was deleted
+rather than kept alongside the compiler, so every rule in `docs/grammar.md`
+has exactly one implementation behind it. There is also no concurrency --
+see `Still open` in `CHANGELOG.md` for why `parallel:` was removed rather than
+fixed.
 
 ## What the compiler does for you
 
@@ -50,10 +65,10 @@ You write ordinary code; the compiler finds the expensive parts.
 - **Type inference from use.** NX has no annotations and no overloading,
   so `n - 1` proves `n` is `Int` and `xs[i]` proves `i` is `Int`. That is
   what lets the backend skip the box.
-- **Deterministic parallelism.** Conflict-free tasks run on a thread
-  pool sized to the batch, on every platform; conflicting ones serialize
-  in program order. Output is byte-identical on every run, and CI checks
-  that by running the parallel example repeatedly and diffing.
+- **Correct or loud, never wrapped.** Integer overflow traps rather than
+  wrapping, `**` saturates instead of silently returning a wrong power, and
+  a string is addressed by character rather than by byte. `3 * n + 1` either
+  produces the right answer or stops the program; it never quietly does not.
 - **Memory planning.** `nx-mem` classifies each local Unique or Shared
   and releases buffers automatically. You never write a smart pointer or
   a lifetime.
@@ -88,10 +103,13 @@ flag flip rebuilds instead of silently reusing a stale binary.
 - `compiler/nx-mem/` — memory planning (Unique/Shared per local)
 - `compiler/nx-codegen/` — LLVM IR backend (`nx build`)
 - `compiler/nx-driver/` — `nx` CLI
+- `compiler/nx-e2e/` — compile-and-run tests against expected values
 - `editors/vscode-nexum/` — VS Code extension
 - `wix/` — Windows MSI installer
 - `tools/verify.ps1` — every example, two ways, diffed
+- `tools/argone-gate.ps1` — decides whether the ARGONE stage is complete
 - `bench/run.ps1` — Nexum vs Rust, correctness-gated
+- `bench/compiler/` — where the compiler's own time goes
 - `examples/` — `.nx` samples
 
 ## Types and behavior
@@ -125,7 +143,45 @@ Point.origin()                  # Point(0, 0)
 ```
 
 Containers have value semantics: they copy on bind, so no assignment or
-argument passing aliases. Strings are shared but never mutated in place.
+argument passing aliases. A slice copies its elements too, so a list of lists
+does not write through to its parent.
+
+Strings are shared and never mutated in place, and they are addressed by
+character rather than by byte:
+
+```nexum
+s = "日本語"
+print(len(s))      # 3 characters, not 9 bytes
+print(s[1])        # 本
+print(s[::2])      # 日語
+```
+
+Write non-ASCII text with escapes so the source stays ASCII -- a raw
+multi-byte character is decoded differently by a diff, by a terminal with the
+wrong code page, and by a patch applied as bytes, and none of them reports an
+error when they disagree:
+
+```nexum
+s = "\u65e5\u672c\u8a9e"      # the same three characters
+```
+
+`"\uXXXX"`, `"\UXXXXXXXX"` and `"\u{...}"` are all accepted, spelled the way
+Python spells them.
+
+## What is not done yet
+
+Stated plainly, because a README that only lists strengths is not a
+specification. `CHANGELOG.md` carries the full list with detail.
+
+- Container binds deep-copy, so container-heavy code runs 3x to 22x slower
+  than Rust on the measured workloads. Copy-on-write would close most of it
+  and needs reference counting.
+- `len` on a string is `O(n)` and `s[i]` is `O(i)`, because a character count
+  is not cached beside the byte length.
+- Memory is malloc-ed and lives for the process lifetime. There is no
+  collector and no arena yet, so a program that churns grows without bound.
+- No concurrency. `parallel:` was removed rather than repaired; the reasoning
+  is in `CHANGELOG.md`.
 
 ## Architecture stage
 

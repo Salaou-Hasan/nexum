@@ -484,6 +484,36 @@ fn expr_roots(e: &Expr, out: &mut HashSet<Root>) {
             expr_roots(index, out);
         }
         Expr::Attr { base, .. } => expr_roots(base, out),
+        Expr::Dict(pairs, _) => {
+            for (k, v) in pairs {
+                expr_roots(k, out);
+                expr_roots(v, out);
+            }
+        }
+        Expr::Slice { base, from, to, step, .. } => {
+            expr_roots(base, out);
+            for bound in [from, to, step].into_iter().flatten() {
+                expr_roots(bound, out);
+            }
+        }
+        Expr::IfExpr { cond, then_value, else_value, .. } => {
+            expr_roots(cond, out);
+            expr_roots(then_value, out);
+            expr_roots(else_value, out);
+        }
+        Expr::Comprehension { element, iter, cond, .. } => {
+            // The loop variable is not filtered here: an extra root only
+            // pushes toward Shared, which is the safe direction.
+            expr_roots(element, out);
+            expr_roots(iter, out);
+            if let Some(c) = cond {
+                expr_roots(c, out);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            expr_roots(start, out);
+            expr_roots(end, out);
+        }
         _ => {}
     }
 }
@@ -511,6 +541,38 @@ fn vars_in(e: &Expr) -> Vec<String> {
         }
         Expr::Attr { base, .. } => vars_in(base),
         Expr::List(items, _) => items.iter().flat_map(vars_in).collect(),
+        Expr::Dict(pairs, _) => pairs
+            .iter()
+            .flat_map(|(k, v)| vars_in(k).into_iter().chain(vars_in(v)))
+            .collect(),
+        Expr::Slice { base, from, to, step, .. } => {
+            let mut v = vars_in(base);
+            for bound in [from, to, step].into_iter().flatten() {
+                v.extend(vars_in(bound));
+            }
+            v
+        }
+        Expr::IfExpr { cond, then_value, else_value, .. } => {
+            let mut v = vars_in(cond);
+            v.extend(vars_in(then_value));
+            v.extend(vars_in(else_value));
+            v
+        }
+        // The loop variable is not filtered: keeping it only pushes
+        // toward Shared, which is the safe direction.
+        Expr::Comprehension { element, iter, cond, .. } => {
+            let mut v = vars_in(element);
+            v.extend(vars_in(iter));
+            if let Some(c) = cond {
+                v.extend(vars_in(c));
+            }
+            v
+        }
+        Expr::Range { start, end, .. } => {
+            let mut v = vars_in(start);
+            v.extend(vars_in(end));
+            v
+        }
         _ => vec![],
     }
 }
@@ -631,6 +693,29 @@ mod tests {
     #[test]
     fn retaining_fn_poisons_caller() {
         let p = plan_src("fn keep(x):\n    g = [x]\n    return g\nfn f():\n    a = [1]\n    b = keep(a)\n    print(b)\n");
+        assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Shared);
+    }
+
+    #[test]
+    fn var_held_only_inside_a_dict_literal_escapes() {
+        // `a` reaches the caller through `d`, so it must be Shared: a
+        // Unique `a` would be freed while `d` still holds it. `vars_in`
+        // used to drop dict contents entirely.
+        let p = plan_src("fn f():\n    a = [1]\n    d = {\"k\": a}\n    return d\n");
+        assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Shared);
+        assert_eq!(p.alloc_of("__main__", "f", "d"), Alloc::Shared);
+    }
+
+    #[test]
+    fn var_held_only_inside_a_comprehension_escapes() {
+        let p = plan_src("fn f():\n    a = [1, 2]\n    b = [x for x in a]\n    return b\n");
+        assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Shared);
+        assert_eq!(p.alloc_of("__main__", "f", "b"), Alloc::Shared);
+    }
+
+    #[test]
+    fn var_in_slice_bounds_and_ifexpr_branches_escapes() {
+        let p = plan_src("fn f(n):\n    a = [1, 2, 3]\n    b = a[n:2] if n else a\n    return b\n");
         assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Shared);
     }
 }

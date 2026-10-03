@@ -32,7 +32,7 @@ type annotations. `Int` is 64-bit signed, `Float` is an IEEE double.
 
 ### 1.1 Keywords
 
-28 reserved words, matched whole-word (`selfish` and `mutable` are ordinary
+26 reserved words, matched whole-word (`selfish` and `mutable` are ordinary
 identifiers):
 
 ```text
@@ -164,15 +164,20 @@ parse error.
 ### 1.8 Operators and punctuation
 
 ```text
-( ) [ ] { } , : . .. ;
+( ) [ ] { } , : . ..
 
 +  -=  *  /=  //  //=  %  %=   **  **=
 &  &=  |  |=  ^  ^=  ~  <<  <<=  >>  >>=
-=  ==  !=  <  <=  >  >=  !
+=  ==  !=  <  <=  >  >=
 ```
 
 `//` is matched before `/` and `**` before `*` by the lexer, which emits
 distinct tokens, so the parser never has to back up.
+
+There is no `;` statement separator -- `;` is a lex error
+("unexpected character"). A bare `!` is lexed (so that `!=` tokenises) but
+is a parse error anywhere it appears: there is no `!x` operator, use
+`not x`.
 
 ---
 
@@ -336,6 +341,10 @@ Several targets against several values assign positionally. Several
 targets against **one** value destructure a tuple or multiple return:
 `a, b = f()`. Several targets against one non-tuple value is a type error.
 
+Every target shape pairs positionally, including element and field
+targets: `xs[0], xs[1] = 7, 8` and `p.x, p.y = 1, 2` both work, and every
+right-hand side evaluates before any store, so `a, b = b, a` swaps.
+
 Assignment is a statement. There is no walrus operator and no assignment
 expression.
 
@@ -366,7 +375,8 @@ Any bare expression is a legal statement; the value is discarded.
 | Level | Operators | Associativity | Notes |
 | --- | --- | --- | --- |
 | 1 | `f(x)`, `a[i]`, `a[i:j:k]`, `a.b` | left | postfix chain |
-| 2 | `**` | **right** | base is postfix, exponent may be signed || 3 | `+x`, `-x`, `~x` | right | `+x` is a no-op but legal |
+| 2 | `**` | **right** | base is postfix, exponent may be signed |
+| 3 | `+x`, `-x`, `~x` | right | `+x` is a no-op but legal |
 | 4 | `*` `/` `//` `%` | left | |
 | 5 | `+` `-` | left | |
 | 6 | `<<` `>>` | left | |
@@ -514,7 +524,13 @@ args  ::= expr ( "," expr )* ","?
 slice ::= [expr] ":" [expr] [ ":" [expr] ]
 ```
 
-Call arguments and dict entries may span lines. The `?` forms in `slice`
+Call arguments, list elements and dict entries may span lines: the
+parser skips newlines inside `(`...`)`, `[`...`]` and `{`...`}`. The lexer
+is not bracket-aware, though -- it tracks indentation without regard to
+open brackets. A continuation line dedented to an outer level emits a
+`Dedent` and closes the enclosing block, so in practice a multi-line call
+inside an indented block only works while every continuation line stays
+more indented than the block. The `?` forms in `slice`
 are all optional, so `a[:]`, `a[1:]`, `a[:3]`, `a[::2]` and `a[1:8:2]`
 all parse through the one form.
 
@@ -538,7 +554,10 @@ A range is an ordinary expression producing a list of Ints, not
 `xs[i + 1 .. n + 1]`, `[i for i in 0..5]`, `len(0..n)`. Bounds must be
 Ints.
 
-Ranges are half-open and ascending: `0..5` is `[0, 1, 2, 3, 4]`.
+Ranges are half-open: `0..5` is `[0, 1, 2, 3, 4]`. As a materialised value
+a range is ascending, so `5..0` is `[]` rather than an underflow. As a
+`for` header the same spelling instead emits a counted loop that runs
+down: `for i in 5..0:` visits `5, 4, 3, 2, 1`.
 
 ---
 
@@ -592,7 +611,7 @@ Both also have method-call sugar, resolved *after* methods so a type may
 override them:
 
 ```text
-xs.push(3)      -- exactly len-free sugar for push(xs, 3)
+xs.push(3)      -- exactly sugar for push(xs, 3)
 xs.len()        -- sugar for len(xs)
 ```
 

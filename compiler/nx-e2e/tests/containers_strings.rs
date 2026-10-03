@@ -15,11 +15,11 @@
 //!   "immutable" are three different failures, and the checker only sees two
 //!   of them.
 //!
-//! One behaviour is known-broken and is **not** asserted here, because a test
-//! that pins down a bug is worse than a missing test:
-//!
-//! * `"" in s` and a needle exactly as long as the haystack both report
-//!   `false`.
+//! * **Substring edge cases.** An empty needle is present in any string
+//!   and a needle exactly as long as the haystack matches when it is equal:
+//!   `"" in s` is `true` and `"hello" in "hello"` is `true`. Both were
+//!   broken once (`nx_strcontains` compared with `sgt` where it needed
+//!   `sge`, and the empty needle branched to the miss path).
 //!
 //! Strings used to be byte-addressed: `len` counted bytes, `s[1]` returned one
 //! byte of a two-byte character, and iterating a three-character string
@@ -755,9 +755,46 @@ print("h" in "hello", "o" in "hello")
 "#,
         &["true", "false", "true true", "true true"],
     );
-    // Note the two cases that are NOT asserted anywhere in this file because
-    // they are known-broken: `"" in "hello"` and `"hello" in "hello"` both
-    // report false. See the module note at the top.
+}
+
+#[test]
+fn substring_edge_cases_match() {
+    // An empty needle is present in any string, and a needle exactly as
+    // long as the haystack matches when it is equal. Both reported false
+    // once: the length pre-check used `sgt` where it needed `sge`, and the
+    // empty needle branched to the miss path.
+    assert_output(
+        r#"
+print("" in "hello")
+print("" in "")
+print("hello" in "hello")
+print("helloo" in "hello")
+print("hello" in "hell")
+"#,
+        &["true", "true", "true", "false", "false"],
+    );
+}
+
+#[test]
+fn dict_literal_read_of_a_global_is_not_served_stale() {
+    // A function reading a global only inside a dict literal used to be
+    // memoized anyway, so changing the global between calls still
+    // returned the first answer. The write goes through an element
+    // target, which is how a function can affect a module global at all.
+    assert_output(
+        r#"
+gl = {"a": 5}
+fn f(k):
+    d = {"a": gl["a"]}
+    return d["a"]
+fn w(v):
+    gl["a"] = v
+print(f(0))
+w(10)
+print(f(0))
+"#,
+        &["5", "10"],
+    );
 }
 
 #[test]

@@ -61,7 +61,7 @@ jobs:
         examples/hello.nx examples/flex.nx examples/control.nx
         examples/funcs.nx examples/lists.nx examples/search.nx
         examples/records.nx examples/methods.nx examples/syntax.nx
-        examples/modules/main.nx examples/parallel.nx examples/fib.nx
+        examples/modules/main.nx examples/fib.nx
         examples/unbox.nx examples/comments.nx
     strategy:
       matrix:
@@ -120,42 +120,6 @@ jobs:
               exit 1
             fi
           done
-      - name: parallel must actually spawn threads
-        shell: bash
-        run: |
-          # A parallel batch that silently ran inline would still print the
-          # expected output while doing no work at all, so assert on
-          # the generated IR directly.
-          for f in examples/parallel.nx; do
-            cargo run -q -p nx-driver -- build "$f" --emit-ir > out.ll
-            if grep -q 'call ptr @nx_thread_start' out.ll; then
-              echo "pool started for $f"
-            else
-              echo "NO THREADS for $f"
-              exit 1
-            fi
-            if grep -q 'call void @nx_thread_join' out.ll; then
-              echo "workers joined for $f"
-            else
-              echo "UNJOINED WORKERS for $f"
-              exit 1
-            fi
-          done
-      - name: parallel output is identical across runs
-        shell: bash
-        run: |
-          # Threads make output order a real risk. The pool must not
-          # change results, only how long they take.
-          cargo run -q -p nx-driver -- build examples/parallel.nx -o par1
-          cargo run -q -p nx-driver -- build examples/parallel.nx -o par2
-          for i in 1 2 3 4 5 6 7 8; do
-            ./par1 > "run$i.txt"
-            ./par2 >> "run$i.txt"
-          done
-          for i in 2 3 4 5 6 7 8; do
-            diff "run1.txt" "run$i.txt" || (echo "NON-DETERMINISTIC at run $i"; exit 1)
-          done
-          rm -f par1 par2 run*.txt
       - name: asan check (linux, leaks off by design)
         if: runner.os == 'Linux'
         shell: bash

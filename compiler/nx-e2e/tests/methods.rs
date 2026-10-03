@@ -453,6 +453,87 @@ print(p.scaled(1, 2))",
 // --- dispatch --------------------------------------------------------
 
 #[test]
+fn a_method_call_through_a_field_resolves() {
+    // A receiver reached through a field used to fail codegen with
+    // "only modules, types and builtins support attribute calls": the
+    // field read is dynamically typed, and dispatch only recovered bare
+    // variables. The declared field type now resolves the method table.
+    both_ways(
+        "type P:
+    x: Int
+    y: Int
+impl P:
+    fn total(self):
+        return self.x + self.y
+type Q:
+    p: P
+    tag: Int
+impl Q:
+    fn grand(self):
+        return self.p.total() + self.tag
+q = Q(P(3, 4), 10)
+print(q.p.total())
+print(q.grand())",
+        &["7", "17"],
+    );
+}
+
+#[test]
+fn a_method_call_through_nested_fields_resolves() {
+    both_ways(
+        "type P:
+    x: Int
+impl P:
+    fn doubled(self):
+        return self.x * 2
+type Q:
+    p: P
+type R:
+    q: Q
+r = R(Q(P(21)))
+print(r.q.p.doubled())",
+        &["42"],
+    );
+}
+
+#[test]
+fn mut_self_through_a_field_writes_back_into_it() {
+    // `q.p.bumped()` means `q.p = bumped(q.p)`: the write-back stores
+    // through the field, so the holder sees the new value.
+    both_ways(
+        "type P:
+    x: Int
+impl P:
+    fn bumped(mut self):
+        self.x = self.x + 1
+        return self
+type Q:
+    p: P
+q = Q(P(1))
+q.p.bumped()
+print(q)
+print(q.p)",
+        &["Q(P(2))", "P(2)"],
+    );
+}
+
+#[test]
+fn an_unknown_method_through_a_field_is_rejected_by_name() {
+    assert_rejected(
+        "type P:
+    x: Int
+impl P:
+    fn area(self):
+        return self.x * self.x
+type Q:
+    p: P
+q = Q(P(1))
+print(q.p.nope())",
+        "type 'P' has no method 'nope'",
+    );
+}
+
+#[test]
 fn methods_resolve_on_a_record_held_in_a_list() {
     // The list pins the element type, so the loop variable is a statically
     // known record and its methods resolve.

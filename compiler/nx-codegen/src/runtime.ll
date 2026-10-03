@@ -1984,9 +1984,9 @@ prep:
   %nn = extractvalue %NxVal %needle, 2
   ; An empty needle is present in any string, so `"" in s` is true.
   %empty = icmp eq i64 %nn, 0
-  br i1 %empty, label %nope, label %chkl
+  br i1 %empty, label %match, label %chkl
 chkl:
-  %fits = icmp sgt i64 %hn, %nn
+  %fits = icmp sge i64 %hn, %nn
   br i1 %fits, label %init, label %nope
 init:
   %hp = extractvalue %NxVal %hay, 1

@@ -595,7 +595,32 @@ impl Parser {
         // identifier that is itself the whole left side, so parse a
         // postfix expression and see whether a `=` follows it.
         if name_like {
-            let e = self.parse_postfix()?;
+            let first = self.parse_postfix()?;
+            // Several element or field targets against several values:
+            // `xs[0], xs[1] = 7, 8`. Bare-name lists never reach here --
+            // `try_named_assignment` decides those by lookahead above --
+            // but a mixed list (`a, xs[0] = 1, 2`) does.
+            if *self.peek_kind() == TokenKind::Comma {
+                let span = first.span();
+                let mut exprs = vec![first];
+                while *self.peek_kind() == TokenKind::Comma {
+                    self.next(); // ,
+                    self.skip_newlines();
+                    exprs.push(self.parse_postfix()?);
+                }
+                if *self.peek_kind() == TokenKind::Equals {
+                    self.next(); // =
+                    let mut targets = Vec::with_capacity(exprs.len());
+                    for e in exprs {
+                        targets.push(target_from_expr(e)?);
+                    }
+                    return self.finish_multiple_assign(targets, span);
+                }
+                // Not an assignment after all: rewind so the statement
+                // parses (and fails, if it must) as an expression.
+                self.pos = start;
+                return Ok(None);
+            }
             let compound = match self.peek_kind() {
                 TokenKind::PlusEq => Some(BinOp::Add),
                 TokenKind::MinusEq => Some(BinOp::Sub),
@@ -612,14 +637,14 @@ impl Parser {
                 _ => None,
             };
             if compound.is_some() || *self.peek_kind() == TokenKind::Equals {
-                let span = e.span();
+                let span = first.span();
                 if let Some(op) = compound {
                     self.next(); // op=
                     let value = self.parse_expr()?;
-                    return Ok(Some(Stmt::AssignOp { target: target_from_expr(e)?, op, value, span }));
+                    return Ok(Some(Stmt::AssignOp { target: target_from_expr(first)?, op, value, span }));
                 }
                 self.next(); // =
-                return self.finish_multiple_assign(vec![target_from_expr(e)?], span);
+                return self.finish_multiple_assign(vec![target_from_expr(first)?], span);
             }
         }
         self.pos = start;
@@ -1571,6 +1596,46 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Element targets pair up positionally too: `xs[0], xs[1] = 7, 8`.
+    /// Only bare-name lists are decided by lookahead; anything with a
+    /// bracket or dot parses here, one postfix target at a time.
+    #[test]
+    fn multiple_element_targets_assign() {
+        let p = parse_source("xs[0], xs[1] = 7, 8").unwrap();
+        match &p.stmts[0] {
+            Stmt::Assign { targets, values, .. } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(values.len(), 2);
+                assert!(matches!(&targets[0], Target::Index { .. }));
+                assert!(matches!(&targets[1], Target::Index { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A mixed list takes the same path: the bare-name lookahead only
+    /// fires when every target is a name.
+    #[test]
+    fn mixed_name_and_element_targets_assign() {
+        let p = parse_source("a, xs[0] = 1, 2").unwrap();
+        match &p.stmts[0] {
+            Stmt::Assign { targets, values, .. } => {
+                assert_eq!(targets.len(), 2);
+                assert_eq!(values.len(), 2);
+                assert!(matches!(&targets[0], Target::Name(_)));
+                assert!(matches!(&targets[1], Target::Index { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A trailing comma with no `=` is not an assignment: the parse
+    /// rewinds and the statement fails as an expression instead.
+    #[test]
+    fn comma_without_equals_is_not_an_assignment() {
+        assert!(parse_source("xs[0], xs[1]").is_err());
     }
 
     #[test]

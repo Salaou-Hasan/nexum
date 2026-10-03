@@ -1,5 +1,24 @@
 # ARGONE consolidated architecture report
 
+> **Status: a point-in-time investigation.** Everything below was true when it
+> was written, against a tree that still had a tree-walking interpreter. That
+> interpreter has since been deleted, so several findings below can no longer
+> be reproduced against it and some have been fixed outright. What changed:
+>
+> - the interpreter is gone; `nx` compiles ahead-of-time and that is the only
+>   execution model
+> - `parallel:` was removed rather than repaired -- it needed a static proof of
+>   race-freedom and the proof had holes
+> - all nine correctness bugs this report led to are fixed, plus the eleven
+>   divergences below
+> - strings are addressed by character, not byte
+> - integer overflow traps rather than wrapping
+>
+> The findings are kept because they are why those changes were made. Where a
+> finding is now historical this header says so; the body is otherwise as it
+> was written.
+
+
 Stage 3 synthesis of the 10-agent parallel investigation, reconciled against
 the tree by the lead architect.
 
