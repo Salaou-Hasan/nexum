@@ -116,6 +116,30 @@ pub fn run(src: &str) -> Outcome {
 /// As `run_in`, but the caller owns the scratch directory. Use this for
 /// multi-file programs: write the entry and its modules into `dir` first.
 pub fn run_in_dir(src: &str, nounbox: bool, dir: &Path) -> Outcome {
+    run_in_dir_with_input(src, nounbox, dir, None)
+}
+
+/// Compile and run, feeding `input` on stdin when present. `None` inherits
+/// stdin exactly like `run_in_dir`; `Some` (even empty) pipes it, so EOF is
+/// deterministic rather than whatever the test runner was started with.
+pub fn run_with_input(src: &str, input: &str) -> Outcome {
+    let s = Scratch::new("run-input");
+    run_in_dir_with_input(src, false, &s.dir, Some(input))
+}
+
+/// As `run_with_input`, with the representation selected.
+pub fn run_in_with_input(src: &str, nounbox: bool, input: &str) -> Outcome {
+    let s = Scratch::new(if nounbox {
+        "run-boxed-input"
+    } else {
+        "run-input"
+    });
+    run_in_dir_with_input(src, nounbox, &s.dir, Some(input))
+}
+
+/// As `run_in`, but the caller owns the scratch directory. Use this for
+/// multi-file programs: write the entry and its modules into `dir` first.
+pub fn run_in_dir_with_input(src: &str, nounbox: bool, dir: &Path, input: Option<&str>) -> Outcome {
     let _ = std::fs::create_dir_all(dir);
     let file = dir.join("main.nx");
     std::fs::write(&file, src).expect("write entry");
@@ -169,7 +193,58 @@ pub fn run_in_dir(src: &str, nounbox: bool, dir: &Path) -> Outcome {
         };
     }
 
-    match Command::new(&out).output() {
+    match input {
+        Some(text) => run_piped(&out, text),
+        None => match Command::new(&out).output() {
+        Ok(o) => {
+            let mut text = String::from_utf8_lossy(&o.stdout).to_string();
+            let err = String::from_utf8_lossy(&o.stderr).to_string();
+            if !err.trim().is_empty() {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&err);
+            }
+            Outcome {
+                code: o.status.code().unwrap_or(-1),
+                out: normalize(&text),
+            }
+        }
+        Err(e) => Outcome {
+            code: 105,
+            out: format!("cannot run built program: {e}"),
+        },
+        },
+    }
+}
+
+fn run_piped(out: &Path, input: &str) -> Outcome {
+    use std::io::Write as _;
+    use std::process::Stdio;
+    let mut child = match Command::new(out)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Outcome {
+                code: 105,
+                out: format!("cannot run built program: {e}"),
+            }
+        }
+    };
+    // Write, then close stdin so the child sees EOF after the input.
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(input.as_bytes()).is_err() {
+            return Outcome {
+                code: 105,
+                out: "cannot write to program stdin".to_string(),
+            };
+        }
+    }
+    match child.wait_with_output() {
         Ok(o) => {
             let mut text = String::from_utf8_lossy(&o.stdout).to_string();
             let err = String::from_utf8_lossy(&o.stderr).to_string();
@@ -209,6 +284,22 @@ pub fn assert_output(src: &str, expected: &[&str]) {
 #[track_caller]
 pub fn assert_one(src: &str, expected: &str) {
     assert_output(src, &[expected]);
+}
+
+/// Assert the program, fed `input` on stdin, prints exactly these lines
+/// and exits 0. Interactive programs cannot use `assert_output`: the
+/// harness stdin is whatever the test runner was started with.
+#[track_caller]
+pub fn assert_output_with_input(src: &str, input: &str, expected: &[&str]) {
+    let o = run_with_input(src, input);
+    assert_eq!(
+        o.lines(),
+        expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        "\n  program output: {:?}\n  source:\n{}",
+        o.out,
+        indent(src)
+    );
+    assert_eq!(o.code, 0, "expected exit 0, got {}", o.code);
 }
 
 /// Assert the program FAILS at compile time with a diagnostic containing

@@ -827,6 +827,25 @@ mod tests {
         assert!(b.contains("@nx_fdiv"), "float division keeps the zero check:\n{b}");
     }
 
+    /// `input()` reads through the runtime helper with and without a
+    /// prompt; the prompt flag is what tells the two apart.
+    #[test]
+    fn input_calls_the_runtime_with_and_without_a_prompt() {
+        let ir = compile_entry(
+            "a = input()\nb = input(\"who: \")\nprint(a, b)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+        let top = void_body_of(&ir, "nx__init___main__");
+        assert_eq!(
+            top.matches("@nx_input").count(),
+            2,
+            "two input() calls, two runtime calls:\n{top}"
+        );
+        assert!(top.contains("i1 false"), "bare input() passes no prompt:\n{top}");
+        assert!(top.contains("i1 true"), "input(prompt) passes one:\n{top}");
+    }
+
     /// A parameter used only in a float expression has no determined type,
     /// so it stays dynamic: nothing is widened because nothing is known.
     #[test]
@@ -4355,6 +4374,33 @@ impl Gen {
                 let r = self.reg();
                 self.w(&format!("  {r} = call %NxVal @nx_none()"));
                 Ok(NV::boxed_known(r, Ty::None))
+            }
+            "input" => {
+                // `input()` reads a line; `input(prompt)` prints the prompt
+                // first. The checker caps the arity, so anything else here
+                // is an internal error, not a user program.
+                if args.len() > 1 {
+                    return Err(err(
+                        span,
+                        format!("input() expects at most 1 argument, got {}", args.len()),
+                    ));
+                }
+                let (pv, has) = match args.first() {
+                    Some(p) => {
+                        let v = self.emit_expr(p)?;
+                        (self.unbox(&v), "true")
+                    }
+                    None => {
+                        let n = self.reg();
+                        self.w(&format!("  {n} = call %NxVal @nx_none()"));
+                        (n, "false")
+                    }
+                };
+                let r = self.reg();
+                self.w(&format!("  {r} = call %NxVal @nx_input(%NxVal {pv}, i1 {has})"));
+                // The answer is a freshly allocated buffer, so storing it
+                // needs no clone.
+                Ok(NV::fresh_boxed(r, Ty::Str))
             }
             _ => Err(err(span, format!("unknown builtin '{name}'"))),
         }

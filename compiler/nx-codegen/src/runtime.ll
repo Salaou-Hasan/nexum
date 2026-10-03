@@ -43,6 +43,8 @@ declare ptr @malloc(i64)
 declare ptr @realloc(ptr, i64)
 declare i32 @memcmp(ptr, ptr, i64)
 declare i32 @snprintf(ptr, i64, ptr, ...)
+declare i32 @fflush(ptr)
+declare i32 @getchar()
 declare double @llvm.fabs.f64(double)
 declare double @llvm.round.f64(double)
 declare double @llvm.floor.f64(double)
@@ -92,6 +94,7 @@ declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
 @.msg.fdec = private constant [7 x i8] c"%.*f%s\00"
 @.msg.sci = private constant [6 x i8] c"%.17g\00"
 @.msg.empty = private constant [1 x i8] c"\00"
+@.msg.eof = private constant [24 x i8] c"unexpected end of input\00"
 
 define void @nx_panic(ptr %msg) {
 entry:
@@ -631,6 +634,87 @@ val:
 end:
   call i32 (ptr, ...) @printf(ptr @.fmt.nl)
   ret void
+}
+
+; input([prompt]) -> Str. Prints the prompt verbatim (no newline),
+; flushes stdout so the prompt is visible before blocking, then reads
+; one line from stdin. The trailing newline is stripped, as is a
+; carriage return before it, so a CRLF pipe reads the same as a tty.
+; EOF with no characters read is a runtime error: NX has no exceptions
+; to catch it with, and an empty string would read as a value.
+; stdin comes from getchar, not from a FILE* stdin global, which MSVC
+; does not export -- one less platform branch.
+define %NxVal @nx_input(%NxVal %prompt, i1 %has) {
+entry:
+  br i1 %has, label %show, label %read
+show:
+  %pt = extractvalue %NxVal %prompt, 0
+  %isstr = icmp eq i64 %pt, 4
+  br i1 %isstr, label %emit, label %badtype
+badtype:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+emit:
+  %pp = extractvalue %NxVal %prompt, 1
+  %pl = extractvalue %NxVal %prompt, 2
+  %ps = inttoptr i64 %pp to ptr
+  %pl32 = trunc i64 %pl to i32
+  call i32 (ptr, ...) @printf(ptr @.fmt.ss, i32 %pl32, ptr %ps)
+  br label %read
+read:
+  ; fflush(NULL) flushes every output stream. The prompt has no
+  ; newline, so without this it can sit in the buffer while the read
+  ; blocks -- and in a pipe the order is load-bearing.
+  %f = call i32 @fflush(ptr null)
+  %buf0 = call ptr @malloc(i64 64)
+  br label %loop
+loop:
+  ; Grow-before-read keeps the invariant "len < cap": the store below
+  ; can never run off the end, whatever the line length.
+  %buf = phi ptr [%buf0, %read], [%buf2, %grow], [%buf, %put]
+  %len = phi i64 [0, %read], [%len, %grow], [%len2, %put]
+  %cap = phi i64 [64, %read], [%cap2, %grow], [%cap, %put]
+  %full = icmp eq i64 %len, %cap
+  br i1 %full, label %grow, label %have
+grow:
+  %cap2 = mul i64 %cap, 2
+  %buf2 = call ptr @realloc(ptr %buf, i64 %cap2)
+  br label %loop
+have:
+  %c = call i32 @getchar()
+  %eof = icmp eq i32 %c, -1
+  br i1 %eof, label %ateof, label %gotc
+gotc:
+  %nl = icmp eq i32 %c, 10
+  br i1 %nl, label %finish, label %put
+put:
+  %cb = trunc i32 %c to i8
+  %dst = getelementptr i8, ptr %buf, i64 %len
+  store i8 %cb, ptr %dst
+  %len2 = add i64 %len, 1
+  br label %loop
+ateof:
+  %empty = icmp eq i64 %len, 0
+  br i1 %empty, label %eofpanic, label %finish
+eofpanic:
+  call void @nx_panic(ptr @.msg.eof)
+  unreachable
+finish:
+  ; %len is the same value on both edges, so no phi is needed: the
+  ; loop header dominates every block that can reach here.
+  %haslast = icmp ne i64 %len, 0
+  br i1 %haslast, label %strip, label %wrap
+strip:
+  %lm1 = sub i64 %len, 1
+  %lp = getelementptr i8, ptr %buf, i64 %lm1
+  %lc = load i8, ptr %lp
+  %iscr = icmp eq i8 %lc, 13
+  %flen0 = select i1 %iscr, i64 %lm1, i64 %len
+  br label %wrap
+wrap:
+  %flen = phi i64 [%len, %finish], [%flen0, %strip]
+  %sv = call %NxVal @nx_str(ptr %buf, i64 %flen)
+  ret %NxVal %sv
 }
 
 ; --- arithmetic (mirrors the interpreter matrix) ---

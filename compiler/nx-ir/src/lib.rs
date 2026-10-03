@@ -616,14 +616,14 @@ fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
             for a in args {
                 expr(scope, a, out);
             }
-            call(scope, callee, out);
+            call(scope, callee, args, out);
         }
         _ => {}
     }
 }
 
 /// Merge a callee's summary (or conservative flags) into `out`.
-fn call(scope: &Scope, callee: &Expr, out: &mut Summary) {
+fn call(scope: &Scope, callee: &Expr, args: &[Expr], out: &mut Summary) {
     let module = scope.module;
     if let Expr::Var(name, _) = callee {
         if name == "len" {
@@ -631,6 +631,16 @@ fn call(scope: &Scope, callee: &Expr, out: &mut Summary) {
         }
         if name == "push" {
             out.heap = true;
+            return;
+        }
+        if name == "input" {
+            // Reading stdin is external state, so the answer never depends
+            // on the arguments alone; a prompt is printed when one is
+            // given. Either way the call is never memoizable.
+            out.opaque = true;
+            if !args.is_empty() {
+                out.prints = true;
+            }
             return;
         }
         if let Some((m, f)) = scope.env.aliases.get(name) {
@@ -790,6 +800,20 @@ mod tests {
     fn unknown_call_is_opaque() {
         let m = sums_of("fn f(g):\n    g(1)\n");
         assert!(m[&("__main__".to_string(), "f".to_string())].opaque);
+    }
+
+    #[test]
+    fn input_reads_external_state_and_may_print() {
+        // stdin is outside the model, so a function calling input() is
+        // never memoizable; with a prompt it also prints.
+        let m = sums_of("fn f():\n    return input()\nfn g():\n    return input(\"who: \")\n");
+        let f = &m[&("__main__".to_string(), "f".to_string())];
+        assert!(f.opaque);
+        assert!(!f.prints);
+        assert!(!memoizable(f));
+        let g = &m[&("__main__".to_string(), "g".to_string())];
+        assert!(g.opaque && g.prints);
+        assert!(!memoizable(g));
     }
 
     #[test]

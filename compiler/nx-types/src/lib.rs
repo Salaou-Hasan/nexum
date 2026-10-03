@@ -196,17 +196,20 @@ fn field_ty(
     }
 }
 
-/// Arity of an ambient builtin, if `name` is one. The method-call sugar
-/// (`xs.push(1)` for `push(xs, 1)`) consults this: an attribute name with
-/// a known arity rewrites to the builtin call, so sugar needs no separate
-/// table to drift out of sync. Free function (not a method) so the
-/// the backend crate can share the gate.
-pub fn builtin_arity(name: &str) -> Option<usize> {
+/// Arity range of an ambient builtin, if `name` is one, as
+/// (minimum, maximum). The method-call sugar (`xs.push(1)` for
+/// `push(xs, 1)`) consults this: an attribute name with a known range
+/// rewrites to the builtin call, so sugar needs no separate table to
+/// drift out of sync. Free function (not a method) so the backend crate
+/// can share the gate.
+pub fn builtin_arity(name: &str) -> Option<(usize, usize)> {
     match name {
         // The full Stage 3 set lives in `check_builtin`; this gate stays
-        // beside it so the two cannot disagree.
-        "len" => Some(1),
-        "push" => Some(2),
+        // beside it so the two cannot disagree. `input` takes an
+        // optional prompt, so it is the only builtin with a range.
+        "len" => Some((1, 1)),
+        "push" => Some((2, 2)),
+        "input" => Some((0, 1)),
         _ => None,
     }
 }
@@ -552,6 +555,25 @@ impl Checker {
                     }
                 }
                 Ty::None
+            }
+            "input" => {
+                // `input()` reads a line from stdin; `input(prompt)`
+                // prints the prompt verbatim first. The prompt must be a
+                // string, and the answer always is one.
+                if args.len() > 1 {
+                    self.err(
+                        span,
+                        format!("input() expects at most 1 argument, got {}", args.len()),
+                    );
+                    return Ty::Unknown;
+                }
+                if let Some(p) = args.first() {
+                    let pt = self.check_expr(p);
+                    if !matches!(pt, Ty::Str | Ty::Unknown) {
+                        self.err(span, format!("input() prompt must be Str, found {pt}"));
+                    }
+                }
+                Ty::Str
             }
             _ => {
                 self.err(span, format!("unknown builtin '{name}'"));
@@ -2272,6 +2294,17 @@ mod tests {
         ok("a = [1]\npush(a, 2)\nprint(len(a))\n");
         assert!(!err("print(len(1))\n").is_empty());
         assert!(!err("a = 1\npush(a, 2)\n").is_empty());
+    }
+
+    #[test]
+    fn input_checked() {
+        // No prompt and a string prompt both answer Str.
+        ok("name = input()\nprint(name)\n");
+        ok("name = input(\"who: \")\nprint(name)\n");
+        assert!(!err("x = input(1, 2)\n").is_empty());
+        assert!(!err("x = input(5)\n").is_empty());
+        let m = infer("x = input()\n");
+        assert_eq!(m[&("__main__".into(), "<top>".into())].locals["x"], Ty::Str);
     }
 
     #[test]

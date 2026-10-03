@@ -600,11 +600,12 @@ and `in` all count the same characters -- rule R3 in section 3.1.1.
 
 ### 4.3 Ambient builtins
 
-Two, and they need no import:
+Three, and they need no import:
 
 ```text
 len(x)          -- list, string or dict length  -> Int
 push(xs, v)     -- append to a list            -> None
+input(prompt?)  -- read a line from stdin      -> Str
 ```
 
 Both also have method-call sugar, resolved *after* methods so a type may
@@ -619,6 +620,16 @@ xs.len()        -- sugar for len(xs)
 temporary would drop the result, so `push([1], 2)` is a type error. The
 first `push` into an empty list pins the element type, and a later
 mismatch is an error.
+
+`input()` reads one line from stdin and answers it without the trailing
+newline. `input(prompt)` prints the prompt verbatim first -- no trailing
+newline -- and flushes, so the prompt is visible before the read blocks.
+A carriage return before the newline is stripped too, so a CRLF pipe
+reads the same as a terminal line. The prompt must be a `Str`. EOF with
+no characters read is a **runtime** error ("unexpected end of input"): NX
+has no exceptions to catch it with, and an empty string would read as a
+value. A function calling `input()` is never memoized: stdin is external
+state, so the answer never depends on the arguments alone.
 
 The minimal stdlib — string, conversion, and the fuller list and dict
 surfaces — is Stage 3 work in progress, not yet present. Do not write
@@ -671,6 +682,8 @@ Errors the checker reports, collected so the surface is legible:
 | `\u` or `\U` naming a surrogate or an out-of-range value | lex error |
 | Negative exponent on an `Int` base; zero or negative slice step | **runtime** error |
 | `Int` overflow in `+`, `-`, `*`, `//`, `%`; `//` or `%` by zero | **runtime** error (section 3.1.1, R1) |
+| `input()` at end of input | **runtime** error ("unexpected end of input") |
+| `input()` with two arguments, or a non-`Str` prompt | type error |
 
 ---
 

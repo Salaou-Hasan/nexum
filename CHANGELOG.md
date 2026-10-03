@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### `nx run` no longer reports a built executable as missing
+`nx run main.nx` (and `nx build main.nx --run`) built `main.exe` and then
+failed with `nx: cannot run main.exe: program not found` -- reproduced
+exactly. A bare exe name does not resolve through the current directory
+on Windows, so the run path now spawns by absolute path. Absolute `-o`
+paths pass through unchanged. Pinned by `exe_spawns_by_absolute_path`.
+
+### `input()`: read a line from stdin
+The third ambient builtin, alongside `len` and `push`. `input()` reads a
+line; `input(prompt)` prints the prompt verbatim (no newline, flushed)
+first. The answer is always a `Str` with the newline -- and a carriage
+return before it -- stripped. EOF with no characters is a runtime error
+("unexpected end of input"): there are no exceptions to catch it with,
+and an empty string would read as a value. A function calling `input()`
+is never memoized. Taking this is a deliberate roadmap resumption: the
+ARGONE lock stays in force for everything else, and this entry is the
+record that the exception was explicit rather than drift.
+### Test counts
+232 unit tests plus 179 native execution tests. `cargo test --workspace`
+runs everything; `tools/verify.ps1` reports 13/13.
+
 ## v0.4.0
 
 The first release since v0.3.0. The work below was labelled v0.4.0 through

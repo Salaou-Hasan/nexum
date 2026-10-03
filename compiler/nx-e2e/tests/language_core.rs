@@ -1010,3 +1010,74 @@ fn floor_division_and_modulo_do_not_widen_to_float() {
           &["9"],
       );
   }
+
+// ---------------------------------------------------------------------------
+// input(): prompt, read, echo
+// ---------------------------------------------------------------------------
+
+/// Compile and run `src` with `input` on stdin, twice -- default and
+/// NX_NOUNBOX -- requiring the expected output from both. Reading must
+/// not be a representation question any more than arithmetic is.
+#[track_caller]
+fn both_ways_with_input(src: &str, input: &str, expected: &[&str]) {
+    let want: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+    for nounbox in [false, true] {
+        let o = run_in_with_input(src, nounbox, input);
+        assert_eq!(
+            o.lines(),
+            want,
+            "\n  nounbox={nounbox} printed {:?}\n  source:\n{}",
+            o.out,
+            src
+        );
+        assert_eq!(o.code, 0, "nounbox={nounbox} exited {}", o.code);
+    }
+}
+
+#[test]
+fn input_reads_a_line_with_and_without_a_prompt() {
+    // The prompt prints verbatim with no newline, so it shares its line
+    // with the echo; the newline and the answer are separate concerns.
+    both_ways_with_input(
+        "name = input(\"what is your name: \")\nprint(name)\nage = input()\nprint(age)\n",
+        "Ada\n30\n",
+        &["what is your name: Ada", "30"],
+    );
+}
+
+#[test]
+fn input_empty_line_is_empty_not_eof() {
+    // A bare newline reads as "", which is a value. EOF with no
+    // characters is the error, tested below.
+    both_ways_with_input("a = input()\nprint(a)\nprint(\"after\")\n", "\n", &["", "after"]);
+}
+
+#[test]
+fn input_long_line_grows_the_buffer() {
+    // Past the 64-byte initial buffer, so the realloc path runs.
+    let line: String = "y".repeat(200);
+    let src = "a = input()\nprint(len(a))\nprint(a)\n";
+    both_ways_with_input(src, &(line.clone() + "\n"), &["200", &line]);
+}
+
+#[test]
+fn input_strips_a_carriage_return() {
+    // A CRLF pipe reads the same as a tty line.
+    both_ways_with_input("a = input()\nprint(a)\n", "hi\r\n", &["hi"]);
+}
+
+#[test]
+fn input_at_eof_is_a_runtime_error() {
+    // NX has no exceptions to catch EOF with, so it is loud instead:
+    // exit 1 naming the problem. Piped empty stdin, never the runner's
+    // own stdin -- inheriting that could block the suite on a tty.
+    let o = run_with_input("a = input()\nprint(a)\n", "");
+    assert_ne!(o.code, 0, "expected a failure, got {:?}", o.out);
+    assert!(o.out.contains("unexpected end of input"), "got {:?}", o.out);
+}
+
+#[test]
+fn input_arity_and_prompt_type_are_checked() {
+    assert_rejected("x = input(1, 2)\n", "input() expects at most 1 argument");
+    assert_rejected("x = input(5)\n", "input() prompt must be Str");
+}

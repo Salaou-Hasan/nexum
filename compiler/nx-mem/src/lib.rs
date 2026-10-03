@@ -442,7 +442,11 @@ fn expr_roots(e: &Expr, out: &mut HashSet<Root>) {
     match e {
         Expr::Call { callee, args, .. } => {
             let c = match callee.as_ref() {
-                Expr::Var(n, _) if n == "len" || n == "push" || n == "print" => None,
+                // `len`, `push`, `print` and `input` retain nothing they
+                // are given: `len` and `input` only read, `push` hands its
+                // first argument to the list (handled just below), and
+                // `print` only renders.
+                Expr::Var(n, _) if n == "len" || n == "push" || n == "print" || n == "input" => None,
                 Expr::Var(n, _) => Some(Callee::Same(n.clone())),
                 Expr::Attr { base, attr, .. } => match base.as_ref() {
                     Expr::Var(m, _) => Some(Callee::Attr(m.clone(), attr.clone())),
@@ -717,5 +721,15 @@ mod tests {
     fn var_in_slice_bounds_and_ifexpr_branches_escapes() {
         let p = plan_src("fn f(n):\n    a = [1, 2, 3]\n    b = a[n:2] if n else a\n    return b\n");
         assert_eq!(p.alloc_of("__main__", "f", "a"), Alloc::Shared);
+    }
+
+    #[test]
+    fn prompt_var_is_not_retained_by_input() {
+        // `input` reads the prompt's bytes and keeps nothing. As a bare
+        // statement the call can only escape through `expr_roots`, which
+        // excludes it -- so a local prompt stays a Unique temporary
+        // rather than escaping to Shared.
+        let p = plan_src("fn f():\n    p = \"who: \"\n    input(p)\n    print(\"done\")\n");
+        assert_eq!(p.alloc_of("__main__", "f", "p"), Alloc::Unique);
     }
 }

@@ -231,18 +231,7 @@ fn build_cmd(rest: &[String]) -> ExitCode {
         return c;
     }
     if run {
-        match std::process::Command::new(&out).status() {
-            Ok(s) => {
-                return match s.code() {
-                    Some(c) => ExitCode::from(c as u8),
-                    None => ExitCode::FAILURE,
-                };
-            }
-            Err(e) => {
-                eprintln!("nx: cannot run {out}: {e}");
-                return ExitCode::from(1);
-            }
-        }
+        return run_exe(&out);
     }
     ExitCode::SUCCESS
 }
@@ -398,7 +387,17 @@ fn run_native(path: &str, out_override: Option<&str>) -> ExitCode {
     } else if let Err(c) = build_exe(path, &out) {
         return c;
     }
-    match std::process::Command::new(&out).status() {
+    run_exe(&out)
+}
+
+/// Run a built executable. The path is resolved against the current
+/// directory first: a bare `main.exe` does not resolve through it on
+/// Windows, so `nx run main.nx` in the program's own directory built the
+/// file and then reported "program not found" for it. The message still
+/// names the path as given, not the resolved one.
+fn run_exe(out: &str) -> ExitCode {
+    let abs = resolve_exe(out);
+    match std::process::Command::new(&abs).status() {
         Ok(s) => match s.code() {
             Some(c) => ExitCode::from(c as u8),
             None => ExitCode::FAILURE,
@@ -407,6 +406,20 @@ fn run_native(path: &str, out_override: Option<&str>) -> ExitCode {
             eprintln!("nx: cannot run {out}: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// Absolute path of a built executable for spawning. A bare `main.exe`
+/// does not resolve through the current directory on Windows, so this
+/// joins it explicitly; absolute `-o` paths pass through unchanged.
+fn resolve_exe(out: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(out);
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(p),
+        Err(_) => p.to_path_buf(),
     }
 }
 
@@ -1093,5 +1106,17 @@ mod tests {
         assert!(c3);
         assert!(t3.contains("\"*.nx\": \"../../icons/nx\""));
         assert!(!t3.contains("python"));
+    }
+
+    #[test]
+    fn exe_spawns_by_absolute_path() {
+        // A bare `main.exe` does not resolve through the current
+        // directory on Windows, so the run path joins it explicitly.
+        let rel = super::resolve_exe("main.exe");
+        assert!(rel.is_absolute());
+        assert_eq!(rel.file_name().unwrap(), "main.exe");
+        // Absolute `-o` paths pass through unchanged.
+        let abs = if cfg!(windows) { "C:\\out\\main.exe" } else { "/tmp/out/main" };
+        assert_eq!(super::resolve_exe(abs), std::path::PathBuf::from(abs));
     }
 }
