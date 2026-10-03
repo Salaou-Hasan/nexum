@@ -266,9 +266,37 @@ this survived. Covered now for the range form, the descending form, list
 iteration and string iteration, plus innermost-loop targeting and shadow
 restore on the `continue` path.
 
+### `xs[1:3] = 9` is rejected instead of silently doing nothing
+
+    xs = [1, 2, 3, 4, 5]
+    xs[1:3] = 9
+    print(xs)      # printed [1, 2, 3, 4, 5], as though it had worked
+
+`target_from_expr` had a catch-all that produced `Target::Name("")` for
+anything that was not a name, element or field, so a slice target became an
+assignment to a variable with an empty name. Its own comment claimed the case
+was "unreachable through the grammar", which is what made it safe to leave
+alone: a slice *is* an `Expr`, and the parser reaches this function having just
+seen `=`.
+
+`target_from_expr` now returns a `Result` and names the offending shape:
+
+    cannot assign to a slice; a target is a name, an element, or a field
+    cannot assign to a call; a target is a name, an element, or a field
+
+This is a rejection rather than an implementation. `docs/grammar.md` 2.5 says
+"A target is a name, an element, or a field", and Python and Rust reject slice
+assignment too. Slice assignment would be a language addition with real
+semantics -- length changes, element-type unification -- and it belongs in the
+spec before it belongs in the backend.
+
+Still not supported, and now visible rather than silent: `xs[0], xs[1] = 7, 8`.
+The grammar has `target_list ::= target ("," target)*` but the parser only
+accepts a single target before the comma.
+
 ### Test counts
 
-210 unit tests plus 159 native execution tests. `cargo test --workspace` runs
+210 unit tests plus 162 native execution tests. `cargo test --workspace` runs
 everything; `tools/verify.ps1` reports 13/13.
 
 ### Still broken, not fixed here

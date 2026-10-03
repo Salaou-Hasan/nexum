@@ -966,3 +966,47 @@ fn floor_division_and_modulo_do_not_widen_to_float() {
       assert_one("print(2.0 ** -1)", "0.5");
       assert_one("print(2.0 ** 10)", "1024");
   }
+  // ---------------------------------------------------------------------------
+  // 14. A target is a name, an element, or a field
+  // ---------------------------------------------------------------------------
+  //
+  // `xs[1:3] = 9` used to be accepted and did nothing. The parser turned any
+  // expression that was not a name, element or field into `Target::Name("")`,
+  // so it assigned to a variable with an empty name: no diagnostic, no effect,
+  // and a program that read as though it had worked. A slice is a value rather
+  // than a place, so there is nothing to store into and the honest answer is a
+  // rejection -- which is what Python and Rust do too.
+
+  #[test]
+  fn a_slice_is_not_an_assignment_target() {
+      assert_rejected(
+          "xs = [1, 2, 3, 4, 5]\nxs[1:3] = 9\n",
+          "cannot assign to a slice",
+      );
+      assert_rejected("xs = [1, 2, 3]\nxs[::2] = 0\n", "cannot assign to a slice");
+      assert_rejected("xs = [1, 2, 3]\nxs[1:3] += 1\n", "cannot assign to a slice");
+  }
+
+  #[test]
+  fn other_non_targets_are_rejected_by_name() {
+      assert_rejected("fn f():\n    return 1\nf() = 2\n", "cannot assign to a call");
+      assert_rejected("1 = 2\n", "expected expression");
+      assert_rejected("[1, 2] = 3\n", "expected expression");
+  }
+
+  #[test]
+  fn every_real_target_shape_still_assigns() {
+      assert_one("x = 1\nx = 2\nprint(x)", "2");
+      assert_one("xs = [1, 2, 3]\nxs[1] = 9\nprint(xs)", "[1, 9, 3]");
+      assert_one("xs = [[1, 2], [3, 4]]\nxs[0][1] = 9\nprint(xs)", "[[1, 9], [3, 4]]");
+      assert_one("xs = [1, 2, 3]\nxs[0] += 5\nprint(xs)", "[6, 2, 3]");
+      assert_one("d = {\"a\": 1}\nd[\"a\"] = 9\nprint(d[\"a\"])", "9");
+      assert_output(
+          "type P:\n    x: Int\n\np = P(1)\np.x = 9\nprint(p.x)",
+          &["9"],
+      );
+      assert_output(
+          "type P:\n    x: Int\n\nps = [P(1)]\nps[0].x = 9\nprint(ps[0].x)",
+          &["9"],
+      );
+  }

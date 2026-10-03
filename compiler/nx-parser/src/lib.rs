@@ -3,22 +3,56 @@ use nx_lexer::{Token, TokenKind};
 
 /// Reinterpret a parsed expression as an assignment target.
 ///
-/// Only the shapes that can actually be written are accepted: a name, an
-/// index chain, or a field access. Anything else -- a call, a literal, a
-/// nested attribute like `a.b.c` beyond one level of `Attr` on a `Var` --
-/// is rejected here so the error names the offending source rather than
-/// surfacing as a confusing "cannot assign" much later.
-fn target_from_expr(e: Expr) -> Target {
+/// docs/grammar.md 2.5: "A target is a name, an element, or a field."
+/// Only those three shapes can be written, and anything else is rejected here
+/// so the diagnostic names the offending source instead of surfacing much
+/// later as a confusing "cannot assign".
+///
+/// The previous version's comment said exactly that and then did the opposite:
+/// its catch-all produced `Target::Name(String::new())`, so `xs[1:3] = 9`
+/// assigned to a variable with an empty name. No diagnostic, no effect, and a
+/// program that read as though it worked. A slice is a value rather than a
+/// place, so there is nothing to store into.
+fn target_from_expr(e: Expr) -> Result<Target, ParseError> {
+    let span = e.span();
     match e {
-        Expr::Var(name, _) => Target::Name(name),
-        Expr::Index { base, index, .. } => Target::Index { base, index },
-        Expr::Attr { base, attr, .. } => Target::Attr { base, field: attr },
-        // Unreachable through the grammar, which only reaches here after
-        // seeing `=` or `op=`; treated as a name so nothing panics.
-        other => Target::Name(match other {
-            Expr::Var(n, _) => n,
-            _ => String::new(),
+        Expr::Var(name, _) => Ok(Target::Name(name)),
+        Expr::Index { base, index, .. } => Ok(Target::Index { base, index }),
+        Expr::Attr { base, attr, .. } => Ok(Target::Attr { base, field: attr }),
+        Expr::Slice { .. } => Err(ParseError {
+            message: "cannot assign to a slice; a target is a name, an element, or a field"
+                .to_string(),
+            line: span.line,
+            col: span.col,
         }),
+        other => Err(ParseError {
+            message: format!(
+                "cannot assign to {}; a target is a name, an element, or a field",
+                describe_expr(&other)
+            ),
+            line: span.line,
+            col: span.col,
+        }),
+    }
+}
+
+/// A short human name for an expression, for diagnostics only.
+fn describe_expr(e: &Expr) -> &'static str {
+    match e {
+        Expr::Int(..) => "an integer",
+        Expr::Float(..) => "a float",
+        Expr::Bool(..) => "a bool",
+        Expr::Str(..) => "a string",
+        Expr::NoneLit(..) => "none",
+        Expr::List(..) => "a list",
+        Expr::Dict(..) => "a dict",
+        Expr::Range { .. } => "a range",
+        Expr::Call { .. } => "a call",
+        Expr::Comprehension { .. } => "a comprehension",
+        Expr::IfExpr { .. } => "a conditional",
+        Expr::Unary { .. } => "a unary expression",
+        Expr::Binary { .. } => "a binary expression",
+        _ => "this expression",
     }
 }
 
@@ -293,7 +327,7 @@ impl Parser {
     /// index/attr chain", which is what makes `a[i][j] = v` work.
     fn parse_target(&mut self) -> Result<Target, ParseError> {
         let e = self.parse_postfix()?;
-        Ok(target_from_expr(e))
+        target_from_expr(e)
     }
 
     /// `type Point:` then an indented block of `x: Float` lines. Indent
@@ -582,10 +616,10 @@ impl Parser {
                 if let Some(op) = compound {
                     self.next(); // op=
                     let value = self.parse_expr()?;
-                    return Ok(Some(Stmt::AssignOp { target: target_from_expr(e), op, value, span }));
+                    return Ok(Some(Stmt::AssignOp { target: target_from_expr(e)?, op, value, span }));
                 }
                 self.next(); // =
-                return self.finish_multiple_assign(vec![target_from_expr(e)], span);
+                return self.finish_multiple_assign(vec![target_from_expr(e)?], span);
             }
         }
         self.pos = start;
