@@ -224,6 +224,92 @@ out1:
   ret i1 true
 }
 
+; --- UTF-8 character boundaries ------------------------------------------
+;
+; Strings are stored as UTF-8 and addressed by CHARACTER, not by byte
+; (docs/grammar.md R3). A character starts wherever a byte is not a
+; continuation byte -- 10xxxxxx -- so its width is decided by the lead byte
+; and nothing here has to decode a code point to find a boundary.
+;
+; The cost is that len() is O(n) and s[i] is O(i), where a byte-addressed
+; string would be both O(1). Caching a character count next to the byte length
+; is the fix, and it wants a string header the way a list already has one.
+;
+; ASCII takes the fast path through all three: every byte is its own
+; character, so a count, an offset and a width are all identity.
+
+; Byte offset of the start of character `ci`, or `n` when the string has
+; fewer than ci+1 characters.
+define i64 @nx_utf8_offset(ptr %s, i64 %n, i64 %ci) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%i1, %adv]
+  %k = phi i64 [0, %entry], [%k1, %adv]
+  ; %i is the start of character %k throughout, so the test for "have we
+  ; arrived" runs before any of that character's continuation bytes are
+  ; touched. Stepping by the lead byte's width rather than by one is what
+  ; keeps the answer on a character boundary.
+  %done = icmp sge i64 %k, %ci
+  br i1 %done, label %out, label %step
+step:
+  ; A string with fewer than ci+1 characters answers %n, so every caller
+  ; that clamps against the character count lands on the end.
+  %past = icmp sge i64 %i, %n
+  br i1 %past, label %out, label %adv
+adv:
+  %w = call i64 @nx_utf8_charlen(ptr %s, i64 %i, i64 %n)
+  %i1 = add i64 %i, %w
+  %k1 = add i64 %k, 1
+  br label %loop
+out:
+  ret i64 %i
+}
+
+; Byte width of the character starting at offset `i`, clamped to what is
+; left of the buffer so a truncated tail cannot read past it.
+define i64 @nx_utf8_charlen(ptr %s, i64 %i, i64 %n) {
+entry:
+  %p = getelementptr i8, ptr %s, i64 %i
+  %b = load i8, ptr %p
+  %z = zext i8 %b to i64
+  %hi = and i64 %z, 240
+  ; 110xxxxx is 2, 1110xxxx is 3, 11110xxx is 4, anything else is 1
+  %is2 = icmp eq i64 %hi, 192
+  %two = select i1 %is2, i64 2, i64 1
+  %is4 = icmp eq i64 %hi, 240
+  %w3 = select i1 %is4, i64 4, i64 %two
+  %is3 = icmp eq i64 %hi, 224
+  %w = select i1 %is3, i64 3, i64 %w3
+  %avail = sub i64 %n, %i
+  %over = icmp sgt i64 %w, %avail
+  %r = select i1 %over, i64 %avail, i64 %w
+  ret i64 %r
+}
+
+; Number of characters: one for every byte that is not a continuation byte.
+define i64 @nx_utf8_count(ptr %s, i64 %n) {
+entry:
+  br label %loop
+loop:
+  %i = phi i64 [0, %entry], [%i1, %body]
+  %c = phi i64 [0, %entry], [%c1, %body]
+  %done = icmp sge i64 %i, %n
+  br i1 %done, label %out, label %body
+body:
+  %p = getelementptr i8, ptr %s, i64 %i
+  %b = load i8, ptr %p
+  %z = zext i8 %b to i64
+  %m = and i64 %z, 192
+  %cont = icmp eq i64 %m, 128
+  %inc = select i1 %cont, i64 0, i64 1
+  %c1 = add i64 %c, %inc
+  %i1 = add i64 %i, 1
+  br label %loop
+out:
+  ret i64 %c
+}
+
 ; --- value constructors ---
 define %NxVal @nx_int(i64 %v) {
 entry:
@@ -1064,8 +1150,13 @@ c:
   %isstr = icmp eq i64 %t, 4
   br i1 %isstr, label %str, label %c2
 str:
+  ; R3: a string is addressed by character, so len() counts characters.
+  ; %n2 is the byte length it happens to be stored with.
+  %sp0 = extractvalue %NxVal %v, 1
+  %spt0 = inttoptr i64 %sp0 to ptr
   %n2 = extractvalue %NxVal %v, 2
-  %r2 = call %NxVal @nx_int(i64 %n2)
+  %cn = call i64 @nx_utf8_count(ptr %spt0, i64 %n2)
+  %r2 = call %NxVal @nx_int(i64 %cn)
   ret %NxVal %r2
 c2:
   %isdict = icmp eq i64 %t, 7
@@ -1118,25 +1209,30 @@ c:
   %isstr = icmp eq i64 %it, 4
   br i1 %isstr, label %str, label %bad
 str:
+  ; R3: the index counts characters. Bounds are checked against the
+  ; character count rather than the byte length, then converted to a byte
+  ; offset, and the character is copied out whole instead of one byte.
+  %sp = extractvalue %NxVal %b, 1
+  %spp = inttoptr i64 %sp to ptr
   %n2 = extractvalue %NxVal %b, 2
+  %cn = call i64 @nx_utf8_count(ptr %spp, i64 %n2)
   %neg2 = icmp slt i64 %i, 0
-  %adj2 = add i64 %i, %n2
+  %adj2 = add i64 %i, %cn
   %pos2 = select i1 %neg2, i64 %adj2, i64 %i
   %ob1 = icmp slt i64 %pos2, 0
-  %ob2 = icmp sge i64 %pos2, %n2
+  %ob2 = icmp sge i64 %pos2, %cn
   %ob = or i1 %ob1, %ob2
   br i1 %ob, label %badidxs, label %ok2
 ok2:
-  %sp = extractvalue %NxVal %b, 1
-  %spp = inttoptr i64 %sp to ptr
-  %cp = getelementptr i8, ptr %spp, i64 %pos2
-  %buf = call ptr @malloc(i64 1)
-  %ch = load i8, ptr %cp
-  store i8 %ch, ptr %buf
-  %v = call %NxVal @nx_str(ptr %buf, i64 1)
+  %off = call i64 @nx_utf8_offset(ptr %spp, i64 %n2, i64 %pos2)
+  %clen = call i64 @nx_utf8_charlen(ptr %spp, i64 %off, i64 %n2)
+  %cp = getelementptr i8, ptr %spp, i64 %off
+  %buf = call ptr @malloc(i64 %clen)
+  call void @nx_memcpy(ptr %buf, ptr %cp, i64 %clen)
+  %v = call %NxVal @nx_str(ptr %buf, i64 %clen)
   ret %NxVal %v
 badidxs:
-  call void @nx_panic_idx(i64 %i, i64 %n2)
+  call void @nx_panic_idx(i64 %i, i64 %cn)
   unreachable
 bad:
   call void @nx_panic(ptr @.msg.type)
@@ -2353,32 +2449,35 @@ strpath:
   %iss = icmp eq i64 %t, 4
   br i1 %iss, label %str, label %bad
 str:
+  ; R3: bounds are CHARACTER indices. They are clamped against the
+  ; character count rather than the byte length, then converted to byte
+  ; offsets, and the scan copies whole characters.
   %n2 = extractvalue %NxVal %b, 2
   %sp = extractvalue %NxVal %b, 1
   %s = inttoptr i64 %sp to ptr
+  %cn2 = call i64 @nx_utf8_count(ptr %s, i64 %n2)
   %fneg2 = icmp slt i64 %from, 0
-  %fadj2 = add i64 %from, %n2
+  %fadj2 = add i64 %from, %cn2
   %f02 = select i1 %fneg2, i64 %fadj2, i64 %from
-  %fhi2 = icmp sgt i64 %f02, %n2
-  %f12 = select i1 %fhi2, i64 %n2, i64 %f02
+  %fhi2 = icmp sgt i64 %f02, %cn2
+  %f12 = select i1 %fhi2, i64 %cn2, i64 %f02
   %flow2 = icmp slt i64 %f12, 0
   %f22 = select i1 %flow2, i64 0, i64 %f12
   %tneg2 = icmp slt i64 %to, 0
-  %tadj2 = add i64 %to, %n2
+  %tadj2 = add i64 %to, %cn2
   %t02 = select i1 %tneg2, i64 %tadj2, i64 %to
-  %thi2 = icmp sgt i64 %t02, %n2
-  %t12 = select i1 %thi2, i64 %n2, i64 %t02
+  %thi2 = icmp sgt i64 %t02, %cn2
+  %t12 = select i1 %thi2, i64 %cn2, i64 %t02
   %tlow2 = icmp slt i64 %t12, 0
   %t22 = select i1 %tlow2, i64 0, i64 %t12
-  %cap2 = sub i64 %t22, %f22
-  ; The element count is ceil(cap/step). floor(cap/step) agrees with it when
-  ; cap divides evenly and is one short otherwise: over 6 bytes with step 2
-  ; both give 3, but over 5 bytes the answer is 3 and floor says 2. That
-  ; shortfall was a heap buffer overflow.
-  %sp1 = add i64 %cap2, %step
-  %sp2 = sub i64 %sp1, 1
-  %cnt2 = sdiv i64 %sp2, %step
-  %buf = call ptr @malloc(i64 %cnt2)
+  ; The buffer is sized in BYTES. The span from the first character to the
+  ; last bounds it, because the characters actually copied are a subset of
+  ; that span -- always enough, never short. The old code sized it in
+  ; characters, which is up to 4x too small for anything non-ASCII.
+  %offf = call i64 @nx_utf8_offset(ptr %s, i64 %n2, i64 %f22)
+  %offt = call i64 @nx_utf8_offset(ptr %s, i64 %n2, i64 %t22)
+  %spanb = sub i64 %offt, %offf
+  %buf = call ptr @malloc(i64 %spanb)
   br label %sscan
 sscan:
   %si = phi i64 [%f22, %str], [%si2, %sbody]
@@ -2386,20 +2485,22 @@ sscan:
   %sdone = icmp sge i64 %si, %t22
   br i1 %sdone, label %sout, label %sbody
 sbody:
-  %srcp = getelementptr i8, ptr %s, i64 %si
-  %c = load i8, ptr %srcp
-  ; The output offset advances by ONE per element. Mirroring the source
-  ; offset (si - f22) advanced it by step instead, so a step of 2 wrote at
-  ; 0, 2, 4... leaving every odd byte uninitialised and running off the end
-  ; of a buffer sized for the packed result. That is why slicing a list
-  ; worked (it reserves then grows) and slicing a string did not.
+  ; Step by whole characters: the byte offset comes from the character index
+  ; and the width from the lead byte, so a slice can never cut a multi-byte
+  ; character in half. The output offset advances by the bytes written, which
+  ; is what the old per-byte loop got wrong in the other direction.
+  %off2 = call i64 @nx_utf8_offset(ptr %s, i64 %n2, i64 %si)
+  %cl = call i64 @nx_utf8_charlen(ptr %s, i64 %off2, i64 %n2)
+  %srcp = getelementptr i8, ptr %s, i64 %off2
   %dstp = getelementptr i8, ptr %buf, i64 %so
-  store i8 %c, ptr %dstp
+  call void @nx_memcpy(ptr %dstp, ptr %srcp, i64 %cl)
   %si2 = add i64 %si, %step
-  %so2 = add i64 %so, 1
+  %so2 = add i64 %so, %cl
   br label %sscan
 sout:
-  %sv = call %NxVal @nx_str(ptr %buf, i64 %cnt2)
+  ; The length is the bytes actually written, not a character count.
+  %blen = phi i64 [%so, %sscan]
+  %sv = call %NxVal @nx_str(ptr %buf, i64 %blen)
   ret %NxVal %sv
 bad:
   call void @nx_panic(ptr @.msg.type)

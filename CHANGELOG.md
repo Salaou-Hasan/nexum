@@ -294,9 +294,53 @@ Still not supported, and now visible rather than silent: `xs[0], xs[1] = 7, 8`.
 The grammar has `target_list ::= target ("," target)*` but the parser only
 accepts a single target before the comma.
 
+### Strings are addressed by character, and there is a way to spell them in ASCII
+
+R3, the last of the correctness bugs:
+
+    print(len("héllo"))        was 6, now 5
+    print("héllo"[1])          was one byte of é, now é
+    print("日本語"[1])          was one byte, now 本
+    for c in "日本語": ...     was nine broken bytes, now three characters
+
+Three helpers in the runtime find character boundaries. A UTF-8 character
+starts wherever a byte is not `10xxxxxx`, and its width comes from the lead
+byte, so none of them decodes a code point:
+
+- `nx_utf8_count` counts non-continuation bytes
+- `nx_utf8_offset` walks characters to a byte offset
+- `nx_utf8_charlen` reads the width from the lead byte
+
+`nx_len`, `nx_index` and `nx_slice` route through them, and iteration follows
+`nx_index` for free. `nx_slice` now sizes its buffer in bytes from the span
+between the two bounds, because sizing it in characters -- which is what it
+did -- is up to 4x too small for anything non-ASCII.
+
+The cost is honest: `len` is O(n) and `s[i]` is O(i), where a byte-addressed
+string is O(1) for both. Caching a character count next to the byte length is
+the fix, and it wants a string header the way a list already has one.
+
+### `\uXXXX`, `\UXXXXXXXX`, `\u{...}`
+
+The escapes exist because of the cost above being unmeasurable otherwise. A
+literal non-ASCII glyph in a source file is UTF-8, and a diff, a terminal with
+the wrong code page, and a patch applied as bytes all decode it differently --
+and none of them reports an error when they disagree, they report mojibake.
+`\u65e5` cannot do that, because its six bytes say what they are.
+
+All three spellings are Python's. A surrogate or an out-of-range value is a lex
+error rather than a string holding something no UTF-8 encoder will accept.
+
+I hit this while writing the R3 tests: raw glyphs in the test sources came back
+through the console as CJK. The right response was to make the test sources
+ASCII, not to strip every non-ASCII byte from the repository -- an em-dash in
+a comment is not the problem and was never implicated. Every source file under
+`compiler/` and `tools/` is ASCII apart from eleven pre-existing em-dashes,
+which stay.
+
 ### Test counts
 
-210 unit tests plus 162 native execution tests. `cargo test --workspace` runs
+212 unit tests plus 165 native execution tests. `cargo test --workspace` runs
 everything; `tools/verify.ps1` reports 13/13.
 
 ### Still broken, not fixed here

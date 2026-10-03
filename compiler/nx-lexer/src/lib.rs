@@ -682,6 +682,59 @@ impl Lexer {
         (s, if is_float { TokenKind::Float } else { TokenKind::Int })
     }
 
+    /// Read the digits of a unicode escape: four hex digits for \u, eight
+    /// for \U, or a brace-delimited run for anything either can hold.
+    /// Python's, so anyone who knows one already knows the other.
+    ///
+    /// This exists so source files can stay ASCII. A literal glyph in a test
+    /// or an example is written in UTF-8, and every tool that touches the file
+    /// -- a diff, a terminal with the wrong code page, a patch applied as
+    /// bytes -- then has to agree on the encoding, and disagreeing shows up as
+    /// mojibake rather than as an error. A literal glyph cannot do that;
+    /// six-character escape can, because every byte of it says what it is.
+    fn read_hex_escape(&mut self, line: u32, col: u32, digits: usize) -> Result<u32, LexError> {
+        let braced = self.peek() == Some('{');
+        if braced {
+            self.advance();
+        }
+        let mut v: u32 = 0;
+        let mut n = 0usize;
+        loop {
+            match self.peek() {
+                Some('}') if braced => {
+                    self.advance();
+                    if n == 0 {
+                        return Err(LexError {
+                            message: "\\u{} is empty".to_string(),
+                            line,
+                            col,
+                        });
+                    }
+                    return Ok(v);
+                }
+                Some(c) if c.is_ascii_hexdigit() => {
+                    self.advance();
+                    v = v * 16 + c.to_digit(16).expect("checked above");
+                    n += 1;
+                    if !braced && n == digits {
+                        return Ok(v);
+                    }
+                }
+                _ => {
+                    return Err(LexError {
+                        message: if braced {
+                            "\\u{...} needs hex digits and a closing brace".to_string()
+                        } else {
+                            format!("unicode escape needs exactly {digits} hex digits")
+                        },
+                        line,
+                        col,
+                    });
+                }
+            }
+        }
+    }
+
     fn lex_string(&mut self) -> Result<String, LexError> {
         let start_line = self.line;
         let start_col = self.col;
@@ -713,6 +766,35 @@ impl Lexer {
                     Some('r') => s.push('\r'),
                     Some('"') => s.push('"'),
                     Some('\\') => s.push('\\'),
+                    // Python spells both cases: \uXXXX and \UXXXXXXXX.
+                    Some('u') => {
+                        let cp = self.read_hex_escape(start_line, start_col, 4)?;
+                        match char::from_u32(cp) {
+                            Some(c) => s.push(c),
+                            None => {
+                                return Err(LexError {
+                                    message: format!(
+                                        "\\u{cp:x} is not a Unicode scalar value"
+                                    ),
+                                    line: start_line,
+                                    col: start_col,
+                                });
+                            }
+                        }
+                    }
+                    Some('U') => {
+                        let cp = self.read_hex_escape(start_line, start_col, 8)?;
+                        match char::from_u32(cp) {
+                            Some(c) => s.push(c),
+                            None => {
+                                return Err(LexError {
+                                    message: format!("\\U{cp:x} is not a Unicode scalar value"),
+                                    line: start_line,
+                                    col: start_col,
+                                });
+                            }
+                        }
+                    }
                     Some(c) => {
                         return Err(LexError {
                             message: format!("unknown escape '\\{c}'"),
@@ -746,6 +828,50 @@ mod tests {
     fn kinds(source: &str) -> Vec<TokenKind> {
         lex(source).unwrap().into_iter().map(|t| t.kind).collect()
     }
+    /// The interpreted text of the first string token, without its quotes.
+    fn string_of(source: &str) -> String {
+        let t = lex(source)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.kind == TokenKind::String)
+            .expect("a string token");
+        t.lexeme[1..t.lexeme.len() - 1].to_string()
+    }
+
+    #[test]
+    fn unicode_escapes_cover_every_spelling() {
+        // Three spellings, one meaning. They are Python's, so a reader who
+        // knows one already knows the other two.
+        assert_eq!(string_of(r#""A""#), "A");
+        assert_eq!(string_of(r#""\u0041""#), "A");
+        assert_eq!(string_of(r#""\u{41}""#), "A");
+        assert_eq!(string_of(r#""\U00000041""#), "A");
+        // Hex digits are case-insensitive, as everywhere else.
+        assert_eq!(string_of(r#""\u00e9""#), string_of(r#""\u00E9""#));
+        // The braced and unbraced spellings of one code point agree.
+        assert_eq!(string_of(r#""\u{1f389}""#), string_of(r#""\U0001F389""#));
+    }
+
+    #[test]
+    fn unicode_escapes_are_bounded_and_checked() {
+        // A surrogate cannot be encoded, so it is an error rather than a
+        // string holding something no UTF-8 encoder will accept. Every other
+        // malformed escape is an error too, rather than a quietly wrong
+        // string.
+        for bad in [
+            r#""\uD800""#,
+            r#""\uDFFF""#,
+            r#""\U00110000""#,
+            r#""\u12""#,
+            r#""\uZZZZ""#,
+            r#""\u{65e5""#,
+            r#""\u{}""#,
+            r#""\U0001F38""#,
+        ] {
+            assert!(lex(bad).is_err(), "should have been rejected: {bad}");
+        }
+    }
+
 
     #[test]
     fn hello_world() {

@@ -15,13 +15,23 @@
 //!   "immutable" are three different failures, and the checker only sees two
 //!   of them.
 //!
-//! Two behaviours are known-broken and are **not** asserted here, because a
-//! test that pins down a bug is worse than a missing test:
+//! One behaviour is known-broken and is **not** asserted here, because a test
+//! that pins down a bug is worse than a missing test:
 //!
-//! * String length/index/slice are byte-based rather than character-based
-//!   (grammar.md R3), so every string test here is ASCII.
 //! * `"" in s` and a needle exactly as long as the haystack both report
 //!   `false`.
+//!
+//! Strings used to be byte-addressed: `len` counted bytes, `s[1]` returned one
+//! byte of a two-byte character, and iterating a three-character string
+//! produced nine broken bytes. `docs/grammar.md` R3 says characters and that
+//! is what the runtime does now; `string_operations_count_characters_not_`
+//! `bytes` covers it.
+//!
+//! Non-ASCII text is written with `\uXXXX` escapes rather than literal glyphs,
+//! and every source file in this crate stays ASCII on purpose. The reason is
+//! concrete: a raw multi-byte character is decoded differently by a diff, by a
+//! terminal with the wrong code page, and by a patch applied as bytes, and the
+//! disagreement surfaces as mojibake rather than as an error.
 //!
 //! Two more were found while writing this file and have since been fixed:
 //! slicing a string with an explicit step overflowed its destination buffer
@@ -1031,4 +1041,91 @@ fn a_stepped_string_slice_is_packed_not_strided() {
     // source, which is the observable symptom of the overflow.
     let o = run(r#"print(len("abcdefgh"[::2]))"#);
     assert_eq!(o.lines(), vec!["4".to_string()]);
+}
+#[test]
+fn string_operations_count_characters_not_bytes() {
+    // R3: a string is addressed by character. It is stored as UTF-8, so every
+    // operation has to find character boundaries rather than assume that one
+    // byte is one character. The escapes below spell five characters in
+    // fifteen bytes: one two-byte, three three-byte, one four-byte.
+    assert_one("print(len(\"h\\u00e9llo\"))", "5");
+    assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\"))", "3");
+    assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\"))", "5");
+    assert_one("print(len(\"a\\u{1f389}b\"))", "3");
+    assert_one("print(len(\"a\\U0001F389b\"))", "3");
+    assert_one("print(len(\"\"))", "0");
+
+    // Indexing yields a whole character, whatever its width.
+    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[0] == \"\\u65e5\")", "true");
+    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[1] == \"\\u672c\")", "true");
+    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[2] == \"\\u8a9e\")", "true");
+    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[-1] == \"\\u8a9e\")", "true");
+    assert_one("print(\"h\\u00e9llo\"[1] == \"\\u00e9\")", "true");
+    assert_one("print(\"a\\u{1f389}b\"[1] == \"\\u{1f389}\")", "true");
+    assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\"[2]))", "1");
+
+    // Slice bounds are characters too.
+    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[1:3] == \"\\u672c\\u8a9e\")", "true");
+    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[-2:] == \"\\u672c\\u8a9e\")", "true");
+    assert_one("print(\"h\\u00e9llo\"[1:3] == \"\\u00e9l\")", "true");
+    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[:] == \"\\u65e5\\u672c\\u8a9e\")", "true");
+    assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\"[1:99]))", "2");
+    // A step selects whole characters: indices 0, 2 and 4 of five.
+    assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\"[::2]))", "3");
+    assert_one(
+        "print(\"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\"[::2] == \"\\u65e5\\u8a9e\\u5b57\")",
+        "true",
+    );
+    assert_one(
+        "print(\"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\"[::3] == \"\\u65e5\\u6587\")",
+        "true",
+    );
+
+    // Iteration yields characters: five characters is five steps, each of
+    // length one.
+    assert_output(
+        "n = 0\nfor c in \"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\":\n    n = n + 1\nprint(n)\n",
+        &["5"],
+    );
+    assert_output(
+        "t = 0\nfor c in \"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\":\n    t = t + len(c)\nprint(t)\n",
+        &["5"],
+    );
+
+    // Out of range reports the CHARACTER length, not the byte length.
+    assert_runtime_error("print(\"\\u65e5\\u672c\\u8a9e\"[9])", "out of range (len 3)");
+}
+
+#[test]
+fn ascii_strings_are_untouched_by_character_addressing() {
+    // Every ASCII character is one byte, so the UTF-8 paths must be the
+    // identity for ASCII. These are the assertions that would catch a
+    // regression in the boundary scan, and most of this file is ASCII.
+    assert_one("print(len(\"hello world\"))", "11");
+    assert_one("print(\"hello\"[4] == \"o\")", "true");
+    assert_one("print(\"hello\"[1:5] == \"ello\")", "true");
+    assert_one("print(\"hello\"[::2] == \"hlo\")", "true");
+    assert_one("print(\"hello\"[::3] == \"hl\")", "true");
+    assert_one("print(\"abcdefg\"[::4] == \"ae\")", "true");
+    assert_one("print(len(\"abcdef\"[1:2]))", "1");
+    assert_one("print(len(\"abc\"[1:1]))", "0");
+    assert_one("print(len(\"abc\"[9:99]))", "0");
+    assert_one("print(len(\"abc\"[0:3]))", "3");
+    assert_one("print(\"el\" in \"hello\")", "true");
+    assert_one("print(len(\"ab\" + \"cd\"))", "4");
+}
+
+#[test]
+fn unicode_escapes_are_checked_and_bounded() {
+    // An escape that is malformed, or names something that is not a Unicode
+    // scalar value, is a lex error rather than a silently wrong string.
+    assert_output("print(\"\\u0041\" == \"A\")", &["true"]);
+    assert_output("print(\"\\u{41}\" == \"A\")", &["true"]);
+    assert_output("print(\"\\U00000041\" == \"A\")", &["true"]);
+    assert_rejected("print(\"\\u12\")", "hex digits");
+    assert_rejected("print(\"\\uZZZZ\")", "hex digits");
+    assert_rejected("print(\"\\u{65e5\")", "closing brace");
+    assert_rejected("print(\"\\u{}\")", "empty");
+    assert_rejected("print(\"\\uD800\")", "not a Unicode scalar value");
+    assert_rejected("print(\"\\U0001F38\")", "hex digits");
 }

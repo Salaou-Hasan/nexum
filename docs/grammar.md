@@ -107,12 +107,27 @@ char    ::= any character except '"' and '\'
          | escape
 
 escape ::= "\n" | "\t" | "\r" | "\"" | "\\"
+          | "\u" hex{4}
+          | "\U" hex{8}
+          | "\u{" hex{1,6} "}"
 ```
 
-Only those five escapes exist. Any other backslash sequence is a lex
-error. There are no raw strings, no triple-quoted strings, no string
-interpolation, and no multi-line string literals — a string ends at the
-first unescaped `"` on its line.
+A `\u` escape names a Unicode code point and produces that character, so a
+string literal can spell any character in the language. All three spellings
+are the ones Python uses. A code point that is not a Unicode scalar value --
+a surrogate, `\uD800` through `\uDFFF` -- is a lex error rather than a string
+holding something no UTF-8 encoder will accept, and so is a malformed escape.
+
+They exist so that source files can be pure ASCII. A literal non-ASCII glyph
+in a program is stored as UTF-8, and every tool that touches the file has to
+agree on that: a diff, a terminal with the wrong code page, and a patch
+applied as bytes all decode it differently, and none of them reports an error
+when they disagree -- they report mojibake. `\u65e5` cannot do that, because
+its six bytes say exactly what they are.
+
+There are no raw strings, no triple-quoted strings, no string interpolation,
+and no multi-line string literals - a string ends at the first unescaped `"`
+on its line.
 
 ### 1.6 Comments
 
@@ -632,6 +647,9 @@ Errors the checker reports, collected so the surface is legible:
 | Empty block, inconsistent indentation, tab indentation | parse error |
 | Duplicate field, duplicate method, duplicate field name in a method | parse error |
 | String escape other than `\n \t \r \" \\` | lex error |
+| `\u` with fewer than 4 hex digits, or a non-hex digit | lex error |
+| `\u{` with no closing brace, or an empty `\u{}` | lex error |
+| `\u` or `\U` naming a surrogate or an out-of-range value | lex error |
 | Negative exponent on an `Int` base; zero or negative slice step | **runtime** error |
 | `Int` overflow in `+`, `-`, `*`, `//`, `%`; `//` or `%` by zero | **runtime** error (section 3.1.1, R1) |
 
