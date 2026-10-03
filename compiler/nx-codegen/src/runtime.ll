@@ -1625,13 +1625,44 @@ entry:
 
 define i64 @nx_ipow(i64 %base, i64 %e) {
 entry:
-  ; Repeated multiplication by the base, not repeated squaring: the
-  ; exponent is already known to be at most 62 by the caller, so the
-  ; simple loop is both correct and fast enough.
-  br label %loop
+  ; R2: an integer power either fits or saturates; it never wraps. The
+  ; boxed path in nx_pow has always enforced that, but the UNBOXED path --
+  ; which is the default, since NX_NOUNBOX is normally unset -- called this
+  ; function directly and inherited none of it. So 2 ** -1 returned 1 and
+  ; 2 ** 100 returned 0.
+  %neg = icmp slt i64 %e, 0
+  br i1 %neg, label %negexp, label %chkbig
+chkbig:
+  %big = icmp sgt i64 %e, 62
+  br i1 %big, label %sat, label %loop
+sat:
+  ; 0, 1 and -1 do not saturate: their powers are always exact.
+  %iszero = icmp eq i64 %base, 0
+  br i1 %iszero, label %zres, label %chkunit
+zres:
+  ret i64 0
+chkunit:
+  %mone = icmp eq i64 %base, -1
+  br i1 %mone, label %negpar, label %chkone
+negpar:
+  %par = and i64 %e, 1
+  %peven = icmp eq i64 %par, 0
+  %sg = select i1 %peven, i64 1, i64 -1
+  ret i64 %sg
+chkone:
+  %one = icmp eq i64 %base, 1
+  br i1 %one, label %ores, label %satsign
+ores:
+  ret i64 1
+satsign:
+  %aneg = icmp slt i64 %base, 0
+  %satv = select i1 %aneg, i64 -9223372036854775808, i64 9223372036854775807
+  ret i64 %satv
 loop:
-  %i = phi i64 [0, %entry], [%i2, %body]
-  %acc = phi i64 [1, %entry], [%acc2, %body]
+  ; Repeated multiplication, not repeated squaring. The exponent is now
+  ; known to be at most 62, so the simple loop is correct and fast enough.
+  %i = phi i64 [0, %chkbig], [%i2, %body]
+  %acc = phi i64 [1, %chkbig], [%acc2, %body]
   %done = icmp sge i64 %i, %e
   br i1 %done, label %exit, label %body
 body:
@@ -1641,6 +1672,9 @@ body:
   br label %loop
 exit:
   ret i64 %acc
+negexp:
+  call void @nx_panic(ptr @.msg.negexp)
+  unreachable
 }
 
 define %NxVal @nx_mod(%NxVal %l, %NxVal %r) {
