@@ -23,7 +23,7 @@ nx setup --apply  # writes it (keeps a .bak backup)
 
 ### A. Copy into extensions (simplest)
 1. Close VS Code.
-2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.0`
+2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.1`
    (result: `%USERPROFILE%\.vscode\extensions\nexum-0.0.1\package.json`).
 3. Reopen VS Code on `C:\nexum`. Open any `.nx` file — bottom-right should say **Nexum**.
 
@@ -40,4 +40,4 @@ nx setup --apply  # writes it (keeps a .bak backup)
 - Spaces, tabSize 4 (tabs still rejected by the `nx` lexer)
 
 ## Uninstall / update
-Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.0` and repeat A.
+Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.1` and repeat A.

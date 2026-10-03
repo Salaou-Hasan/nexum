@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.1
 
 ### `nx run` no longer reports a built executable as missing
 `nx run main.nx` (and `nx build main.nx --run`) built `main.exe` and then
