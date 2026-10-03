@@ -732,9 +732,20 @@ ok2:
 define i64 @nx_div_i64(i64 %l, i64 %r) {
 entry:
   %z = icmp eq i64 %r, 0
-  br i1 %z, label %dz, label %ok
+  br i1 %z, label %dz, label %chk2
 dz:
   call void @nx_panic(ptr @.msg.divzero)
+  unreachable
+chk2:
+  ; sdiv i64 INT64_MIN, -1 is POISON in LLVM, not a wrapped value: the
+  ; quotient simply does not fit in i64. Left unchecked this is undefined
+  ; behaviour, so it traps like every other arithmetic overflow.
+  %ismin = icmp eq i64 %l, -9223372036854775808
+  %isneg1 = icmp eq i64 %r, -1
+  %bad = and i1 %ismin, %isneg1
+  br i1 %bad, label %ovf, label %ok
+ovf:
+  call void @nx_panic(ptr @.msg.overflow)
   unreachable
 ok:
   %s = sdiv i64 %l, %r
@@ -1534,9 +1545,19 @@ out:
 define i64 @nx_floordiv_i64(i64 %l, i64 %r) {
 entry:
   %z = icmp eq i64 %r, 0
-  br i1 %z, label %dz, label %go
+  br i1 %z, label %dz, label %chk2
 dz:
   call void @nx_panic(ptr @.msg.divzero)
+  unreachable
+chk2:
+  ; sdiv/srem of INT64_MIN by -1 is POISON in LLVM: the quotient does not
+  ; fit in i64. Unchecked, this is undefined behaviour.
+  %ismin = icmp eq i64 %l, -9223372036854775808
+  %isneg1 = icmp eq i64 %r, -1
+  %bad = and i1 %ismin, %isneg1
+  br i1 %bad, label %ovf, label %go
+ovf:
+  call void @nx_panic(ptr @.msg.overflow)
   unreachable
 go:
   %q = sdiv i64 %l, %r
@@ -1560,9 +1581,19 @@ done:
 define i64 @nx_mod_i64(i64 %l, i64 %r) {
 entry:
   %z = icmp eq i64 %r, 0
-  br i1 %z, label %mz, label %go
+  br i1 %z, label %mz, label %chk2
 mz:
   call void @nx_panic(ptr @.msg.modzero)
+  unreachable
+chk2:
+  ; sdiv/srem of INT64_MIN by -1 is POISON in LLVM: the quotient does not
+  ; fit in i64. Unchecked, this is undefined behaviour.
+  %ismin = icmp eq i64 %l, -9223372036854775808
+  %isneg1 = icmp eq i64 %r, -1
+  %bad = and i1 %ismin, %isneg1
+  br i1 %bad, label %ovf, label %go
+ovf:
+  call void @nx_panic(ptr @.msg.overflow)
   unreachable
 go:
   %rem = srem i64 %l, %r
@@ -2339,7 +2370,7 @@ sbody:
   ; offset (si - f22) advanced it by step instead, so a step of 2 wrote at
   ; 0, 2, 4... leaving every odd byte uninitialised and running off the end
   ; of a buffer sized for the packed result. That is why slicing a list
-  ; worked (it allocates then pushes) and slicing a string did not.
+  ; worked (it reserves then grows) and slicing a string did not.
   %dstp = getelementptr i8, ptr %buf, i64 %so
   store i8 %c, ptr %dstp
   %si2 = add i64 %si, %step
