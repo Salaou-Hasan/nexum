@@ -241,9 +241,34 @@ Also verified: the `1e14 -> 1` float-printing bug in my notes does not
 reproduce. `print(1e14)` is `100000000000000`, and `1e-4 .. 1e15` all print in
 the documented fixed notation with `%.17g` taking over outside it.
 
+### `continue` in a `for` loop no longer hangs
+
+    t = 0
+    for i in 0..5:
+        if i == 2:
+            continue
+        t = t + i
+    print(t)      # hung forever; now 8
+
+`continue` branched to the loop's *condition*, which is right for `while` and
+wrong for `for`: a `for` owns its induction variable, so re-testing the
+condition re-tests the same index and the loop never advances. It never
+advanced at all, so it did not terminate.
+
+Both `for` arms now branch to a latch that runs the increment and then goes
+back to the condition, and the normal fall-through goes through the same latch
+so there is one increment site rather than two.
+
+`continue_skips_the_rest_of_the_body_in_a_while_loop` incremented by hand
+*before* its `continue`, which is what the rule requires in a `while` loop --
+and it meant the suite had no `for`-loop `continue` test at all, which is how
+this survived. Covered now for the range form, the descending form, list
+iteration and string iteration, plus innermost-loop targeting and shadow
+restore on the `continue` path.
+
 ### Test counts
 
-210 unit tests plus 155 native execution tests. `cargo test --workspace` runs
+210 unit tests plus 159 native execution tests. `cargo test --workspace` runs
 everything; `tools/verify.ps1` reports 13/13.
 
 ### Still broken, not fixed here

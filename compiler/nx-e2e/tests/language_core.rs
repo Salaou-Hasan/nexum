@@ -412,6 +412,114 @@ print("after")
 }
 
 #[test]
+fn continue_in_a_for_loop_advances_the_induction_variable() {
+    // A `for` loop owns its increment, so `continue` has to run it. Jumping
+    // straight back to the condition re-tests the same index and loops
+    // forever -- which is exactly what it used to do.
+    assert_output(
+        r#"
+t = 0
+for i in 0..5:
+    if i == 2:
+        continue
+    t = t + i
+print(t)
+"#,
+        &["8"],
+    );
+    // Every other one, so a latch that skipped the increment would show up.
+    assert_output(
+        r#"
+seen = []
+for i in 0..6:
+    if i % 2 == 0:
+        continue
+    push(seen, i)
+print(seen)
+"#,
+        &["[1, 3, 5]"],
+    );
+    // The descending form, where the step is -1.
+    assert_output(
+        r#"
+seen = []
+for i in 5..0:
+    if i == 3:
+        continue
+    push(seen, i)
+print(seen)
+"#,
+        &["[5, 4, 2, 1]"],
+    );
+    // Iterating a list rather than a range.
+    assert_output(
+        r#"
+seen = []
+for x in [10, 20, 30, 40]:
+    if x == 20:
+        continue
+    push(seen, x)
+print(seen)
+"#,
+        &["[10, 30, 40]"],
+    );
+    // A string iterates characters.
+    assert_output(
+        r#"
+seen = []
+for c in "abc":
+    if c == "b":
+        continue
+    push(seen, c)
+print(seen)
+"#,
+        &["[a, c]"],
+    );
+}
+
+#[test]
+fn continue_targets_the_innermost_loop() {
+    assert_output(
+        r#"
+for i in 0..2:
+    for j in 0..3:
+        if j == 1:
+            continue
+        print(i, ":", j)
+print("--")
+"#,
+        &["0 : 0", "0 : 2", "1 : 0", "1 : 2", "--"],
+    );
+    // And `continue` on the outer loop still only advances the outer one.
+    assert_output(
+        r#"
+for i in 0..3:
+    if i == 1:
+        continue
+    print(i)
+"#,
+        &["0", "2"],
+    );
+}
+
+#[test]
+fn continue_restores_a_shadowed_loop_variable() {
+    // The loop variable's scope ends with the loop on every exit path,
+    // including the one `continue` takes.
+    assert_output(
+        r#"
+i = 99
+for i in 0..3:
+    if i == 1:
+        continue
+    print(i)
+print(i)
+"#,
+        &["0", "2", "99"],
+    );
+}
+
+#[test]
 fn ternary_evaluates_only_the_branch_it_picks() {
     // The untaken branch is never evaluated, so the `1 / 0` below is not a
     // division by zero.

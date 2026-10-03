@@ -3166,6 +3166,10 @@ impl Gen {
                 let condl = self.lab("fcond");
                 let bodyl = self.lab("fbody");
                 let endl = self.lab("fend");
+                // `continue` has to advance the induction variable, so it lands
+                // here rather than on the condition. Jumping straight back to
+                // the condition re-tests the same index and never terminates.
+                let latchl = self.lab("flatch");
                 self.w(&format!("  br label %{condl}"));
                 self.w(&format!("{condl}:"));
                 let cur = self.reg();
@@ -3181,7 +3185,7 @@ impl Gen {
                 // The induction variable is statically Int.
                 let iv = NV::raw(Ty::Int, cur.clone());
                 let scope = self.bind_loop_var(var, &iv);
-                self.loops.push((condl.clone(), endl.clone()));
+                self.loops.push((latchl.clone(), endl.clone()));
                 self.term = None;
                 for st in body {
                     self.emit_stmt(st)?;
@@ -3205,6 +3209,8 @@ impl Gen {
                         self.term = None;
                     }
                     None => {
+                        self.w(&format!("  br label %{latchl}"));
+                        self.w(&format!("{latchl}:"));
                         let cur3 = self.reg();
                         let nxt = self.reg();
                         self.w(&format!("  {cur3} = load i64, ptr {slot}"));
@@ -3231,6 +3237,8 @@ impl Gen {
                 let condl = self.lab("econd");
                 let bodyl = self.lab("ebody");
                 let endl = self.lab("eend");
+                // See the range arm: `continue` must go through the increment.
+                let latchl = self.lab("elatch");
                 self.w(&format!("  br label %{condl}"));
                 self.w(&format!("{condl}:"));
                 let i = self.reg();
@@ -3274,7 +3282,7 @@ impl Gen {
                     let ev = self.as_raw(&boxed_elem).unwrap_or(boxed_elem);
                     self.bind_loop_var(var, &ev)
                 };
-                self.loops.push((condl.clone(), endl.clone()));
+                self.loops.push((latchl.clone(), endl.clone()));
                 self.term = None;
                 for st in body {
                     self.emit_stmt(st)?;
@@ -3298,6 +3306,8 @@ impl Gen {
                         self.term = None;
                     }
                     None => {
+                        self.w(&format!("  br label %{latchl}"));
+                        self.w(&format!("{latchl}:"));
                         let i2 = self.reg();
                         let i3 = self.reg();
                         self.w(&format!("  {i2} = load i64, ptr {islot}"));
