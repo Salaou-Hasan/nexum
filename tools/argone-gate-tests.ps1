@@ -12,7 +12,10 @@ $root = Split-Path -Parent $PSScriptRoot
 $gate = Join-Path $PSScriptRoot 'argone-gate.ps1'
 # Join-Path, never a literal separator -- see argone-gate.ps1 for why.
 $status = Join-Path (Join-Path $root 'docs') 'ARGONE-STATUS.md'
-$backup = Join-Path $env:TEMP 'argone-status-backup.md'
+# [IO.Path]::GetTempPath, not $env:TEMP: TEMP is a Windows-only
+# variable, so Join-Path on it throws on Linux and the whole step dies.
+# GetTempPath returns %TEMP% on Windows and /tmp/ everywhere else.
+$backup = Join-Path ([IO.Path]::GetTempPath()) 'argone-status-backup.md'
 
 Copy-Item $status $backup -Force
 
