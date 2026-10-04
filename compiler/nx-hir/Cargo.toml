@@ -1,18 +1,15 @@
 [package]
-name = "nx-driver"
+name = "nx-hir"
 version = "0.4.1"
 edition = "2021"
 license = "MIT"
-
-[[bin]]
-name = "nx"
-path = "src/main.rs"
 
 [dependencies]
 nx-lexer = { path = "../nx-lexer" }
 nx-ast = { path = "../nx-ast" }
 nx-parser = { path = "../nx-parser" }
 nx-types = { path = "../nx-types" }
-nx-ir = { path = "../nx-ir" }
-nx-hir = { path = "../nx-hir" }
-nx-codegen = { path = "../nx-codegen" }
+
+[lib]
+name = "nx_hir"
+path = "src/lib.rs"

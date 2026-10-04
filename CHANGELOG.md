@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### ARGONE D: HIR lowering, verifier, dump-hir (4 of 5 boxes)
+New crate `nx-hir`: a name-free, fully typed HIR lowered from the
+checked AST plus checker tables. Bindings are slots (params first,
+then first-bind order; `self` is slot 0); declared entities are IDs
+in sorted-name order. Every expression carries `ty: HTy` (mandatory,
+so untyped nodes are unrepresentable) and every operator node carries
+its decided rule -- integer arithmetic records `ArithRule::Trap`,
+power records `PowRule::Saturate`, string concat, membership, index,
+slice, iteration, copy and delete rules likewise. Rules come from
+calling the checker's `arith_result`, never a second matrix.
+`String` survives only as `Str` literals, the interned runtime-name
+table, and the inert `diag` sidecar (verified by grep plus the
+verifier's strip test: erasing every diagnostic name changes no
+verdict). Lowering verifies its own output (phase 4); a lowering bug
+fails at the producing span, and `nx dump-hir` prints the verified
+HIR as line S-expressions with a snapshot test on
+`examples/control.nx`.
+Tests: 48 in `nx-hir` (28 lowering decisions incl. trapping integer
+arithmetic, mixed-float promotion, eager from-import snapshots,
+`mut self` write-back only where the receiver has storage; 16
+verifier rules with one rejecting case each; corpus-wide lowering of
+all 42 shipped programs; dump-twice-identical plus snapshot). Full
+workspace suite green, `tools/verify.ps1` 14/14, gate self-tests
+10/10 (including a CRLF-tolerance fix to two Evidence regexes in
+`tools/argone-gate-tests.ps1`, matching the `\r?\n` handling the
+neighboring tests already had).
+Open half of the fifth box: overflow lives in HIR and lowering is
+proven to record it, but the proof that the *backend* honors the rule
+without re-deriving it needs task G, since the backend still consumes
+the AST.
+
 ### ARGONE D: HIR design recorded
 `docs/architecture/hir.md` specifies the high-level IR before any code
 exists: slots and ID tables, the per-node decided-rule table (integer

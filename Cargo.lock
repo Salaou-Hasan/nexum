@@ -27,6 +27,7 @@ version = "0.4.1"
 dependencies = [
  "nx-ast",
  "nx-codegen",
+ "nx-hir",
  "nx-ir",
  "nx-lexer",
  "nx-parser",
@@ -39,6 +40,16 @@ version = "0.4.1"
 dependencies = [
  "nx-ast",
  "nx-codegen",
+ "nx-lexer",
+ "nx-parser",
+ "nx-types",
+]
+
+[[package]]
+name = "nx-hir"
+version = "0.4.1"
+dependencies = [
+ "nx-ast",
  "nx-lexer",
  "nx-parser",
  "nx-types",

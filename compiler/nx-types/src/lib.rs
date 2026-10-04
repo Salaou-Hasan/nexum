@@ -1890,7 +1890,11 @@ impl Checker {
     }
 }
 
-fn arith_result(l: &Ty, op: BinOp, r: &Ty) -> Option<Ty> {
+/// Operator result matrix, now public so HIR lowering consults the
+/// single owner instead of copying Int/Float promotion. The *rule* a
+/// node records (trap vs saturate vs float) is still decided beside the
+/// rule (R1/R2 in the grammar); this answers only "what type results".
+pub fn arith_result(l: &Ty, op: BinOp, r: &Ty) -> Option<Ty> {
     use Ty::*;
     // Operator result matrix. This is the single owner of Int/Float promotion.
     if matches!(op, BinOp::Add) {

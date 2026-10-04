@@ -75,12 +75,12 @@ Status: complete
 
 Status: not started
 
-- [ ] All 13 examples lower; nx dump-hir stable enough to diff in tests
-- [ ] Name-free: no source identifier survives outside diagnostics
-- [ ] Every node typed; a test proves none is untyped
-- [ ] Verifier rejects malformed HIR, one negative test per rule
+- [x] All 13 examples lower; nx dump-hir stable enough to diff in tests
+- [x] Name-free: no source identifier survives outside diagnostics
+- [x] Every node typed; a test proves none is untyped
+- [x] Verifier rejects malformed HIR, one negative test per rule
 - [ ] At least integer overflow now lives in HIR, proven by a test that fails if the backend recomputes it
-      Evidence:
+      Evidence: new crate compiler/nx-hir (model/lower/verify/dump): slots params-first then first-bind order with self as slot 0, IDs in sorted-name order, ty: HTy mandatory on every expression, decided rules on every operator node (Trap/Saturate/Concat/Member/Index/Slice/Iter/Copy/Del) derived by calling nx-types::arith_result; String only in Str literals, HProgram::strings, DiagInfo (grep plus strip test); lowering verifies its own output before returning; nx dump-hir in nx-driver with snapshot compiler/nx-hir/tests/snapshots/control.hir.txt. Tests: 48 in nx-hir (28 lowering, 16 verifier negatives V1-V12, corpus-wide lower of all 42 shipped programs, dump-twice-identical plus snapshot); workspace suite green, verify.ps1 14/14, gate self-tests 10/10. Fifth box half open: lowering records Trap (proven), but the backend-honors proof needs task G since the backend still consumes the AST.
 
 ## E - MIR / SSA
 

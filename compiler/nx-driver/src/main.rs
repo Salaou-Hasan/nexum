@@ -1,7 +1,8 @@
 use std::process::ExitCode;
 
 fn usage() -> String {
-    "usage: nx <file.nx>              (build to native and run it)\n       nx run <file.nx> [-o <out>]    (build if needed, run native)\n       nx build <file.nx> [-o <out>] [--run] [--emit-ir]\n       nx check <file.nx>             (type check only, no output file)\n       nx dump-ir <file.nx>           (print the LLVM IR)\n       nx --lex <file.nx> | --parse <file.nx>\n       nx --version | --license\n       nx setup [--apply] | nx update [--version <ver>]\n\nCompilation is ahead-of-time: every program becomes a native executable.\nWith no -o, the executable is written next to its .nx source file.".to_string()
+    "usage: nx <file.nx>              (build to native and run it)\n       nx run <file.nx> [-o <out>]    (build if needed, run native)\n       nx build <file.nx> [-o <out>] [--run] [--emit-ir]\n       nx check <file.nx>             (type check only, no output file)\n       nx dump-ir <file.nx>           (print the LLVM IR)
+       nx dump-hir <file.nx>          (print the lowered HIR)\n       nx --lex <file.nx> | --parse <file.nx>\n       nx --version | --license\n       nx setup [--apply] | nx update [--version <ver>]\n\nCompilation is ahead-of-time: every program becomes a native executable.\nWith no -o, the executable is written next to its .nx source file.".to_string()
 }
 
 const UPDATE_REPO: &str = "Salaou-Hasan/nexum";
@@ -67,6 +68,9 @@ fn main() -> ExitCode {
     }
     if args.len() == 3 && args[1] == "dump-ir" {
         return dump_ir_file(&args[2]);
+    }
+    if args.len() == 3 && args[1] == "dump-hir" {
+        return dump_hir_file(&args[2]);
     }
     if args.len() >= 3 && args[1] == "build" {
         return build_cmd(&args[2..]);
@@ -172,6 +176,39 @@ fn dump_ir_file(path: &str) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Err(e) => {
+            eprintln!("nx: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn dump_hir_file(path: &str) -> ExitCode {
+    let source = match read_source(path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let base = std::path::Path::new(path)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(".".into());
+    // Lowering verifies its own output (hir.md §7), so reaching the
+    // dump means the program is structurally sound. `verify` runs again
+    // here so this command's contract holds on its own, whatever the
+    // lowering path does.
+    match nx_hir::lower::lower_source(&source, &base) {
+        Ok(hir) => match nx_hir::verify::verify(&hir) {
+            Ok(()) => {
+                print!("{}", nx_hir::dump::dump(&hir));
+                ExitCode::SUCCESS
+            }
+            Err(violations) => {
+                for v in &violations {
+                    eprintln!("nx: {v}");
+                }
+                ExitCode::from(1)
+            }
+        },
         Err(e) => {
             eprintln!("nx: {e}");
             ExitCode::from(1)

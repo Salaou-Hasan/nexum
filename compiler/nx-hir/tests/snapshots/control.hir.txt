@@ -1,0 +1,11 @@
+(module __main__ (entry)
+  (fn add (param $0 : Int) (param $1 : Int) -> Int)
+    (return ((slot $0 : Int) Add (slot $1 : Int) Arith(Trap) : Int)) @5:5
+  )
+  (fn <top> -> None)
+    (for-range $0 (int 0 : Int)..((int 5 : Int) Add (int 1 : Int) Arith(Trap) : Int) (1 stmts)) @1:1
+      (print (slot $0 : Int)) @2:7
+    (print (call f0 (int 20 : Int) (int 22 : Int) : Int)) @7:1
+    (print ((bool true : Bool) And (bool true : Bool) : Bool) (Not (bool false : Bool) Not : Bool)) @8:1
+  )
+)
