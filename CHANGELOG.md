@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### ARGONE D: HIR design recorded
+`docs/architecture/hir.md` specifies the high-level IR before any code
+exists: slots and ID tables, the per-node decided-rule table (integer
+overflow lives in HIR as `ArithRule::Trap`), twelve verifier rules with
+accept/reject sketches, the dump-hir stability contract, lowering
+phases, the backend may/must-not contract, and empty extension points
+for ownership, closures and `dyn`. Design only, no crate yet -- the
+build turn implements it against this document.
+
 ### ARGONE Task 0: the remaining divergences are closed
 - i64::MIN is spellable: a unary minus in front of exactly 2^63 folds
   to MIN in every radix spelling (`-9223372036854775808`,

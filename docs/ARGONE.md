@@ -161,6 +161,10 @@ carries its resolved type and the *semantic rule it decided* — operator
 matrix, string element kind, equality relation, copy discipline — so the
 backend never re-derives them.
 
+Design: `docs/architecture/hir.md` (node catalog, decided-rule table,
+verifier rules V1–V12, dump-hir stability contract, lowering phases,
+backend contract, extension points).
+
 Scoped to constructs the language has today. Ownership, closures and `dyn`
 get extension points, not speculative structures.
 
