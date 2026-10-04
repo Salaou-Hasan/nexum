@@ -150,10 +150,10 @@ Strings are shared and never mutated in place, and they are addressed by
 character rather than by byte:
 
 ```nexum
-s = "COP"
+s = "日本語"
 print(len(s))      # 3 characters, not 9 bytes
-print(s[1])        # O
-print(s[::2])      # CP
+print(s[1])        # 本
+print(s[::2])      # 日語
 ```
 
 Write non-ASCII text with escapes so the source stays ASCII -- a raw
