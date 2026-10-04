@@ -108,7 +108,7 @@ try {
     $oneDone = $oneDone -replace '(?m)^- \[ \] bench/baseline.json committed', '- [x] bench/baseline.json committed'
     $oneDone = $oneDone -replace '(?m)^- \[ \] clang-vs-Nexum codegen split', '- [x] clang-vs-Nexum codegen split'
     $oneDone = $oneDone -replace '(?m)^- \[ \] Noise characterised', '- [x] Noise characterised'
-    $oneDone = $oneDone -replace '(?m)^[ ]*Evidence:[ ]*$', '      Evidence: commit def5678'
+    $oneDone = $oneDone -replace '(?m)^[ ]*Evidence:[ ]*\r?$', '      Evidence: commit def5678'
     Set-Status $oneDone
     Expect "one task done does not open the gate" $true "tasks complete: $($baseDone + 1) / 15"
 
@@ -126,7 +126,7 @@ try {
     #    unreachable and the whole mechanism is theatre.
     $allDone = $original -replace '(?m)^Status: not started', 'Status: complete'
     $allDone = $allDone -replace '(?m)^([ ]*)- \[ \]', '$1- [x]'
-    $allDone = $allDone -replace '(?m)^[ ]*Evidence:[ ]*$', '      Evidence: commit abc1234'
+    $allDone = $allDone -replace '(?m)^[ ]*Evidence:[ ]*\r?$', '      Evidence: commit abc1234'
     Set-Status $allDone
     Expect "a fully complete stage opens the gate" $false "ARGONE COMPLETE"
 }
