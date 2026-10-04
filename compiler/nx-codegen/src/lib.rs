@@ -157,36 +157,17 @@ fn collect_module_globals(s: &Stmt, out: &mut Vec<String>) {
             push(alias.as_ref().unwrap_or(m));
         }
 
-        Stmt::If { then_body, elifs, else_body, .. } => {
-            for t in then_body {
-                collect_module_globals(t, out);
-            }
-            for (_, b) in elifs {
+        // Control flow nests the same way everywhere: a loop's own
+        // variable is a slot in the enclosing function, but assignments
+        // in its body still bind module names. Function bodies are
+        // separate scopes and contribute nothing (child_bodies skips them).
+        _ => {
+            for b in nx_ast::shape::child_bodies(s) {
                 for t in b {
                     collect_module_globals(t, out);
                 }
             }
-            if let Some(b) = else_body {
-                for t in b {
-                    collect_module_globals(t, out);
-                }
-            }
         }
-        Stmt::While { body, .. } => {
-            for t in body {
-                collect_module_globals(t, out);
-            }
-        }
-        // A loop's own variable is a slot in the enclosing function, but
-        // assignments in its body still bind module names.
-        Stmt::For { body, .. } => {
-            for t in body {
-                collect_module_globals(t, out);
-            }
-        }
-        // A function or impl body is a separate scope; nothing in it is a
-        // module global.
-        _ => {}
     }
 }
 
@@ -1099,7 +1080,7 @@ pub fn compile_opts(
     let mut types: HashMap<(String, String), nx_types::FnInfo> = HashMap::new();
     for module in &order {
         if let Some(prog) = loader.programs.get(module) {
-            match nx_types::infer_program(prog, &module_dir(&loader.base, module)) {
+            match nx_types::infer_program_for(prog, &module_dir(&loader.base, module), module) {
                 Ok(m) => {
                     for (k, v) in m {
                         types.insert(k, v);
@@ -1259,16 +1240,12 @@ pub fn dependencies(
     Ok(out)
 }
 
-fn collect_imports(prog: &Program, out: &mut Vec<String>) {    for s in &prog.stmts {
-        let m = match s {
-            Stmt::Import { module, .. } => Some(module),
-            Stmt::FromImport { module, .. } => Some(module),
-            _ => None,
-        };
-        if let Some(m) = m {
-            if !out.contains(m) {
-                out.push(m.clone());
-            }
+fn collect_imports(prog: &Program, out: &mut Vec<String>) {
+    // Recursive since imports are legal inside function bodies; the
+    // loader must not miss a dependency the checker accepted.
+    for m in nx_ast::shape::imported_modules(prog) {
+        if !out.contains(&m) {
+            out.push(m);
         }
     }
 }
@@ -2210,7 +2187,7 @@ impl Gen {
         sig: &MethodSig,
     ) -> Result<(), CodegenError> {
         let fname = mangle_method(module, type_name, method);
-        let key = (module.to_string(), format!("{type_name}.{method}"));
+        let key = (module.to_string(), nx_ast::shape::method_key(type_name, method));
         let mut params = Vec::new();
         if sig.receiver != nx_ast::ReceiverKind::None {
             params.push("self".to_string());
@@ -2469,13 +2446,25 @@ impl Gen {
                 Ok(())
             }
             Stmt::AssignOp { target, op, value, span } => {
-                let rhs = self.emit_expr(value)?;
                 match target {
-                    nx_ast::Target::Name(name) => self.store_compound(name, *op, &rhs, *span),
+                    nx_ast::Target::Name(name) => {
+                        let rhs = self.emit_expr(value)?;
+                        self.store_compound(name, *op, &rhs, *span)
+                    }
                     other => {
-                        let cur = self.emit_expr(&other.as_expr(*span))?;
+                        // Python order with single evaluation: the target's
+                        // parts run before the value, and each runs once.
+                        // Stash them in hidden `$augN` slots first (`$`
+                        // cannot appear in a user identifier, so the names
+                        // cannot collide), then read, compute and store off
+                        // the slots. Emitting the target inline instead
+                        // would run it before the value (reversed) or run
+                        // it twice (once to read, once to store).
+                        let rebuilt = self.stash_compound_target(other, *span)?;
+                        let rhs = self.emit_expr(value)?;
+                        let cur = self.emit_expr(&rebuilt.as_expr(*span))?;
                         let v = self.binop_dyn(&cur, *op, &rhs)?;
-                        self.store_target(other, &v, *span)
+                        self.store_target(&rebuilt, &v, *span)
                     }
                 }
             }
@@ -2820,6 +2809,57 @@ impl Gen {
                 self.store_index(inner, index, updated, *span)
             }
             _ => Ok(()),
+        }
+    }
+
+    /// A hidden `$augN` slot for one evaluated value. `$` cannot appear in
+    /// a user identifier (the lexer rejects it), so the name cannot collide
+    /// with any binding the program declares -- including another temp.
+    fn temp_slot(&mut self) -> String {
+        let n = self.tmp;
+        self.tmp += 1;
+        let name = format!("$aug{n}");
+        self.new_slot(&name, None);
+        name
+    }
+
+    /// Evaluate a compound-assignment target's parts once, in order, and
+    /// rebuild the target off hidden slots holding the results. The caller
+    /// then emits the value, reads the rebuilt target, computes, and
+    /// stores back -- every source expression runs exactly once, target
+    /// parts before the value, which is Python's evaluation order.
+    ///
+    /// The slots are boxed and unknown to the memory planner, so they read
+    /// as `Shared`: nothing is freed early, and the final store clones on
+    /// the way into the container exactly as a direct emission would.
+    fn stash_compound_target(
+        &mut self,
+        target: &nx_ast::Target,
+        span: Span,
+    ) -> Result<nx_ast::Target, CodegenError> {
+        match target {
+            nx_ast::Target::Name(_) => Ok(target.clone()),
+            nx_ast::Target::Index { base, index } => {
+                let b = self.emit_expr(base)?;
+                let tb = self.temp_slot();
+                self.store_slot_owned(&tb, &b);
+                let ix = self.emit_expr(index)?;
+                let ti = self.temp_slot();
+                self.store_slot_owned(&ti, &ix);
+                Ok(nx_ast::Target::Index {
+                    base: Box::new(Expr::Var(tb, span)),
+                    index: Box::new(Expr::Var(ti, span)),
+                })
+            }
+            nx_ast::Target::Attr { base, field } => {
+                let b = self.emit_expr(base)?;
+                let tb = self.temp_slot();
+                self.store_slot_owned(&tb, &b);
+                Ok(nx_ast::Target::Attr {
+                    base: Box::new(Expr::Var(tb, span)),
+                    field: field.clone(),
+                })
+            }
         }
     }
 
@@ -3595,18 +3635,34 @@ impl Gen {
                 };
                 let items_ty = match &it.ty {
                     Ty::List(_) => Ty::List(Box::new(Ty::Unknown)),
+                    // A comprehension always yields a list, even over a
+                    // string (a list of one-character strings).
+                    Ty::Str => Ty::List(Box::new(Ty::Str)),
                     other => other.clone(),
                 };
                 let itb = self.unbox(&it);
-                let is_str = matches!(elem, Ty::Str);
                 // The accumulator is addressed so nx_listpush can grow it.
                 let slot = self.alloca("%NxVal");
                 let acc = self.reg();
                 self.w(&format!("  {acc} = call %NxVal @nx_new_list(i64 8)"));
                 self.w(&format!("  store %NxVal {acc}, ptr {slot}"));
-                // Both containers carry their length in the `b` field.
+                // The loop bound must count what the body fetches. A
+                // string's `b` field is a BYTE length, so reading it
+                // directly walks bytes -- an R3 violation the old code
+                // had (`[c for c in "str"]` yielded one broken byte per
+                // byte). nx_len counts characters, matching the
+                // `for c in s` loop, which fetches through nx_index.
                 let n = self.reg();
-                self.w(&format!("  {n} = extractvalue %NxVal {itb}, 2"));
+                match &it.ty {
+                    Ty::List(_) => {
+                        self.w(&format!("  {n} = extractvalue %NxVal {itb}, 2"));
+                    }
+                    _ => {
+                        let lc = self.reg();
+                        self.w(&format!("  {lc} = call %NxVal @nx_len(%NxVal {itb})"));
+                        self.w(&format!("  {n} = extractvalue %NxVal {lc}, 1"));
+                    }
+                }
                 let ireg = self.alloca("i64");
                 self.w(&format!("  store i64 0, ptr {ireg}"));
                 let condl = self.lab("comp_cond");
@@ -3620,27 +3676,26 @@ impl Gen {
                 self.w(&format!("  {done} = icmp sge i64 {i}, {n}"));
                 self.w(&format!("  br i1 {done}, label %{endl}, label %{bodyl}"));
                 self.w(&format!("{bodyl}:"));
-                // Fetch the current element: a string yields a one-byte
-                // string, a list yields the stored value.
+                // Fetch the current element through the same helpers the
+                // `for` loop uses, so both spellings agree: a string
+                // yields one-character strings (nx_index), a dynamic
+                // iterable dispatches on its tag (nx_each), a list reads
+                // its stored value.
                 let cur = self.reg();
-                if is_str {
-                    let sp = self.reg();
-                    self.w(&format!("  {sp} = extractvalue %NxVal {itb}, 1"));
-                    let s = self.reg();
-                    self.w(&format!("  {s} = inttoptr i64 {sp} to ptr"));
-                    let cp = self.reg();
-                    self.w(&format!("  {cp} = getelementptr i8, ptr {s}, i64 {i}"));
-                    let c = self.reg();
-                    self.w(&format!("  {c} = load i8, ptr {cp}"));
-                    // Fresh heap storage per character, not a hoisted
-                    // alloca: the string value keeps the pointer, so a
-                    // shared buffer would make every element the same byte.
-                    let buf = self.reg();
-                    self.w(&format!("  {buf} = call ptr @malloc(i64 1)"));
-                    self.w(&format!("  store i8 {c}, ptr {buf}"));
-                    self.w(&format!("  {cur} = call %NxVal @nx_str(ptr {buf}, i64 1)"));
-                } else {
-                    self.w(&format!("  {cur} = call %NxVal @nx_listget(%NxVal {itb}, i64 {i})"));
+                match &it.ty {
+                    Ty::List(_) => {
+                        self.w(&format!("  {cur} = call %NxVal @nx_listget(%NxVal {itb}, i64 {i})"));
+                    }
+                    Ty::Str => {
+                        let iv = self.reg();
+                        self.w(&format!("  {iv} = call %NxVal @nx_int(i64 {i})"));
+                        self.w(&format!(
+                            "  {cur} = call %NxVal @nx_index(%NxVal {itb}, %NxVal {iv})"
+                        ));
+                    }
+                    _ => {
+                        self.w(&format!("  {cur} = call %NxVal @nx_each(%NxVal {itb}, i64 {i})"));
+                    }
                 }
                 // The loop variable is scoped to the comprehension, so a
                 // same-named outer variable is neither read nor clobbered.
@@ -3831,8 +3886,10 @@ impl Gen {
                 // path; a box of a known scalar still goes through the
                 // runtime helper, which also re-checks the tag.
                 if matches!(v.raw, Some(Ty::Int)) && matches!(op, UnaryOp::Neg) {
+                    // Negating MIN overflows, so this goes through the
+                    // checked intrinsic like every other Int subtraction.
                     let r = self.reg();
-                    self.w(&format!("  {r} = sub i64 0, {}", v.reg));
+                    self.emit_i64_checked("llvm.ssub.with.overflow.i64", "0", &v.reg, &r);
                     return Ok(NV::raw(Ty::Int, r));
                 }
                 if matches!(v.raw, Some(Ty::Float)) && matches!(op, UnaryOp::Neg) {
@@ -4442,7 +4499,10 @@ impl Gen {
             Ty::Record(canon.to_string())
         } else {
             self.types
-                .get(&(decl_module.to_string(), format!("{canon}.{method}")))
+                .get(&(
+                    decl_module.to_string(),
+                    nx_ast::shape::method_key(canon, method),
+                ))
                 .map(|f| f.ret.clone())
                 .unwrap_or(Ty::Unknown)
         };

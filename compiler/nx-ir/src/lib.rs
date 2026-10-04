@@ -212,7 +212,10 @@ fn index_fns(
             // inside a body are indexed the same as anywhere else.
             Stmt::Impl { type_name, methods, .. } => {
                 for m in methods {
-                    let key = (module.to_string(), format!("{type_name}.{}", m.name));
+                    let key = (
+                        module.to_string(),
+                        nx_ast::shape::method_key(type_name, &m.name),
+                    );
                     // Only methods with a receiver bind `self`; associated
                     // functions have no receiver to seed.
                     let mut ps = Vec::new();
@@ -225,51 +228,19 @@ fn index_fns(
                     index_fns(module, &m.body, params, bodies);
                 }
             }
-            Stmt::If { then_body, elifs, else_body, .. } => {
-                index_fns(module, then_body, params, bodies);
-                for (_, b) in elifs {
-                    index_fns(module, b, params, bodies);
-                }
-                if let Some(b) = else_body {
+            _ => {
+                for b in nx_ast::shape::child_bodies(s) {
                     index_fns(module, b, params, bodies);
                 }
             }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => {
-                index_fns(module, body, params, bodies);
-            }
-            _ => {}
         }
     }
 }
 
-/// Names assigned anywhere in a body (flow-insensitive locals).
+/// Names assigned anywhere in a body (flow-insensitive locals). One of
+/// three identical collectors; the set itself lives in `nx_ast::shape`.
 fn assigned(body: &[Stmt], out: &mut HashSet<String>) {
-    for s in body {
-        match s {
-            Stmt::Assign { targets, .. } => {
-                for t in targets {
-                    if let nx_ast::Target::Name(n) = t {
-                        out.insert(n.clone());
-                    }
-                }
-            }
-            Stmt::For { var, body, .. } => {
-                out.insert(var.clone());
-                assigned(body, out);
-            }
-            Stmt::If { then_body, elifs, else_body, .. } => {
-                assigned(then_body, out);
-                for (_, b) in elifs {
-                    assigned(b, out);
-                }
-                if let Some(b) = else_body {
-                    assigned(b, out);
-                }
-            }
-            Stmt::While { body, .. } => assigned(body, out),
-            _ => {}
-        }
-    }
+    nx_ast::shape::assigned_names(body, out);
 }
 
 /// Everything a summary walk needs: current module, visible locals,
@@ -301,34 +272,9 @@ fn module_globals(programs: &HashMap<String, Program>, module: &str) -> HashSet<
 }
 
 fn top_assigned(stmts: &[Stmt], out: &mut HashSet<String>) {
-    for s in stmts {
-        match s {
-            Stmt::Assign { targets, .. } => {
-                for t in targets {
-                    if let nx_ast::Target::Name(n) = t {
-                        out.insert(n.clone());
-                    }
-                }
-            }
-            Stmt::For { var, body, .. } => {
-                out.insert(var.clone());
-                top_assigned(body, out);
-            }
-            Stmt::If { then_body, elifs, else_body, .. } => {
-                top_assigned(then_body, out);
-                for (_, b) in elifs {
-                    top_assigned(b, out);
-                }
-                if let Some(b) = else_body {
-                    top_assigned(b, out);
-                }
-            }
-            Stmt::While { body, .. } => top_assigned(body, out),
-            // A function or impl body is a separate scope: nothing bound in
-            // one is a module global.
-            _ => {}
-        }
-    }
+    // A function or impl body is a separate scope: nothing bound in one
+    // is a module global. The shared collector already skips both.
+    nx_ast::shape::assigned_names(stmts, out);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -626,6 +572,10 @@ fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
 fn call(scope: &Scope, callee: &Expr, args: &[Expr], out: &mut Summary) {
     let module = scope.module;
     if let Expr::Var(name, _) = callee {
+        // Builtin effects, one arm per name: the SET of names is owned by
+        // `nx_ast::shape`, but each effect here is its own rule with its
+        // own test, so the arms stay explicit rather than sharing a table
+        // that would hide which builtin does what.
         if name == "len" {
             return;
         }
@@ -676,7 +626,10 @@ fn call(scope: &Scope, callee: &Expr, args: &[Expr], out: &mut Summary) {
         // order does not matter (unions commute), so no sorting.
         let mut found = false;
         for place in scope.cx.sums.keys() {
-            if place.1.contains('.') && place.1.rsplit('.').next() == Some(attr.as_str()) {
+            // Method keys are `Type.method`; a plain function name has no
+            // dot and never matches. The split is total, so this cannot
+            // misread one.
+            if nx_ast::shape::split_method_key(&place.1).map(|(_, m)| m) == Some(attr.as_str()) {
                 if let Some(s) = scope.cx.sums.get(place) {
                     let s = s.clone();
                     out.merge(&s);
@@ -743,16 +696,11 @@ fn parse(source: &str) -> Result<Program, IrError> {
 }
 
 fn collect_imports(prog: &Program, out: &mut Vec<String>) {
-    for s in &prog.stmts {
-        let m = match s {
-            Stmt::Import { module, .. } => Some(module),
-            Stmt::FromImport { module, .. } => Some(module),
-            _ => None,
-        };
-        if let Some(m) = m {
-            if !out.contains(m) {
-                out.push(m.clone());
-            }
+    // Recursive since imports are legal inside function bodies; the
+    // loader must not miss a dependency the checker accepted.
+    for m in nx_ast::shape::imported_modules(prog) {
+        if !out.contains(&m) {
+            out.push(m);
         }
     }
 }

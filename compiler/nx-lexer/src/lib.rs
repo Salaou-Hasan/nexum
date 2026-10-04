@@ -623,11 +623,23 @@ impl Lexer {
                     return ("0".to_string(), TokenKind::Int);
                 }
                 // Decode to decimal here so the parser only ever sees a
-                // plain integer. On overflow the digits pass through
-                // unchanged and the parser reports the range error.
+                // plain integer. On overflow the prefix goes back on:
+                // bare digits would parse as a *decimal* number below and
+                // silently become a different value (`0x8000000000000000`
+                // read as 8000000000000000), while a prefixed lexeme can
+                // never parse as i64, so the parser reports the range
+                // error instead. The one exception is exactly 2^63 under
+                // a unary minus, which the parser folds to i64::MIN.
                 return match i64::from_str_radix(&digits, radix) {
                     Ok(v) => (v.to_string(), TokenKind::Int),
-                    Err(_) => (digits, TokenKind::Int),
+                    Err(_) => {
+                        let prefix = match radix {
+                            16 => "0x",
+                            8 => "0o",
+                            _ => "0b",
+                        };
+                        (format!("{prefix}{digits}"), TokenKind::Int)
+                    }
                 };
             }
         }
@@ -1032,6 +1044,25 @@ mod tests {
             let toks = lex(&format!("x = {src}")).unwrap();
             let lit = toks.iter().find(|t| t.kind == TokenKind::Int).unwrap();
             assert_eq!(lit.lexeme, want, "{src} decoded wrong");
+        }
+    }
+
+    #[test]
+    fn radix_overflow_keeps_its_prefix() {
+        // The digits alone would parse as a *decimal* number below and
+        // silently become a different value (`0x8000000000000000` read as
+        // 8000000000000000), so the prefix goes back on: a prefixed
+        // lexeme can never parse as i64, and the parser reports the
+        // range error instead. The one exception is exactly 2^63 under a
+        // unary minus, which the parser folds to i64::MIN.
+        for (src, want) in [
+            ("0x8000000000000000", "0x8000000000000000"),
+            ("0o1000000000000000000000", "0o1000000000000000000000"),
+            ("0b1000000000000000000000000000000000000000000000000000000000000000", "0b1000000000000000000000000000000000000000000000000000000000000000"),
+        ] {
+            let toks = lex(&format!("x = {src}")).unwrap();
+            let lit = toks.iter().find(|t| t.kind == TokenKind::Int).unwrap();
+            assert_eq!(lit.lexeme, want, "{src} lost its prefix");
         }
     }
 

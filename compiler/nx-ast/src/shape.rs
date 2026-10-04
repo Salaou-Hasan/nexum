@@ -8,9 +8,23 @@
 //! is a compile error in three crates at once, which is the cheapest sync
 //! mechanism available) and why each stage keeps its own dispatch
 //! predicate (`NX_NOUNBOX` must stay a representation switch, not a
-//! second language). See `docs/ARGONE.md`, task C.
+//! second language). Two more deliberate non-actions live here as
+//! documentation, so nobody "fixes" them later:
+//!
+//! - Read-name sets are NOT shared. `nx-ir` needs shadowing precision
+//!   (a comprehension variable is local, keeping the function pure);
+//!   `nx-mem` needs over-approximation (an extra root only costs memory,
+//!   a missed one costs soundness). Sharing either direction breaks the
+//!   other stage.
+//! - Receiver predicates are NOT shared. The checker's `self_root_denied`
+//!   walks to a root name; the backend's `target_of_expr` rebuilds a
+//!   storage target. Same three shapes, different questions. See
+//!   `docs/ARGONE.md`, task C.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+
+use super::Stmt;
 
 /// Resolve a module `name` to its `<name>.nx` file: each of `base_dirs`
 /// in order, then each `NX_PATH` entry in order. Returns the first path
@@ -35,6 +49,130 @@ pub fn resolve_module_file(base_dirs: &[PathBuf], name: &str) -> Option<PathBuf>
         dirs.extend(std::env::split_paths(&p));
     }
     dirs.iter().map(|d| d.join(&file)).find(|p| p.is_file())
+}
+
+/// Child statement bodies of control flow, in source order: `then` plus
+/// each `elif` plus `else`, or a loop body. Function and method bodies
+/// are NOT included -- they are separate scopes, and every caller that
+/// needs them (indexers) handles `Fn`/`Impl` explicitly while callers
+/// that must not see them (module-global collection) rely on it.
+///
+/// Seven hand-rolled copies of the `elifs`/`else_body` unpacking used to
+/// live across `nx-ir`, `nx-mem` and `nx-codegen`. Walkers that also need
+/// conditions, iterables or loop variables keep their own structure;
+/// this covers the pure body recursion.
+pub fn child_bodies(stmt: &Stmt) -> Vec<&[Stmt]> {
+    match stmt {
+        Stmt::If { then_body, elifs, else_body, .. } => {
+            let mut out = Vec::with_capacity(2 + elifs.len());
+            out.push(then_body.as_slice());
+            for (_, b) in elifs {
+                out.push(b.as_slice());
+            }
+            if let Some(b) = else_body {
+                out.push(b.as_slice());
+            }
+            out
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } => vec![body.as_slice()],
+        _ => Vec::new(),
+    }
+}
+
+/// Names bound anywhere in a body: plain assignment targets and `for`
+/// loop variables, flow-insensitively, recursing through control flow
+/// but never into function or method bodies (separate scopes).
+/// Index and field targets rebind nothing, so they contribute no names;
+/// neither do `del`, compound assignment, imports or loop depth.
+pub fn assigned_names(body: &[Stmt], out: &mut HashSet<String>) {
+    for s in body {
+        match s {
+            Stmt::Assign { targets, .. } => {
+                for t in targets {
+                    if let super::Target::Name(n) = t {
+                        out.insert(n.clone());
+                    }
+                }
+            }
+            Stmt::For { var, .. } => {
+                out.insert(var.clone());
+            }
+            _ => {}
+        }
+        for b in child_bodies(s) {
+            assigned_names(b, out);
+        }
+    }
+}
+
+/// Module names imported anywhere in a program, top-level or nested in
+/// function and method bodies, first mention first, duplicates removed.
+/// Imports are legal inside functions (the checker binds them there), so
+/// a top-level-only scan misses dependencies and the loader emits
+/// references to globals that were never declared.
+pub fn imported_modules(prog: &super::Program) -> Vec<String> {
+    fn walk(stmts: &[Stmt], out: &mut Vec<String>) {
+        for s in stmts {
+            match s {
+                Stmt::Import { module, .. } => {
+                    if !out.contains(module) {
+                        out.push(module.clone());
+                    }
+                }
+                Stmt::FromImport { module, .. } => {
+                    if !out.contains(module) {
+                        out.push(module.clone());
+                    }
+                }
+                Stmt::Fn { body, .. } => walk(body, out),
+                Stmt::Impl { methods, .. } => {
+                    for m in methods {
+                        walk(&m.body, out);
+                    }
+                }
+                _ => {}
+            }
+            for b in child_bodies(s) {
+                walk(b, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&prog.stmts, &mut out);
+    out
+}
+
+/// Method key `Type.method`: how `nx-ir` and `nx-mem` file per-method
+/// summaries and plans. Type and method names are identifiers, so neither
+/// half ever contains a dot and the key is unambiguous.
+pub fn method_key(type_name: &str, method: &str) -> String {
+    format!("{type_name}.{method}")
+}
+
+/// Split a method key back into `(type, method)`. Total: `None` when
+/// there is no dot or either half is empty, so callers cannot misread
+/// a plain function name as a method key.
+pub fn split_method_key(key: &str) -> Option<(&str, &str)> {
+    let (t, m) = key.rsplit_once('.')?;
+    if t.is_empty() || m.is_empty() {
+        return None;
+    }
+    Some((t, m))
+}
+
+/// Ambient builtins: (name, minimum args, maximum args). The SET is owned
+/// here; each stage keeps its own checking and emission rules beside its
+/// diagnostics, where a missing rule is a compile error or a loud
+/// "unknown builtin" rather than silent agreement. `input` takes an
+/// optional prompt, so it is the only builtin with a range.
+pub const BUILTINS: &[(&str, usize, usize)] = &[("len", 1, 1), ("push", 2, 2), ("input", 0, 1)];
+
+/// Arity range of an ambient builtin, if `name` is one.
+pub fn builtin_arity(name: &str) -> Option<(usize, usize)> {
+    BUILTINS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, lo, hi)| (*lo, *hi))
 }
 
 #[cfg(test)]

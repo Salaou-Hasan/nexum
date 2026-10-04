@@ -58,7 +58,7 @@ jobs:
       # of them, which left records, impl/mut self, del, comprehensions,
       # slices and None with no native coverage anywhere in CI.
       EXAMPLES: >-
-        examples/hello.nx examples/flex.nx examples/control.nx
+        examples/boundaries.nx examples/hello.nx examples/flex.nx examples/control.nx
         examples/funcs.nx examples/lists.nx examples/search.nx
         examples/records.nx examples/methods.nx examples/syntax.nx
         examples/modules/main.nx examples/fib.nx

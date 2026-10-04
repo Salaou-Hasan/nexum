@@ -231,7 +231,10 @@ fn index_fns(
             // so it joins the param list; associated functions have none.
             Stmt::Impl { type_name, methods, .. } => {
                 for m in methods {
-                    let key = (module.to_string(), format!("{type_name}.{}", m.name));
+                    let key = (
+                        module.to_string(),
+                        nx_ast::shape::method_key(type_name, &m.name),
+                    );
                     let mut ps = Vec::new();
                     if m.receiver != nx_ast::ReceiverKind::None {
                         ps.push("self".to_string());
@@ -241,52 +244,20 @@ fn index_fns(
                     index_fns(module, &m.body, out);
                 }
             }
-            Stmt::If { then_body, elifs, else_body, .. } => {
-                index_fns(module, then_body, out);
-                for (_, b) in elifs {
-                    index_fns(module, b, out);
-                }
-                if let Some(b) = else_body {
+            _ => {
+                for b in nx_ast::shape::child_bodies(s) {
                     index_fns(module, b, out);
                 }
             }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => {
-                index_fns(module, body, out);
-            }
-            _ => {}
         }
     }
 }
 
 /// All assigned names in a body, recursively (excluding nested fn scopes,
-/// which are planned as their own functions).
+/// which are planned as their own functions). One of three identical
+/// collectors; the set itself lives in `nx_ast::shape`.
 fn assigned_in(body: &[Stmt], out: &mut HashSet<String>) {
-    for s in body {
-        match s {
-            Stmt::Assign { targets, .. } => {
-                for t in targets {
-                    if let nx_ast::Target::Name(n) = t {
-                        out.insert(n.clone());
-                    }
-                }
-            }
-            Stmt::For { var, body, .. } => {
-                out.insert(var.clone());
-                assigned_in(body, out);
-            }
-            Stmt::If { then_body, elifs, else_body, .. } => {
-                assigned_in(then_body, out);
-                for (_, b) in elifs {
-                    assigned_in(b, out);
-                }
-                if let Some(b) = else_body {
-                    assigned_in(b, out);
-                }
-            }
-            Stmt::While { body, .. } => assigned_in(body, out),
-            _ => {}
-        }
-    }
+    nx_ast::shape::assigned_names(body, out);
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Root {
@@ -351,19 +322,11 @@ fn collect_alias_pairs(body: &[Stmt], map: &mut HashMap<String, HashSet<String>>
                     }
                 }
             }
-            Stmt::If { then_body, elifs, else_body, .. } => {
-                collect_alias_pairs(then_body, map);
-                for (_, b) in elifs {
-                    collect_alias_pairs(b, map);
-                }
-                if let Some(b) = else_body {
+            _ => {
+                for b in nx_ast::shape::child_bodies(s) {
                     collect_alias_pairs(b, map);
                 }
             }
-            Stmt::While { body, .. } | Stmt::For { body, .. } => {
-                collect_alias_pairs(body, map);
-            }
-            _ => {}
         }
     }
 }
@@ -412,18 +375,15 @@ fn escaping_roots(body: &[Stmt], out: &mut HashSet<Root>) {
                     expr_roots(e, out);
                 }
             }
-            Stmt::If { cond, then_body, elifs, else_body, .. } => {
-                escaping_roots(then_body, out);
-                for (_, b) in elifs {
+            // Only bodies are walked here, as before: conditions and
+            // iterables contribute no roots of their own. Binds clone on
+            // the way in, so nothing a condition or iterable touches can
+            // outlive the scope through this statement alone.
+            Stmt::If { .. } | Stmt::While { .. } | Stmt::For { .. } => {
+                for b in nx_ast::shape::child_bodies(s) {
                     escaping_roots(b, out);
                 }
-                if let Some(b) = else_body {
-                    escaping_roots(b, out);
-                }
-                let _ = cond;
             }
-            Stmt::While { body, .. } => escaping_roots(body, out),
-            Stmt::For { body, .. } => escaping_roots(body, out),
             // A type declaration binds nothing at runtime, so it
             // contributes no roots.
             Stmt::TypeDecl { .. } => {}
@@ -442,11 +402,16 @@ fn expr_roots(e: &Expr, out: &mut HashSet<Root>) {
     match e {
         Expr::Call { callee, args, .. } => {
             let c = match callee.as_ref() {
-                // `len`, `push`, `print` and `input` retain nothing they
-                // are given: `len` and `input` only read, `push` hands its
-                // first argument to the list (handled just below), and
-                // `print` only renders.
-                Expr::Var(n, _) if n == "len" || n == "push" || n == "print" || n == "input" => None,
+                // Builtins retain nothing they are given (`push` hands its
+                // first argument to the list, handled just below). The set
+                // is owned by `nx_ast::shape`; `print` is not one of them
+                // (it is a statement, never a call callee) and stays a
+                // local exemption.
+                Expr::Var(n, _)
+                    if nx_ast::shape::builtin_arity(n).is_some() || n == "print" =>
+                {
+                    None
+                }
                 Expr::Var(n, _) => Some(Callee::Same(n.clone())),
                 Expr::Attr { base, attr, .. } => match base.as_ref() {
                     Expr::Var(m, _) => Some(Callee::Attr(m.clone(), attr.clone())),

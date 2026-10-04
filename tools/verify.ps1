@@ -46,7 +46,8 @@ if ($built -ne 0 -or -not (Test-Path $nx)) {
 # that kind of file, and a recursive glob would also pick up module parts that
 # are not entry points.
 $examples = @(
-    'comments.nx', 'control.nx', 'fib.nx', 'flex.nx', 'funcs.nx',
+    'boundaries.nx', 'comments.nx', 'control.nx', 'fib.nx', 'flex.nx',
+    'funcs.nx',
     'hello.nx', 'lists.nx', 'methods.nx', 'records.nx',
     'search.nx', 'syntax.nx', 'unbox.nx',
     'modules/main.nx'

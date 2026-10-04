@@ -393,3 +393,43 @@ real LLVM-invalid IR that no other check sees.
 The first is corrected by the directive. The second and third are corrected
 here. The common cause is stating a measured-sounding number without
 running the measurement.
+
+---
+
+## 9. Corrections since the investigation (v0.4.1 Task 0 work)
+
+The body above is kept as written; what follows records where the tree
+has moved since, measured the same way (enumeration and execution, not
+memory). Section numbers name the claim being corrected.
+
+- **§1a.** The `nx_ir::expr` hole is closed: `Dict`, `Slice`, `IfExpr`
+  and `Comprehension` are walked (`compiler/nx-ir/src/lib.rs`, `expr`),
+  with the comprehension loop variable shadowing correctly. The stale-
+  memoization program from §1a now recomputes. `nx-mem`'s `vars_in` and
+  `expr_roots` had the same missing arms and now walk them.
+- **§1b.** Test counts are superseded: **419 `#[test]` attributes**
+  (enumerated with `Select-String`), all passing. Integration tests
+  exist: `compiler/nx-e2e/tests/` holds four files
+  (`containers_strings`, `language_core`, `methods`,
+  `value_semantics`), and nearly every test there invokes `clang`
+  through `run_in_dir` (`compiler/nx-e2e/src/lib.rs`).
+- **§2.** Still nine crates, but a different nine: `nx-interp` is
+  deleted and `compiler/nx-e2e` (compile-and-run harness) stands in its
+  place. The dependency DAG in §2 names the interpreter; read it as
+  `lexer -> ast -> parser -> { types, ir, mem } -> codegen -> driver`,
+  with `nx-e2e` as a test-only consumer of `types` and `codegen`.
+- **§3.** Two entries moved. `nx-ir` `Expr` arms went 8 to 12 when the
+  §1a hole was fixed (new total 146 / 122) -- fixing a soundness hole
+  adds arms, which is why the arm count is a proxy and the real target
+  is centralizing shared facts. Module path resolution, the five-copy
+  case §3 counts, is now one function
+  (`nx_ast::shape::resolve_module_file`); the intra-crate duplicate in
+  `nx-codegen` went with it.
+- **Task 0 fallout, for the gate record.** Four more divergences found
+  while closing the stage are fixed with tests, not just noted:
+  unary-minus overflow traps on both paths (R1 names it now),
+  `del d[missing]` errors, compound assignment evaluates target-before-
+  value exactly once, and comprehensions over strings yield characters
+  (R3). `i64::MIN` is spellable (`-9223372036854775808`, every radix);
+  the same change closes a silent-misparse hole where radix overflow
+  passed bare digits that parsed as decimal.

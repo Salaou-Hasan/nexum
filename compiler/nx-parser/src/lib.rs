@@ -36,6 +36,27 @@ fn target_from_expr(e: Expr) -> Result<Target, ParseError> {
     }
 }
 
+/// Whether an integer lexeme spells exactly 2^63: plain decimal digits,
+/// or a radix-prefixed overflow form the lexer passed through with its
+/// prefix so it cannot misparse as decimal. Only a unary minus in front
+/// of one of these is i64::MIN; the bare literal is still out of range.
+fn is_min_literal(lexeme: &str) -> bool {
+    if lexeme == "9223372036854775808" {
+        return true;
+    }
+    let (digits, radix) = match lexeme.strip_prefix("0x") {
+        Some(d) => (d, 16),
+        None => match lexeme.strip_prefix("0o") {
+            Some(d) => (d, 8),
+            None => match lexeme.strip_prefix("0b") {
+                Some(d) => (d, 2),
+                None => return false,
+            },
+        },
+    };
+    u64::from_str_radix(digits, radix).ok() == Some(1 << 63)
+}
+
 /// A short human name for an expression, for diagnostics only.
 fn describe_expr(e: &Expr) -> &'static str {
     match e {
@@ -988,6 +1009,20 @@ impl Parser {
             // comparison, so it is handled in `parse_not`.
             TokenKind::Minus => {
                 self.next();
+                // i64::MIN has no literal spelling: `9223372036854775808`
+                // overflows i64, so a unary minus in front of exactly those
+                // digits folds to MIN here, in any radix spelling. Anything
+                // else parses as a negated expression, as before.
+                if *self.peek_kind() == TokenKind::Int {
+                    let nt = self.peek().clone();
+                    if is_min_literal(&nt.lexeme) {
+                        self.next();
+                        return Ok(Expr::Int(
+                            i64::MIN,
+                            Span { line: nt.line, col: nt.col },
+                        ));
+                    }
+                }
                 let e = self.parse_unary()?;
                 let span = Span { line: t.line, col: t.col };
                 Ok(Expr::Unary { op: UnaryOp::Neg, expr: Box::new(e), span })
@@ -1469,6 +1504,44 @@ mod tests {
     fn pow_exponent_may_be_signed() {
         let p = parse_source("x = 2 ** -1").unwrap();
         assert_eq!(p.stmts.len(), 1);
+    }
+
+    /// i64::MIN has no literal spelling -- the digits overflow i64 -- so a
+    /// unary minus in front of exactly 2^63 folds to MIN. Every radix
+    /// spelling works; anything else overflowing stays a range error, and
+    /// a unary *plus* never folds (it would be +2^63, still out of range).
+    #[test]
+    fn unary_minus_folds_two_to_the_63_to_min() {
+        for src in [
+            "x = -9223372036854775808",
+            "x = -9_223_372_036_854_775_808",
+            "x = -0x8000000000000000",
+            "x = -0o1000000000000000000000",
+            "x = -0b1000000000000000000000000000000000000000000000000000000000000000",
+        ] {
+            let p = parse_source(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            match &p.stmts[0] {
+                Stmt::Assign { values, .. } => {
+                    assert!(
+                        matches!(&values[0], Expr::Int(v, _) if *v == i64::MIN),
+                        "{src} did not fold to MIN"
+                    );
+                }
+                other => panic!("{src}: {other:?}"),
+            }
+        }
+        // The bare literal is still out of range, with or without a plus,
+        // and so is every other overflow -- including hex whose digits
+        // happen to parse as decimal (which once silently became 8e15).
+        for src in [
+            "x = 9223372036854775808",
+            "x = +9223372036854775808",
+            "x = 0x8000000000000000",
+            "x = 0xFFFFFFFFFFFFFFFF",
+            "x = -9223372036854775809",
+        ] {
+            assert!(parse_source(src).is_err(), "{src} should not parse");
+        }
     }
 
     /// The bitwise ladder sits below comparison and above arithmetic, so

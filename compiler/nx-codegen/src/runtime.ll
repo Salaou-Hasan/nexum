@@ -1341,7 +1341,16 @@ entry:
   br i1 %ti, label %i, label %c
 i:
   %a = extractvalue %NxVal %v, 1
-  %n = sub i64 0, %a
+    ; R1 covers unary minus too: `-x` is `0 - x`, and negating MIN has
+    ; no answer, so it traps like every other Int overflow.
+  %o = call { i64, i1 } @llvm.ssub.with.overflow.i64(i64 0, i64 %a)
+  %n = extractvalue { i64, i1 } %o, 0
+  %of = extractvalue { i64, i1 } %o, 1
+  br i1 %of, label %iovf, label %iok
+iovf:
+  call void @nx_panic(ptr @.msg.overflow)
+  unreachable
+iok:
   %r = call %NxVal @nx_int(i64 %n)
   ret %NxVal %r
 c:
@@ -2419,9 +2428,14 @@ define %NxVal @nx_dictdel(%NxVal %d, %NxVal %k) {
 entry:
   %idx = alloca i64
   %found = call i1 @nx_dictfindidx(%NxVal %d, %NxVal %k, ptr %idx)
-  br i1 %found, label %rm, label %ret
-ret:
-  ret %NxVal %d
+  ; Deleting a missing key is an error, not a no-op: silently keeping a
+  ; dict that should have changed is how a program reads as though it
+  ; worked. The checker cannot see it (keys are runtime values), so the
+  ; runtime reports it, like a missing index.
+  br i1 %found, label %rm, label %missing
+missing:
+  call void @nx_panic(ptr @.msg.nokey)
+  unreachable
 rm:
   %i = load i64, ptr %idx
   %n = extractvalue %NxVal %d, 2

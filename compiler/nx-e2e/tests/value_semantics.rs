@@ -147,6 +147,24 @@ print(p)",
 }
 
 #[test]
+fn compound_assignment_evaluates_target_before_value_exactly_once() {
+    // `xs[idx()] += val()` runs the index, then the value, each once:
+    // the old backend ran the value first and the index twice.
+    assert_output(
+        "xs = [1]
+fn idx():
+    print(\"index\")
+    return 0
+fn val():
+    print(\"value\")
+    return 9
+xs[idx()] += val()
+print(xs)",
+        &["index", "value", "[10]"],
+    );
+}
+
+#[test]
 fn multiple_return_is_destructured() {
     assert_output(
         "fn pair():

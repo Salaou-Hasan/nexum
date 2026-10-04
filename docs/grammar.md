@@ -78,8 +78,17 @@ oct_digit ::= [0-7]
 Underscores are digit separators anywhere in the run and are stripped, so
 `1_000_000` is `1000000`. Radix literals are decoded to decimal at lexing
 time, so every consumer downstream sees a plain digit string. Overflow is
-not detected here: the digits pass through and the parser reports the
-range error when it fails to parse them as `i64`.
+not detected here: the digits pass through with their prefix restored
+(a bare digit string would parse as decimal and silently become a
+different value) and the parser reports the range error when it fails to
+parse them as `i64`.
+
+The one overflow that is not an error is i64::MIN. Its digits do not fit
+in an `i64`, so it has no literal spelling -- but a unary minus in front
+of exactly 2^63 folds to it: `-9223372036854775808`, `-0x8000000000000000`
+and every other radix spelling of the same value all parse to
+`Int(-9223372036854775808)`. The bare digits are still out of range, and
+so is a parenthesised `-(9223372036854775808)`.
 
 ### 1.4 Float literals
 
@@ -345,6 +354,11 @@ Every target shape pairs positionally, including element and field
 targets: `xs[0], xs[1] = 7, 8` and `p.x, p.y = 1, 2` both work, and every
 right-hand side evaluates before any store, so `a, b = b, a` swaps.
 
+Compound assignment evaluates the target before the value, each exactly
+once: `xs[idx()] += val()` runs the index, then the value. Reversing
+that order, or running the target twice (once to read, once to store),
+is a miscompile, not an optimization.
+
 Assignment is a statement. There is no walrus operator and no assignment
 expression.
 
@@ -361,6 +375,12 @@ expr_stmt  ::= expr
 entry. On a record it **blanks the field to `None`** rather than removing
 it, because a record's arity is fixed. Strings are immutable, so `del s[0]`
 is a type error.
+
+Deleting a missing entry is a **runtime** error ("key not found",
+"out of range"), never a silent no-op: keeping a container that should
+have changed is how a program reads as though it had worked. The checker
+cannot see it -- keys and indices are runtime values -- so the runtime
+reports it.
 
 `assert` takes an optional message expression.
 
@@ -417,7 +437,7 @@ surprising — but it is worth knowing that the parse is left-associative.
 
 #### 3.1.1 Fixed runtime rules
 
-Five rules that were previously ambiguous and are now decided. Each one
+Six rules that were previously ambiguous and are now decided. Each one
 is stated so that a single test can check it, and each is owned by this
 document: an implementation that disagrees with one of them is a bug, not
 an alternative reading of the language. They live here because this is
@@ -425,7 +445,7 @@ where the operator rules live; the string rule is also summarised in
 section 4.2.
 
 **R1. Integer overflow traps. It never wraps.**
-`+`, `-`, `*`, `//` and `%` on two `Int`s compute exactly in `i64`. If
+`+`, `-` (binary and unary), `*`, `//` and `%` on two `Int`s compute exactly in `i64`. If
 the exact result lies outside `-9223372036854775808 .. 9223372036854775807`,
 the program stops with the runtime error "integer overflow". There is no
 wrapping, no saturating, and no `Int` value that stands for "too big":
@@ -483,6 +503,14 @@ survives the removal of `parallel:` because the guarantee is still worth
 stating, and a single-threaded model is the one thing a compiler can promise
 without a proof obligation. It is also what makes R4's "the native stack is
 what stops runaway recursion" an honest answer rather than a gap.
+
+**R6. Floats print with 15 significant digits.** Fixed notation from
+`1e-12` up to `1e16` (`0.000000000001`, `10000000000000000`); scientific
+notation below and above it (`1e-13`, `1e+17`). Trailing zeros trim
+(`4.0` prints as `4`, `2.5e-3` as `0.0025`), and `0.1 + 0.2` is `0.3`,
+not the representation error. What you see is what the value is to the
+printed precision: no integer part is ever trimmed, so `1e14` is
+`100000000000000`, not `1`.
 
 ### 3.2 Primary expressions
 

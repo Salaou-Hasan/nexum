@@ -461,6 +461,30 @@ print(len(d), "b" in d)
     );
 }
 
+#[test]
+fn dict_delete_of_a_missing_key_is_an_error() {
+    // Deleting a key that is not there used to silently keep the dict:
+    // a program that should have changed nothing visibly, and did not,
+    // read as though it had worked. Like a missing index, it is loud.
+    assert_runtime_error("d = {\"a\": 1}\ndel d[\"z\"]\n", "key not found");
+    // Deleting twice also fails the second time: the first delete works.
+    assert_runtime_error(
+        "d = {\"a\": 1}\ndel d[\"a\"]\ndel d[\"a\"]\n",
+        "key not found",
+    );
+}
+
+#[test]
+fn comprehension_over_a_string_yields_characters() {
+    // The comprehension had its own byte loop while `for c in s` goes
+    // through nx_index: three characters read as nine broken bytes.
+    // Compared rather than printed, so this file stays ASCII.
+    assert_output(
+        "print([c for c in \"\\u65e5\\u672c\\u8a9e\"] == [\"\\u65e5\", \"\\u672c\", \"\\u8a9e\"])\nprint([c for c in \"h\\u00e4llo\" if c != \"l\"] == [\"h\", \"\\u00e4\", \"o\"])\n",
+        &["true", "true"],
+    );
+}
+
 // --- slices ------------------------------------------------------------
 
 #[test]
@@ -663,14 +687,18 @@ print(len(s[3:]), len(s[10:20]), len(s[0:0]))
 "#,
         &["[] [] []", "0 0 0"],
     );
-    // NOT asserted, and deliberately: `s[a:b:step]` on a *string* is broken
-    // independently of the byte-vs-character issue. `@nx_slice` sizes the
-    // destination buffer with `sdiv(len, step)` instead of the
-    // `ceil(len, step)` bytes the loop actually writes, so the result is
-    // heap garbage -- `"abcdef"[::2]` prints `alc`, not `ace`. That is a
-    // memory-safety bug, not a semantics disagreement, so it gets a bug
-    // report and not a pinned expectation. Every string slice with an
-    // explicit step is skipped here until it is fixed.
+    // Stepped slices were once a heap overflow here (`floor` where the
+    // count needs `ceil`, and the output offset advancing by `step`):
+    // `"abcdef"[::2]` printed heap garbage. Five regression tests pin
+    // the fix, and these assert the values.
+    assert_output(
+        r#"
+print("abcdef"[::2])
+print("abcde"[::2])
+print("hello"[::1])
+"#,
+        &["ace", "ace", "hello"],
+    );
 }
 
 // --- strings -----------------------------------------------------------

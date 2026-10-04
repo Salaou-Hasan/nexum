@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### ARGONE Task 0: the remaining divergences are closed
+- i64::MIN is spellable: a unary minus in front of exactly 2^63 folds
+  to MIN in every radix spelling (`-9223372036854775808`,
+  `-0x8000000000000000`). The same change closes a silent-misparse hole:
+  radix overflow passed bare digits downstream, so `0x8000000000000000`
+  read as decimal 8e15; the prefix now goes back on and the parser
+  reports the range error.
+- Unary negation traps on overflow on both paths (`-MIN` is `0 - MIN`).
+- `del d[missing]` is a runtime error ("key not found"), matching
+  `d[missing]` reads; `del` on a name unbinds (later uses are statically
+  undefined, so the runtime's rebind-to-`None` is unobservable).
+- Compound assignment evaluates the target before the value, each once
+  (`xs[idx()] += val()` runs index, then value).
+- Comprehensions over strings yield characters, like `for c in s`
+  (the comprehension had its own byte loop).
+- `and`/`or` short-circuit is tested on both branches (was zero coverage).
+- `examples/boundaries.nx` pins the decided rules as a permanent
+  differential fixture (14 examples in `verify.ps1` and CI).
+- `docs/grammar.md` owns each rule outright: R1 names unary minus, new
+  R6 states float printing (measured edges: fixed `1e-12..1e16`), and
+  sections 1.3/2.5/2.6 state the MIN spelling, evaluation order and
+  deletion errors. A stale "stepped string slices are broken" test note
+  is replaced with the values (the overflow was fixed earlier).
+### Test counts
+235 unit tests plus 186 native execution tests. `cargo test --workspace`
+runs everything; `tools/verify.ps1` reports 14/14.
+
 ## v0.4.1
 
 ### `nx run` no longer reports a built executable as missing

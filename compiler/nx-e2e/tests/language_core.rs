@@ -1081,3 +1081,43 @@ fn input_arity_and_prompt_type_are_checked() {
     assert_rejected("x = input(1, 2)\n", "input() expects at most 1 argument");
     assert_rejected("x = input(5)\n", "input() prompt must be Str");
 }
+
+// ---------------------------------------------------------------------------
+// Task 0 boundaries: i64::MIN, negation overflow, short-circuit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn min_int_is_spellable_in_every_radix() {
+    // `-9223372036854775808` was a parse error: the digits overflow i64.
+    // A unary minus in front of exactly 2^63 folds to MIN; the bare
+    // literal is still out of range.
+    assert_output(
+        "print(-9223372036854775808)\nprint(-0x8000000000000000)\nprint(-9223372036854775807 - 1)\n",
+        &["-9223372036854775808", "-9223372036854775808", "-9223372036854775808"],
+    );
+    assert_rejected("print(9223372036854775808)\n", "invalid integer");
+    assert_rejected("print(0x8000000000000000)\n", "invalid integer");
+}
+
+#[test]
+fn overflows_at_the_edge_trap() {
+    // One past MIN in both directions, and negating MIN itself: `-x` is
+    // `0 - x`, so it traps exactly where subtraction does, on both the
+    // boxed and unboxed paths.
+    assert_runtime_error("print(-9223372036854775808 - 1)\n", "integer overflow");
+    assert_runtime_error("x = -9223372036854775808\nprint(-x)\n", "integer overflow");
+    let o = run_in("fn neg(n):\n    return -n\nprint(neg(-9223372036854775808))\n", true);
+    assert_ne!(o.code, 0, "NX_NOUNBOX build must trap too, got {:?}", o.out);
+    assert!(o.out.contains("integer overflow"), "got {:?}", o.out);
+}
+
+#[test]
+fn and_or_short_circuit_on_both_branches() {
+    // Zero coverage before: each operator needs the branch that skips
+    // the right side and the branch that runs it. Impure functions
+    // prove which ran -- a pure right side would be unobservable.
+    assert_output(
+        "fn t():\n    print(\"right\")\n    return true\nfn f():\n    print(\"right\")\n    return false\nprint(false and t())\nprint(true and f())\nprint(true or t())\nprint(false or f())\n",
+        &["false", "right", "false", "true", "right", "false"],
+    );
+}

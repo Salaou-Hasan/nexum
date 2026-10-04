@@ -29,26 +29,26 @@ this file. Task definitions: `docs/ARGONE.md`.
 
 Status: not started
 
-- [ ] Each of the 11 rules has exactly one written owner, named in docs/grammar.md
-- [ ] docs/grammar.md no longer names a backend as the authority for runtime meaning
-- [ ] All 11 have one written owner, and a test that fails if a second implementation re-derives them
+- [x] Each of the 11 rules has exactly one written owner, named in docs/grammar.md
+- [x] docs/grammar.md no longer names a backend as the authority for runtime meaning
+- [x] All 11 have one written owner, and a test that fails if a second implementation re-derives them
 - [ ] The runtime has no known memory-safety defect; ASan must cover hand-written runtime IR, not just Rust code
-- [ ] No native test asserts a known-bad behaviour
-- [ ] examples/boundaries.nx covers them as a permanent differential fixture
-- [ ] verify.ps1 builds from the tree, ordered byte diff, no line-dropping, exit codes checked
-- [ ] verify.ps1 includes examples/modules/
-- [ ] CI natively compiles all 13 examples, including records, methods, syntax
-- [ ] Short-circuit and/or is tested on both the short-circuiting and non-short-circuiting branches
-      Evidence:
+- [x] No native test asserts a known-bad behaviour
+- [x] examples/boundaries.nx covers them as a permanent differential fixture
+- [x] verify.ps1 builds from the tree, ordered byte diff, no line-dropping, exit codes checked
+- [x] verify.ps1 includes examples/modules/
+- [x] CI natively compiles all 14 examples, including records, methods, syntax
+- [x] Short-circuit and/or is tested on both the short-circuiting and non-short-circuiting branches
+      Evidence: docs/grammar.md 3.1.1 (R1-R6), 1.3 (MIN spelling), 2.5 (compound order), 2.6 (deletion errors); authority table names the document, runtime.ll is an implementation (grammar.md:9-24); compiler/nx-e2e expected-value tests plus examples/boundaries.nx (single execution model, so expected values are the anti-rederivation guard); stale-behavior notes replaced with values (containers_strings.rs stepped-slice test); tools/verify.ps1 builds nx from the tree, compares byte-exact with exit codes, corpus lists modules/main.nx; .github/workflows/ci.yml EXAMPLES (14, incl. boundaries.nx); and_or_short_circuit_on_both_branches in language_core.rs. Memory-safety item still open: ASan proven incapable of covering .ll inputs (CHANGELOG), Valgrind memcheck step added but awaiting its first green Linux CI run.
 
 ## A - Full architecture audit
 
-Status: not started
+Status: complete
 
-- [ ] Covers structure, duplication, semantics ownership, toolchain, harness
-- [ ] Every claim cites file:symbol or records the command that produced it
-- [ ] Corrections to prior documentation recorded explicitly
-      Evidence:
+- [x] Covers structure, duplication, semantics ownership, toolchain, harness
+- [x] Every claim cites file:symbol or records the command that produced it
+- [x] Corrections to prior documentation recorded explicitly
+      Evidence: docs/architecture/audit.md sections 1-8 plus section 9 (corrections since the investigation: e2e/clang counts, nine-crate roster, nx_ir::expr hole closure, arm-count update, post-stage divergence fixes), each with file:line or the enumerating command.
 
 ## B - Baselines
 
@@ -62,14 +62,14 @@ Status: not started
 
 ## C - Shared semantic structures
 
-Status: not started
+Status: complete
 
-- [ ] Partial re-derivation arms measurably reduced from the 159 measured with the interpreter present
-- [ ] Dead Checker::writable_receiver deleted, not wired up
-- [ ] NX_NOUNBOX still produces identical output on all 13 examples
-- [ ] Module path resolution is one function; intra-crate duplicate removed
-- [ ] infer_program "__main__" hardcoding fixed, with a fixture having a method call in an imported module
-      Evidence:
+- [x] Partial re-derivation arms measurably reduced from the 159 measured with the interpreter present
+- [x] Dead Checker::writable_receiver deleted, not wired up
+- [x] NX_NOUNBOX still produces identical output on all 14 examples
+- [x] Module path resolution is one function; intra-crate duplicate removed
+- [x] infer_program "__main__" hardcoding fixed, with a fixture having a method call in an imported module
+      Evidence: nx-ast::shape owns resolve_module_file (5 call sites), child_bodies, assigned_names (3 sites), imported_modules (3 loaders, now recursive), method_key/split_method_key (5 build sites, 1 parse), BUILTINS table (nx-types delegates, nx-mem uses the gate); hand-rolled control-flow recursion 29 to 3 measured by enumerating elif/else/While/For arms across nx-ir/nx-mem/nx-codegen/nx-types (remaining 3 need conditions and stay); writable_receiver deleted (nx-types); verify.ps1 14/14 incl. NX_NOUNBOX; infer_program_for with a_method_call_inside_an_imported_module_resolves e2e fixture (methods.rs) plus infer_program_for_keys_by_module unit test. Read-name sets and receiver predicates deliberately not shared (different soundness directions; documented in shape.rs).
 
 ## D - HIR
 

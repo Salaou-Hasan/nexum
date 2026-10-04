@@ -1,0 +1,75 @@
+# Task 0 boundary fixture: every decided runtime rule in one program.
+#
+# Each rule below was once a place where two implementations disagreed.
+# There is only one execution model now, so this file pins the decided
+# answers as expected values instead: `tools/verify.ps1` runs it twice
+# (default and NX_NOUNBOX) and requires byte-identical output, and the
+# trapping rules are covered by runtime-error tests in `compiler/nx-e2e`
+# (a trapping program cannot live in this file -- verify requires exit 0).
+#
+# Rules that trap rather than answer: integer overflow (R1), `**` with a
+# negative Int exponent (R2), `del` of a missing key, `input()` at EOF.
+# See `docs/grammar.md` 3.1.1 and the `*_traps` / `*_is_an_error` tests.
+
+# R1: integers trap on overflow, so the edges below are exact values.
+print(-9223372036854775808)       # i64::MIN is spellable
+print(-9223372036854775807 - 1)   # reaching MIN by arithmetic
+print(9223372036854775807)        # i64::MAX
+
+# R2: `**` saturates; 0, 1 and -1 answer by rule instead of clamping.
+print(2 ** 100)                   # 9223372036854775807
+print(0 ** 0)                     # 1
+print(0 ** 5)                     # 0
+print((-1) ** 3, (-1) ** 4)       # -1 1, by parity of the exponent
+print(-1 ** 4)                    # -1 -- this is -(1 ** 4), not (-1) ** 4
+print(2.0 ** -1)                  # 0.5 -- Float exponents exist
+
+# R3: strings are characters, not bytes. Spelled with escapes so this
+# file stays ASCII.
+s = "h\u00e4ll\u00e4"
+print(len(s))                     # 5, not 6
+print(s[1])                       # the a-umlaut, not one byte of it
+print(s[0:2])                     # ha with an umlaut on the a
+print([c for c in "\u65e5\u672c\u8a9e"])      # three one-character strings
+print("" in "hello")              # true -- empty needle matches
+print("hello" in "hello")         # true -- full-length needle matches
+print("zz" in "hello")            # false
+
+# Floats print 15 significant digits, fixed notation from 1e-12 to 1e16.
+print(1e15, 0.5, 2.5e-3)
+print(1e16, 1e17, 1e-13)
+
+# `del` removes: a present key, an element, a name (unbound after).
+d = {"a": 1, "b": 2}
+del d["a"]
+print(d, len(d))
+xs = [1, 2, 3]
+del xs[1]
+print(xs)
+y = 7
+del y
+print("deleted")
+
+# Compound assignment evaluates the target before the value, once each.
+xs = [1]
+fn idx():
+    print("index")
+    return 0
+fn val():
+    print("value")
+    return 9
+xs[idx()] += val()
+print(xs)
+
+# Short-circuit: the skipped side never runs (no "right" lines for the
+# first and third), the taken side does.
+fn t():
+    print("right")
+    return true
+fn f():
+    print("right")
+    return false
+print(false and t())
+print(true and f())
+print(true or t())
+print(false or f())

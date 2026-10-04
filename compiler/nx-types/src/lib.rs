@@ -200,18 +200,11 @@ fn field_ty(
 /// (minimum, maximum). The method-call sugar (`xs.push(1)` for
 /// `push(xs, 1)`) consults this: an attribute name with a known range
 /// rewrites to the builtin call, so sugar needs no separate table to
-/// drift out of sync. Free function (not a method) so the backend crate
-/// can share the gate.
+/// drift out of sync. The name set itself lives in `nx_ast::shape`; this
+/// delegates so there is exactly one table.
+/// Free function (not a method) so the backend crate can share the gate.
 pub fn builtin_arity(name: &str) -> Option<(usize, usize)> {
-    match name {
-        // The full Stage 3 set lives in `check_builtin`; this gate stays
-        // beside it so the two cannot disagree. `input` takes an
-        // optional prompt, so it is the only builtin with a range.
-        "len" => Some((1, 1)),
-        "push" => Some((2, 2)),
-        "input" => Some((0, 1)),
-        _ => None,
-    }
+    nx_ast::shape::builtin_arity(name)
 }
 
 impl Checker {
@@ -1190,7 +1183,7 @@ impl Checker {
                     self.methods.insert(key.clone(), info.clone());
                     let module = self.module_name.clone();
                     self.inferred.insert(
-                        (module, format!("{canon}.{}", m.name)),
+                        (module, nx_ast::shape::method_key(&canon, &m.name)),
                         FnInfo {
                             locals: fn_locals,
                             params: m.params.clone(),
@@ -1957,9 +1950,24 @@ pub fn infer_program(
     prog: &Program,
     base: &std::path::Path,
 ) -> Result<HashMap<(String, String), FnInfo>, Vec<CheckError>> {
+    infer_program_for(prog, base, "__main__")
+}
+
+/// `infer_program` for a named module. The backend calls this once per
+/// loaded module with its real name: the hardcoding it replaces filed
+/// every non-main module's inference under `("__main__", name)`, so a
+/// method call on a local inside an imported module missed dispatch and
+/// fell through to "only modules, types and builtins support attribute
+/// calls". `check_program` keeps its own hardcoding: it only ever runs
+/// on entry files, where `__main__` is correct.
+pub fn infer_program_for(
+    prog: &Program,
+    base: &std::path::Path,
+    module: &str,
+) -> Result<HashMap<(String, String), FnInfo>, Vec<CheckError>> {
     let mut c = Checker {
         base: base.to_path_buf(),
-        module_name: "__main__".to_string(),
+        module_name: module.to_string(),
         ..Default::default()
     };
     c.check_block(&prog.stmts);
@@ -1970,7 +1978,7 @@ pub fn infer_program(
     }
     let mut out = std::mem::take(&mut c.inferred);
     // Top-level code shares one flat scope across the module.
-    out.insert(("__main__".to_string(), "<top>".to_string()), FnInfo {
+    out.insert((module.to_string(), "<top>".to_string()), FnInfo {
         locals: c.vars.clone(),
         params: Vec::new(),
         ret: Ty::None,
@@ -2152,6 +2160,11 @@ mod tests {
         ok("xs = [1, 2]\ndel xs[0]\n");
         assert!(!err("s = \"ab\"\ndel s[0]\n").is_empty());
         assert!(!err("del never_defined\n").is_empty());
+        // `del` on a name unbinds it, so any later use is undefined --
+        // which is what makes the runtime's rebind-to-None unobservable:
+        // no checked program can read the slot afterwards.
+        ok("x = 1\ndel x\n");
+        assert!(!err("x = 1\ndel x\nprint(x)\n").is_empty());
     }
 
     /// A push into a `List(?)` pins the element type, so a list built by
@@ -2339,6 +2352,19 @@ mod tests {
         let tokens = nx_lexer::lex(src).unwrap();
         let prog = nx_parser::parse(tokens).unwrap();
         infer_program(&prog, std::path::Path::new(".")).unwrap()
+    }
+
+    #[test]
+    fn infer_program_for_keys_by_module() {
+        // The backend asks once per loaded module: inference for `utils`
+        // must file under `utils`, not `__main__`, or method calls on
+        // locals inside imported modules miss dispatch.
+        let tokens = nx_lexer::lex("fn f(n):\n    return n\n").unwrap();
+        let prog = nx_parser::parse(tokens).unwrap();
+        let m = infer_program_for(&prog, std::path::Path::new("."), "utils").unwrap();
+        assert!(m.contains_key(&("utils".into(), "f".into())));
+        assert!(m.contains_key(&("utils".into(), "<top>".into())));
+        assert!(!m.keys().any(|(md, _)| md == "__main__"));
     }
 
     #[test]

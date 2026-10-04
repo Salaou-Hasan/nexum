@@ -534,6 +534,39 @@ print(q.p.nope())",
 }
 
 #[test]
+fn a_method_call_inside_an_imported_module_resolves() {
+    // Inference used to file every module under `__main__`, so a method
+    // call on a local inside an imported module missed `ty_dispatch` and
+    // fell through to "only modules, types and builtins support
+    // attribute calls". The fixture is a method call on a local of the
+    // imported module -- nothing else reaches the broken lookup.
+    let s = nx_e2e::Scratch::new("imported-method");
+    s.write(
+        "utils.nx",
+        "type P:
+    x: Int
+impl P:
+    fn doubled(self):
+        return self.x * 2
+fn use_it(v):
+    p = P(v)
+    return p.doubled()
+",
+    );
+    let entry = "import utils\nprint(utils.use_it(21))\n";
+    for nounbox in [false, true] {
+        let o = nx_e2e::run_in_dir(entry, nounbox, &s.dir);
+        assert_eq!(
+            o.lines(),
+            vec!["42".to_string()],
+            "\n  nounbox={nounbox} printed {:?}",
+            o.out
+        );
+        assert_eq!(o.code, 0, "nounbox={nounbox} exited {}", o.code);
+    }
+}
+
+#[test]
 fn methods_resolve_on_a_record_held_in_a_list() {
     // The list pins the element type, so the loop variable is a statically
     // known record and its methods resolve.

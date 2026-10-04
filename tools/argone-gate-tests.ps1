@@ -59,8 +59,18 @@ try {
     Expect "honest state is blocked" $true "ARGONE NOT COMPLETE"
 
     # 2. Scaffolding: claim a task complete with nothing checked off.
-    Set-Status ($original -replace '(?m)^(## A - Full architecture audit\r?\n\r?\nStatus: )not started', '${1}complete')
-    Expect "scaffolding cannot claim complete" $true "claims complete but"
+    # The target is the first task that is still open, so this keeps
+    # working as tasks genuinely complete (a fixed task letter would rot
+    # the day that task finishes).
+    $open = [regex]::Match($original, '(?m)^## (?:Task 0|[A-N]) - .*\r?\n\r?\nStatus: not started')
+    if (-not $open.Success) {
+        Write-Host "  FAIL  scaffolding cannot claim complete"
+        Write-Host "        no open task left to scaffold; the suite needs a live target"
+        $script:fails++
+    } else {
+        Set-Status ($original.Replace($open.Value, $open.Value.Replace('not started', 'complete')))
+        Expect "scaffolding cannot claim complete" $true "claims complete but"
+    }
 
     # 3. A partial status word.
     Set-Status ($original -replace '(?m)^Status: not started', 'Status: in progress')
@@ -85,8 +95,13 @@ try {
     Set-Status $noEvidence
     Expect "all-ticked without evidence is blocked" $true "Evidence"
 
-    # 5. One task genuinely complete: still blocked, because 14 remain.
-    #    This is the check that stops "one task done" reading as "done".
+    # 5. One task genuinely complete: still blocked, because the rest
+    #    are not. This is the check that stops "one task done" reading
+    #    as "done". The expected count derives from the honest state
+    #    (tasks already complete stay complete), so it keeps working as
+    #    the stage advances. B is hardcoded below: retarget this test
+    #    the day B genuinely completes.
+    $baseDone = ([regex]::Matches($original, '(?m)^Status: complete')).Count
     $oneDone = $original
     $oneDone = $oneDone -replace '(?m)^(## B - Baselines\r?\n\r?\nStatus: )not started', '${1}complete'
     $oneDone = $oneDone -replace '(?m)^- \[ \] Every benchmark category', '- [x] Every benchmark category'
@@ -95,7 +110,7 @@ try {
     $oneDone = $oneDone -replace '(?m)^- \[ \] Noise characterised', '- [x] Noise characterised'
     $oneDone = $oneDone -replace '(?m)^[ ]*Evidence:[ ]*$', '      Evidence: commit def5678'
     Set-Status $oneDone
-    Expect "one task done does not open the gate" $true "tasks complete: 1 / 15"
+    Expect "one task done does not open the gate" $true "tasks complete: $($baseDone + 1) / 15"
 
     # 6. A missing task must be noticed, not silently ignored.
     $missing = $original -replace '(?ms)^## N - .*$', ''
