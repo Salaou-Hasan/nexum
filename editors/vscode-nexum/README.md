@@ -36,8 +36,10 @@ nx setup --apply  # writes it (keeps a .bak backup)
 - `.nx` recognized as Nexum (no Python extension needed)
 - `#` comments, `"strings"`, `123` / `10.8`, keywords, `fn()` calls
 - `:` + Enter auto-indents on block openers only (`fn`, `type`, `impl`,
-  `if`/`elif`/`else`, `for`, `while`); blank lines belong to the block
-  above, Python-style, so guides and folding stop at scope boundaries
+  `if`/`elif`/`else`, `for`, `while`); Enter on a blank line keeps that
+  line's own indent instead of inheriting the block above, so leaving a
+  function no longer pulls you back inside it; blank lines fold with the
+  block above, so guides stop at scope boundaries
 - `()` `[]` `""` auto-close
 - Spaces, tabSize 4 (tabs still rejected by the `nx` lexer)
 - Error squiggles from `nx check`: on save, on tab switch, and on

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Editor: Enter on a blank line keeps that line's indent
+Pressing Enter on a blank line below a block used to land back inside
+the block: with no `onEnterRules` entry matching, VS Code falls back
+to a backward walk that skips blank lines, finds the nearest code
+line, and inherits *its* indent. A second `onEnterRules` entry now
+matches whitespace-only lines with `indentAction: none`, which keeps
+the blank line's own indent and bypasses the walk entirely -- outside
+a block you stay at column 0, inside a block you stay at block level,
+and block openers still indent as before. Proven with
+`tools/enter-indent-sim.ps1`, which mirrors VS Code's Enter pipeline
+and fails 3 of 5 cases on the old config.
+
 ## v0.4.2
 
 ### Editor: Python-like indentation and error squiggles

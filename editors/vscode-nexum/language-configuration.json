@@ -30,6 +30,10 @@
         {
             "beforeText": "^\\s*(?:fn|type|impl|if|elif|else|for|while)\\b.*:\\s*(#.*)?$",
             "action": { "indentAction": "indent" }
+        },
+        {
+            "beforeText": "^\\s*$",
+            "action": { "indentAction": "none" }
         }
     ]
 }
