@@ -1,6 +1,37 @@
 # Changelog
 
-## Unreleased
+## v0.4.3
+
+### Error highlighter: one root cause, not sixteen squiggles
+A file importing itself (`import test` inside `test.nx`) produced 16
+diagnostics -- the file was checked once per nesting level with
+different bindings, so contradictory pairs ("undefined variable 'do'"
+*and* "module 'test' has no member 'double'") and exact duplicates
+piled onto one root cause. The checker now treats a module that fails
+to load (circular, missing, unparseable, or checked with errors) as a
+failed load: the load error stands alone, every requested name binds
+`Unknown` silently, repeat imports short-circuit without re-running
+the submodule check, and a poisoned receiver stays silent at method
+calls while a merely-dynamic one still errors by the Stage 4 rule.
+The same program now reports exactly the two root errors. Pinned by
+three checker tests (exact error lists, plus guards that healthy
+modules and dynamic receivers still error); the extension additionally
+collapses identical diagnostics client-side.
+
+### CI: two red checks fixed, both harness-level
+- `test (windows)`: `one_example_still_matches_its_snapshot` failed
+  only on Windows CI because the committed snapshot checks out CRLF
+  there (core.autocrlf) while the dump always emits `\n`; every LF
+  checkout stayed green, which is why it never reproduced locally.
+  Reproduced here by converting both files to CRLF, then fixed by
+  comparing line-ending-insensitively in `dump_stability.rs` (the
+  lexer already normalizes endings, so spans are unaffected).
+- `native (ubuntu)` memcheck: valgrind never ran -- the installed
+  valgrind rejects `--errors-for-leaks=no` ("Unknown option") and
+  died before touching any example, which read as rc=1 on the first
+  example. Replaced with `--leak-check=no`, which expresses the same
+  documented intent (NX never frees by design) on every valgrind.
+  Whether Task 0's last box closes now depends on the next green run.
 
 ### Editor: Enter on a blank line keeps that line's indent
 Pressing Enter on a blank line below a block used to land back inside

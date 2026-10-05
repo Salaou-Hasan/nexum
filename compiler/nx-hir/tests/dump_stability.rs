@@ -85,6 +85,12 @@ fn one_example_still_matches_its_snapshot() {
         .join("control.hir.txt");
     let expected = std::fs::read_to_string(&snapshot)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", snapshot.display()));
+    // The snapshot is committed LF but checks out CRLF on Windows
+    // (core.autocrlf); the dump always uses `\n`, and spans are
+    // line:col numbers either way, so compare line-ending-insensitively
+    // rather than byte-wise. This exact mismatch failed CI's Windows
+    // job while every LF checkout stayed green.
+    let expected = expected.replace("\r\n", "\n");
     assert_eq!(
         dump_of(&example),
         expected,

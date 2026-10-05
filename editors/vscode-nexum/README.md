@@ -23,8 +23,8 @@ nx setup --apply  # writes it (keeps a .bak backup)
 
 ### A. Copy into extensions (simplest)
 1. Close VS Code.
-2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.2`
-   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.2\package.json`).
+2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.3`
+   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.3\package.json`).
 3. Reopen VS Code on `C:\nexum`. Open any `.nx` file — bottom-right should say **Nexum**.
 
 ### B. Debug once (no copy)
@@ -48,4 +48,4 @@ nx setup --apply  # writes it (keeps a .bak backup)
   save hook off)
 
 ## Uninstall / update
-Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.2` and repeat A.
+Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.3` and repeat A.

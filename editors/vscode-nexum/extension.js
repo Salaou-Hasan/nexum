@@ -20,9 +20,13 @@ const OUTPUT_LINE =
  * Parse `nx check` output into zero-based { line, col, message } hits.
  * Lines that do not match are ignored: the compiler also prints status
  * lines (`nx: no type errors`, build chatter) that carry no position.
+ * Identical hits collapse to one: the checker reports root causes, but
+ * nothing here should ever double-underline the same span for the same
+ * reason even if a future checker change reintroduces a duplicate.
  */
 function parseNxDiagnostics(output) {
     const hits = [];
+    const seen = new Set();
     for (const raw of String(output).split(/\r?\n/)) {
         const m = OUTPUT_LINE.exec(raw.trim());
         if (!m) {
@@ -33,6 +37,11 @@ function parseNxDiagnostics(output) {
         if (!Number.isFinite(line) || !Number.isFinite(col) || line < 1 || col < 1) {
             continue;
         }
+        const key = `${m[1]}@${line}:${col}:${m[4].trim()}`;
+        if (seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
         hits.push({ kind: m[1], line: line - 1, col: col - 1, message: m[4].trim() });
     }
     return hits;

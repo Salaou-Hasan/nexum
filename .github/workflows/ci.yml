@@ -185,8 +185,15 @@ jobs:
             safe="$(echo "$f" | tr '/.' '__')"
             cargo run -q -p nx-driver -- build "$f" -o "mc-$safe"
             rc=0
+            # --leak-check=no (not --errors-for-leaks=no: the valgrind
+            # that apt installs here rejects that spelling outright and
+            # dies with "Unknown option" before running anything, which
+            # failed this step on every run while looking like a program
+            # failure). NX never frees by design either way, so leaks are
+            # excluded and only invalid reads/writes, bad frees and
+            # uninit-dependent branches fail the gate.
             valgrind --tool=memcheck --error-exitcode=42 \
-              --errors-for-leaks=no --track-origins=yes \
+              --leak-check=no --track-origins=yes \
               "./mc-$safe" > mc-out.txt 2> mc-err.txt || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "MEMCHECK FAILED $f (rc=$rc)"

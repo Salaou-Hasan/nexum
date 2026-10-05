@@ -6,7 +6,7 @@
 //! - Function params start Unknown; bodies must return consistently.
 //! - `import`/`from` are followed into files; members are checked.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use nx_ast::{BinOp, Expr, Program, Span, Stmt, Target, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -133,6 +133,20 @@ struct Checker {
     funcs: HashMap<String, (Vec<Ty>, Ty)>,
     modules: HashMap<String, ModInfo>,
     loading: Vec<String>,
+    /// Modules that failed to load (circular, missing, unparseable, or
+    /// checked with errors). A repeat import returns false silently:
+    /// the root error is already reported, and re-running the submodule
+    /// check would duplicate its diagnostics.
+    failed_modules: HashSet<String>,
+    /// Names bound from a failed module load. They hold Unknown, and
+    /// every value position accepts Unknown silently -- except an
+    /// attribute *call* (`x.m(...)`), which errors by the Stage 4 rule
+    /// below. The carve-out there consults this set so a poisoned
+    /// receiver stays silent while a merely-dynamic one still errors.
+    /// Membership implies nothing once rebound: the carve-out also
+    /// requires the current type to still be Unknown, so `del` and
+    /// reassignment need no invalidation tracking.
+    poisoned_names: HashSet<String>,
     base: std::path::PathBuf,
     errors: Vec<CheckError>,
     in_function: bool,
@@ -229,6 +243,24 @@ impl Checker {
         loop {
             match cur {
                 Expr::Var(n, _) => return n == sname,
+                Expr::Index { base, .. } | Expr::Attr { base, .. } => cur = base,
+                _ => return false,
+            }
+        }
+    }
+
+    /// Whether a receiver still holds the Unknown it was poisoned with:
+    /// bound from a failed import and never rebound since. `del` and
+    /// reassignment change the type (or unbind it), so no invalidation
+    /// tracking is needed -- a rebound name simply stops qualifying.
+    fn poisoned_unknown(&self, e: &Expr) -> bool {
+        let mut cur = e;
+        loop {
+            match cur {
+                Expr::Var(n, _) => {
+                    return self.poisoned_names.contains(n)
+                        && self.vars.get(n) == Some(&Ty::Unknown);
+                }
                 Expr::Index { base, .. } | Expr::Attr { base, .. } => cur = base,
                 _ => return false,
             }
@@ -1276,10 +1308,32 @@ impl Checker {
                     }
 
                     self.vars.insert(bind, Ty::Module(module.clone()));
+                } else {
+                    // The load error is already reported; bind the name
+                    // to Unknown so uses stay silent instead of piling
+                    // "undefined variable" cascades onto the root cause.
+                    // Plain insert, not define(): poisoning must never
+                    // itself error, whatever was bound before.
+                    let bind = alias.clone().unwrap_or_else(|| module.clone());
+                    self.vars.insert(bind.clone(), Ty::Unknown);
+                    self.poisoned_names.insert(bind);
                 }
             }
             Stmt::FromImport { module, names, span } => {
                 if !self.check_module(module, *span) {
+                    // Same story as a failed `import`: the load error
+                    // stands alone, and every requested name goes quiet
+                    // in value position (constructor and associated calls
+                    // included: an unbound callee checks as Unknown, and
+                    // the poisoned carve-out covers the rest). Layouts
+                    // are not faked -- `records` stays untouched, so
+                    // `impl T` on a failed import keeps today's error
+                    // rather than methods landing on a phantom layout.
+                    for (name, alias) in names {
+                        let bind = alias.clone().unwrap_or_else(|| name.clone());
+                        self.vars.insert(bind.clone(), Ty::Unknown);
+                        self.poisoned_names.insert(bind);
+                    }
                     return;
                 }
                 let info = self.modules.get(module).cloned().unwrap_or_default();
@@ -1323,14 +1377,22 @@ impl Checker {
         if self.modules.contains_key(name) {
             return true;
         }
+        // Already failed once: the root error is reported, so a repeat
+        // import stays silent instead of re-running the submodule check
+        // and duplicating its diagnostics.
+        if self.failed_modules.contains(name) {
+            return false;
+        }
         if self.loading.contains(&name.to_string()) {
             self.err(span, format!("circular import of '{name}'"));
+            self.failed_modules.insert(name.to_string());
             return false;
         }
         let path = match nx_ast::shape::resolve_module_file(&[self.base.clone()], name) {
             Some(p) => p,
             None => {
                 self.err(span, format!("cannot find module '{name}.nx'"));
+                self.failed_modules.insert(name.to_string());
                 return false;
             }
         };
@@ -1347,6 +1409,7 @@ impl Checker {
             Some(v) => v,
             None => {
                 self.err(span, format!("cannot parse module '{name}'"));
+                self.failed_modules.insert(name.to_string());
                 return false;
             }
         };
@@ -1360,11 +1423,26 @@ impl Checker {
         let saved_base = std::mem::replace(&mut self.base, dir);
         let saved_module = std::mem::replace(&mut self.module_name, name.to_string());
         self.loading.push(name.to_string());
+        let nerr = self.errors.len();
         self.check_block(&prog.stmts);
         self.loading.pop();
         // Unknown field-type names are reported now that the whole module
         // has been seen: a field may name a record declared later.
         self.validate_records();
+        // A module that does not check clean is a failed load, even
+        // though its exports were harvested: the importer binds
+        // Unknowns and stays silent, so only the module's own errors
+        // are reported instead of a second cascade at every use site.
+        // The summary names the import at fault -- without it, a broken
+        // dependency surfaces only as spans inside another file, which
+        // no filename in the diagnostic can attribute. Repeat imports
+        // hit `failed_modules` above and stay silent.
+        // (`nx build` already requires a clean check, so nothing that
+        // compiled before stops compiling.)
+        if self.errors.len() != nerr {
+            self.err(span, format!("module '{name}' has errors"));
+            self.failed_modules.insert(name.to_string());
+        }
         let info = ModInfo {
             vars: std::mem::replace(&mut self.vars, saved_vars),
             funcs: std::mem::replace(&mut self.funcs, saved_funcs),
@@ -1379,6 +1457,12 @@ impl Checker {
         );
         self.base = saved_base;
         self.module_name = saved_module;
+        // No entry for a failed module: a partial export table invites
+        // "has no member" lookups from paths that consult `modules`
+        // directly, which is exactly the cascade this suppression ends.
+        if self.failed_modules.contains(name) {
+            return false;
+        }
         self.modules.insert(name.to_string(), info);
         true
     }
@@ -1882,6 +1966,15 @@ impl Checker {
                         return self.check_builtin(attr, &sugared, *span);
                     }
                     if matches!(bt, Ty::Unknown) {
+                        // A receiver poisoned by a failed import stays
+                        // silent: its load error stands alone, and piling
+                        // a resolution error on top would bury the root
+                        // cause under a contradiction. Anything else
+                        // unresolved still errors -- dynamic dispatch
+                        // arrives in Stage 4.
+                        if self.poisoned_unknown(base) {
+                            return Ty::Unknown;
+                        }
                         self.err(
                             *span,
                             format!("cannot resolve method '{attr}' on unresolved value (dynamic dispatch arrives in Stage 4)"),
@@ -2030,6 +2123,8 @@ impl Default for Checker {
             funcs: HashMap::new(),
             modules: HashMap::new(),
             loading: Vec::new(),
+            failed_modules: HashSet::new(),
+            poisoned_names: HashSet::new(),
             base: ".".into(),
             errors: Vec::new(),
             in_function: false,
@@ -2681,7 +2776,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `xs.push(1)` is sugar for `push(xs, 1)`, so an element type pinned
+    /// A module that fails to load reports once, at the import, and
+    /// every name it was asked for goes quiet: the load error stands
+    /// alone instead of dragging an "undefined variable" cascade behind
+    /// it. Sixteen diagnostics for one self-import used to be the norm;
+    /// this test pins the exact list so the cascade cannot creep back.
+    #[test]
+    fn failed_import_reports_once_and_poisoned_uses_stay_silent() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nx_failed_import_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file importing itself: the load fails circularly, and every
+        // use below would cascade without the suppression.
+        std::fs::write(
+            dir.join("test.nx"),
+            "import test\nfrom test import double as do, greet as hello\n\nprint(test.VERSION)\nprint(do(21))\nprint(do(4))\nprint(hello(\"Ada\"))\n\nfor i in 0..3:\n    print(test.double(i))\n",
+        )
+        .unwrap();
+        let src = std::fs::read_to_string(dir.join("test.nx")).unwrap();
+        let toks = nx_lexer::lex(&src).unwrap();
+        let prog = nx_parser::parse(toks).unwrap();
+        let es = check_program(&prog, &dir).unwrap_err();
+        let got: Vec<String> =
+            es.iter().map(|e| format!("{}:{}: {}", e.line, e.col, e.message)).collect();
+        assert_eq!(
+            got,
+            vec![
+                "1:1: circular import of 'test'".to_string(),
+                "1:1: module 'test' has errors".to_string(),
+            ],
+            "a failed import must report its root causes and nothing else, got {got:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing module behaves the same way: one load error, and the
+    /// names it would have provided check as Unknown instead of
+    /// erroring again at every use.
+    #[test]
+    fn missing_module_reports_once_and_poisoned_uses_stay_silent() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ2: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ2.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nx_missing_import_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = "import nosuchmodule\nfrom nosuchmodule import thing\nprint(nosuchmodule.f())\nprint(thing(1))\n";
+        let toks = nx_lexer::lex(src).unwrap();
+        let prog = nx_parser::parse(toks).unwrap();
+        let es = check_program(&prog, &dir).unwrap_err();
+        let got: Vec<String> =
+            es.iter().map(|e| format!("{}:{}: {}", e.line, e.col, e.message)).collect();
+        assert_eq!(
+            got,
+            vec!["1:1: cannot find module 'nosuchmodule.nx'".to_string()],
+            "a missing module must report once, got {got:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The suppression is scoped to failed loads: a module that loads
+    /// fine but lacks a member still errors, and a dynamic (merely
+    /// unknown) receiver still errors by the Stage 4 rule. Each guard
+    /// below would go quiet if the poison leaked past its boundary.
+    #[test]
+    fn healthy_modules_and_dynamic_receivers_still_error() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ3: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ3.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("nx_import_guards_{}_{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("utils.nx"), "VERSION = \"1.0\"\n").unwrap();
+        // A member that is genuinely missing is a real error, not a cascade.
+        let src = "from utils import nosuch\nprint(nosuch)\n";
+        let toks = nx_lexer::lex(src).unwrap();
+        let prog = nx_parser::parse(toks).unwrap();
+        let es = check_program(&prog, &dir).unwrap_err();
+        assert!(
+            es.iter().any(|e| e.message.contains("has no member 'nosuch'")),
+            "a missing member of a healthy module must still error, got {es:?}"
+        );
+        // So is a method call on a merely-dynamic receiver (Stage 4 rule).
+        let es = err("fn f(q):\n    return q.m()\n");
+        assert!(
+            es.iter().any(|e| e.message.contains("dynamic dispatch")),
+            "a dynamic receiver must still error, got {es:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     /// by one spelling is pinned by the other -- and a mismatch is caught
     /// through the sugar exactly as it is through the direct call.
     #[test]
