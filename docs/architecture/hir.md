@@ -131,7 +131,7 @@ single owner each defers to:
 | Construction `T(..)` | — (type_id + arity) | exact arity, checked | declaration |
 | Field read/write | — (`FieldIdx`) | constant offset | declaration |
 | Method call | `MethodId` + writeback flag | receiver included; `mut self` writes back iff the receiver has storage (decided in lowering via the shared storage predicate) | resolution order (§4.4 of the grammar) |
-| Builtin call | `Len \| Push \| Input` | arity checked | ambient surface |
+| Builtin call | `Len \| Push \| Input \| ToInt \| ToFloat` | arity checked | ambient surface |
 | Ternary | — (join type) | `then`/`else` join | checker |
 | `and` / `or` | — | short-circuit | structure (MIR builds the diamond) |
 
@@ -306,7 +306,14 @@ lowering and the verifier already enforce the backend's half:
   the existing `ty_dispatch` discipline survives verbatim).
 - The `Trap` proof test (§4) is the template: for each rule, a test
   that constructs the HIR decision directly and asserts the backend
-  honors it without re-deriving the inputs.
+  honors it without re-deriving the inputs. The arithmetic instance
+  already exists: `arith_plan` in `nx-hir` (rule plus operator in,
+  emission out, no operand types anywhere in the signature),
+  `emit_arith` in `nx-codegen` (the only consulted table on the scalar
+  path), `arith_plan` table tests in `nx-hir`, and the Trap proof test
+  in `nx-codegen` (lowered `Trap` counts versus emitted checked
+  intrinsics, plus a float control). Task G's wiring is the one-line
+  derivation site marked in `emit_scalar_binop`, not a new decision.
 
 ## 11. Extension points (present, empty)
 

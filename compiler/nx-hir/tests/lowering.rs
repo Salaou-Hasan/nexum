@@ -421,6 +421,32 @@ fn builtin_sugar_becomes_the_direct_call() {
 }
 
 #[test]
+fn int_and_float_lower_to_conversion_builtins() {
+    // The checker owns which types arrive; lowering only records the
+    // operation and its answer type.
+    let p = top("print(int(\"42\"))\nprint(float(2))\n");
+    let body = top_body(&p);
+    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    match &values[0].kind {
+        HExprKind::Builtin { op, args } => {
+            assert_eq!(*op, BuiltinOp::ToInt);
+            assert_eq!(args.len(), 1);
+        }
+        other => panic!("expected a builtin, got {other:?}"),
+    }
+    assert_eq!(values[0].ty, HTy::Int);
+    let HStmtKind::Print { values } = &body[1].kind else { panic!("expected a print") };
+    match &values[0].kind {
+        HExprKind::Builtin { op, args } => {
+            assert_eq!(*op, BuiltinOp::ToFloat);
+            assert_eq!(args.len(), 1);
+        }
+        other => panic!("expected a builtin, got {other:?}"),
+    }
+    assert_eq!(values[0].ty, HTy::Float);
+}
+
+#[test]
 fn a_field_of_a_known_record_is_a_constant_offset() {
     let p = top("type P:\n    x: Int\n    y: Int\nq = P(1, 2)\nprint(q.y)");
     let body = top_body(&p);

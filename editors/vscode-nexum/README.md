@@ -23,8 +23,8 @@ nx setup --apply  # writes it (keeps a .bak backup)
 
 ### A. Copy into extensions (simplest)
 1. Close VS Code.
-2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.1`
-   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.0.1\package.json`).
+2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.2`
+   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.2\package.json`).
 3. Reopen VS Code on `C:\nexum`. Open any `.nx` file — bottom-right should say **Nexum**.
 
 ### B. Debug once (no copy)
@@ -35,9 +35,15 @@ nx setup --apply  # writes it (keeps a .bak backup)
 ## What you get
 - `.nx` recognized as Nexum (no Python extension needed)
 - `#` comments, `"strings"`, `123` / `10.8`, keywords, `fn()` calls
-- `:` + Enter auto-indents; `elif:` / `else:` dedent-then-indent
+- `:` + Enter auto-indents on block openers only (`fn`, `type`, `impl`,
+  `if`/`elif`/`else`, `for`, `while`); blank lines belong to the block
+  above, Python-style, so guides and folding stop at scope boundaries
 - `()` `[]` `""` auto-close
 - Spaces, tabSize 4 (tabs still rejected by the `nx` lexer)
+- Error squiggles from `nx check`: on save, on tab switch, and on
+  demand via **Nexum: Check current file** (needs `nx` on `PATH`;
+  `nexum.executablePath` overrides it, `nexum.checkOnSave` turns the
+  save hook off)
 
 ## Uninstall / update
-Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.1` and repeat A.
+Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.2` and repeat A.

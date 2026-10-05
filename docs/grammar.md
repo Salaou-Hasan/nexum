@@ -628,12 +628,14 @@ and `in` all count the same characters -- rule R3 in section 3.1.1.
 
 ### 4.3 Ambient builtins
 
-Three, and they need no import:
+Five, and they need no import:
 
 ```text
 len(x)          -- list, string or dict length  -> Int
 push(xs, v)     -- append to a list            -> None
 input(prompt?)  -- read a line from stdin      -> Str
+int(x)          -- convert to Int               -> Int
+float(x)        -- convert to Float             -> Float
 ```
 
 Both also have method-call sugar, resolved *after* methods so a type may
@@ -650,14 +652,28 @@ first `push` into an empty list pins the element type, and a later
 mismatch is an error.
 
 `input()` reads one line from stdin and answers it without the trailing
-newline. `input(prompt)` prints the prompt verbatim first -- no trailing
+newline. `input(prompt)` prints the prompt first -- no trailing
 newline -- and flushes, so the prompt is visible before the read blocks.
 A carriage return before the newline is stripped too, so a CRLF pipe
-reads the same as a terminal line. The prompt must be a `Str`. EOF with
+reads the same as a terminal line. The prompt prints the way `print`
+prints a value, so `Str`, `Int` and `Float` prompts all work; anything
+else is a type error. The answer is always a `Str`: `int(input())`
+parses one. EOF with
 no characters read is a **runtime** error ("unexpected end of input"): NX
 has no exceptions to catch it with, and an empty string would read as a
 value. A function calling `input()` is never memoized: stdin is external
 state, so the answer never depends on the arguments alone.
+
+`int(x)` converts one value to `Int`: an `Int` is the identity, a
+`Float` truncates toward zero, and a `Str` must be integer syntax --
+optional sign, ASCII digits, surrounding blanks allowed -- parsed at
+runtime. `float(x)` converts one value to `Float`: an `Int` widens, a
+`Float` is the identity, and a `Str` must be decimal syntax (parsed the
+way the runtime reads it: no hex, no infinities, no NaN, since NX has
+none of those). Anything else is a type error; a well-typed value that
+still does not parse -- `int("abc")`, `float("1e9999")`, `int(2.5e18)`
+-- is a **runtime** error naming the value. Conversions are pure, so
+unlike `input()` they memoize normally.
 
 The minimal stdlib — string, conversion, and the fuller list and dict
 surfaces — is Stage 3 work in progress, not yet present. Do not write
@@ -711,7 +727,9 @@ Errors the checker reports, collected so the surface is legible:
 | Negative exponent on an `Int` base; zero or negative slice step | **runtime** error |
 | `Int` overflow in `+`, `-`, `*`, `//`, `%`; `//` or `%` by zero | **runtime** error (section 3.1.1, R1) |
 | `input()` at end of input | **runtime** error ("unexpected end of input") |
-| `input()` with two arguments, or a non-`Str` prompt | type error |
+| `input()` with two arguments, or a non-`Str`/`Int`/`Float` prompt | type error |
+| `int()`/`float()` on a non-numeric type, or with the wrong arity | type error |
+| `int()`/`float()` on a string outside numeric syntax, or a value that does not fit | **runtime** error (names the value) |
 
 ---
 

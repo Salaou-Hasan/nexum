@@ -807,6 +807,7 @@ impl<'a> Verifier<'a> {
                     BuiltinOp::Len => vec![1],
                     BuiltinOp::Push => vec![2],
                     BuiltinOp::Input => vec![0, 1],
+                    BuiltinOp::ToInt | BuiltinOp::ToFloat => vec![1],
                 };
                 if !want.contains(&args.len()) {
                     self.err("V2", e.span, format!("builtin takes {} args, got {}", want.len(), args.len()));
@@ -833,6 +834,8 @@ impl<'a> Verifier<'a> {
                     BuiltinOp::Len => HTy::Int,
                     BuiltinOp::Push => HTy::None,
                     BuiltinOp::Input => HTy::Str,
+                    BuiltinOp::ToInt => HTy::Int,
+                    BuiltinOp::ToFloat => HTy::Float,
                 };
                 self.exact(e, ctx, ret);
             }

@@ -36,6 +36,12 @@ jobs:
         run: cargo run -q -p nx-driver -- check examples/hello.nx
       - name: type-check modules/main
         run: cargo run -q -p nx-driver -- check examples/modules/main.nx
+      # The VS Code extension host is dependency-free plain Node, so this
+      # is a syntax check rather than a test run: it keeps a broken
+      # extension.js from reaching the vsix the release job packages.
+      # GitHub-hosted runners ship node on all three OSs; no setup step.
+      - name: syntax-check the VS Code extension host
+        run: node --check editors/vscode-nexum/extension.js
       # `nx <file.nx>` compiles to a native executable and runs it; there is
       # no interpreter left to agree with, so these are smoke tests only --
       # they prove the end-to-end path works on each OS. Every example is

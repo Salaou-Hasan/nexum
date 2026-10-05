@@ -551,8 +551,9 @@ impl Checker {
             }
             "input" => {
                 // `input()` reads a line from stdin; `input(prompt)`
-                // prints the prompt verbatim first. The prompt must be a
-                // string, and the answer always is one.
+                // prints the prompt first. The prompt prints the way
+                // `print` prints a value, so Str, Int and Float all work;
+                // The answer is always a Str: `int(input())` parses one.
                 if args.len() > 1 {
                     self.err(
                         span,
@@ -562,11 +563,42 @@ impl Checker {
                 }
                 if let Some(p) = args.first() {
                     let pt = self.check_expr(p);
-                    if !matches!(pt, Ty::Str | Ty::Unknown) {
-                        self.err(span, format!("input() prompt must be Str, found {pt}"));
+                    if !matches!(pt, Ty::Str | Ty::Int | Ty::Float | Ty::Unknown) {
+                        self.err(span, format!("input() prompt must be Str, Int or Float, found {pt}"));
                     }
                 }
                 Ty::Str
+            }
+            "int" => {
+                // `int(x)` converts to Int. Int is the identity; Float
+                // truncates toward zero (what the backend's fptosi does);
+                // Str must be integer syntax (optional sign, digits) and
+                // is parsed at runtime, so a bad string is a runtime
+                // error, not a type error. Bool has no numeric reading
+                // worth blessing, so it is rejected outright.
+                if args.len() != 1 {
+                    self.err(span, format!("int() expects 1 argument, got {}", args.len()));
+                    return Ty::Unknown;
+                }
+                let t = self.check_expr(&args[0]);
+                if !matches!(t, Ty::Int | Ty::Float | Ty::Str | Ty::Unknown) {
+                    self.err(span, format!("int() needs Int, Float or Str, found {t}"));
+                }
+                Ty::Int
+            }
+            "float" => {
+                // `float(x)` converts to Float. Int widens; Float is the
+                // identity; Str must be decimal syntax and is parsed at
+                // runtime. Anything else is rejected like `int`.
+                if args.len() != 1 {
+                    self.err(span, format!("float() expects 1 argument, got {}", args.len()));
+                    return Ty::Unknown;
+                }
+                let t = self.check_expr(&args[0]);
+                if !matches!(t, Ty::Int | Ty::Float | Ty::Str | Ty::Unknown) {
+                    self.err(span, format!("float() needs Int, Float or Str, found {t}"));
+                }
+                Ty::Float
             }
             _ => {
                 self.err(span, format!("unknown builtin '{name}'"));
@@ -2315,13 +2347,39 @@ mod tests {
 
     #[test]
     fn input_checked() {
-        // No prompt and a string prompt both answer Str.
+        // No prompt, a string prompt and a numeric prompt all answer
+        // Str. Only the count is still capped.
         ok("name = input()\nprint(name)\n");
         ok("name = input(\"who: \")\nprint(name)\n");
+        ok("n = input(5)\nprint(n)\n");
+        ok("n = input(2.5)\nprint(n)\n");
         assert!(!err("x = input(1, 2)\n").is_empty());
-        assert!(!err("x = input(5)\n").is_empty());
+        assert!(!err("x = input(true)\n").is_empty());
         let m = infer("x = input()\n");
         assert_eq!(m[&("__main__".into(), "<top>".into())].locals["x"], Ty::Str);
+    }
+
+    #[test]
+    fn int_float_conversion_checked() {
+        // Identity, truncation source and string source all answer the
+        // target type; anything else is rejected at check time, while a
+        // bad string fails at runtime (tested natively).
+        ok("a = int(1)\nprint(a)\n");
+        ok("a = int(1.9)\nprint(a)\n");
+        ok("a = int(\"-7\")\nprint(a)\n");
+        ok("a = float(1)\nprint(a)\n");
+        ok("a = float(1.5)\nprint(a)\n");
+        ok("a = float(\"2.5\")\nprint(a)\n");
+        assert!(!err("a = int()\n").is_empty());
+        assert!(!err("a = int(1, 2)\n").is_empty());
+        assert!(!err("a = float()\n").is_empty());
+        assert!(!err("a = int(true)\n").is_empty());
+        assert!(!err("a = float([1])\n").is_empty());
+        assert!(!err("a = int(None)\n").is_empty());
+        let m = infer("a = int(\"3\")\nb = float(2)\n");
+        let top = &m[&("__main__".into(), "<top>".into())].locals;
+        assert_eq!(top["a"], Ty::Int);
+        assert_eq!(top["b"], Ty::Float);
     }
 
     #[test]

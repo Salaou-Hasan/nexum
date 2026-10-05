@@ -115,6 +115,91 @@ impl DiagInfo {
     }
 }
 
+/// What the backend emits for one arithmetic node, decided from the
+/// recorded rule alone.
+///
+/// This table is the whole of the backend's arithmetic knowledge. It
+/// takes no types, which is the point: a consumer cannot consult a type
+/// to override a rule, because there is no type here to consult. The
+/// `Trap` proof test in `nx-codegen` asserts that by feeding rules that
+/// disagree with the operand types and checking which one wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithPlan {
+    /// A checked 64-bit intrinsic plus the trap it raises on overflow.
+    Checked(&'static str),
+    /// A raw floating-point instruction.
+    FloatMnem(&'static str),
+    /// A runtime helper call on `i64`.
+    IntCall(&'static str),
+    /// A runtime helper call on `double`.
+    FloatCall(&'static str),
+    /// A raw integer bitwise instruction.
+    Bitwise(&'static str),
+    /// The rule is dynamic: no unboxed form exists, so the caller
+    /// dispatches on tags at runtime.
+    Dispatch,
+}
+
+/// The emission plan for `rule` on `op`.
+///
+/// Note what is *not* a parameter: the operand types. Whoever holds a
+/// rule holds the decision, and a consumer that wanted a different
+/// answer would have to disagree with HIR loudly rather than quietly
+/// recompute. `Dispatch` is the honest answer for a dynamic rule; every
+/// other arm is a definite instruction or helper.
+pub fn arith_plan(rule: BinRule, op: nx_ast::BinOp) -> ArithPlan {
+    // Fully qualified rather than glob-imported: `Float` and `Bitwise`
+    // each name both a `BinRule` variant and an `ArithPlan` variant.
+    use ArithPlan::{Bitwise as Plan, Checked, Dispatch, FloatCall, FloatMnem, IntCall};
+    use nx_ast::BinOp as Op;
+    match rule {
+        BinRule::Arith(ArithRule::Trap) => match op {
+            Op::Add => Checked("llvm.sadd.with.overflow.i64"),
+            Op::Sub => Checked("llvm.ssub.with.overflow.i64"),
+            Op::Mul => Checked("llvm.smul.with.overflow.i64"),
+            // Division and remainder keep the runtime's zero-divisor
+            // panic; there is no checked intrinsic for either.
+            Op::Div => IntCall("nx_div_i64"),
+            Op::FloorDiv => IntCall("nx_floordiv_i64"),
+            Op::Mod => IntCall("nx_mod_i64"),
+            _ => Dispatch,
+        },
+        // Float and PromoteFloat agree on the instruction: the promotion
+        // itself happens when the operands are coerced, which is the
+        // caller's job, and both rules then compute in double.
+        BinRule::Arith(ArithRule::Float) | BinRule::Arith(ArithRule::PromoteFloat) => match op {
+            Op::Add => FloatMnem("fadd"),
+            Op::Sub => FloatMnem("fsub"),
+            Op::Mul => FloatMnem("fmul"),
+            Op::Div => FloatCall("nx_fdiv"),
+            Op::Pow => FloatCall("nx_fpow"),
+            _ => Dispatch,
+        },
+        // R2: integer power saturates rather than wrapping, so it calls
+        // the runtime helper that does the saturating; there is no
+        // saturating intrinsic to inline.
+        BinRule::Pow(PowRule::Saturate) => match op {
+            Op::Pow => IntCall("nx_ipow"),
+            _ => Dispatch,
+        },
+        BinRule::Bitwise => match op {
+            Op::BitAnd => Plan("and"),
+            Op::BitOr => Plan("or"),
+            Op::BitXor => Plan("xor"),
+            _ => Dispatch,
+        },
+        // A dynamic rule: at least one operand is statically unknown, so
+        // there is no single instruction to emit.
+        BinRule::Arith(ArithRule::Dynamic) | BinRule::Pow(PowRule::Dynamic) | BinRule::Dynamic => {
+            Dispatch
+        }
+        // Unreachable through checked code: string concatenation has its
+        // own node. Answering `Dispatch` rather than panicking keeps a
+        // malformed node from taking the compiler down mid-emission.
+        BinRule::Concat => Dispatch,
+    }
+}
+
 /// Integer arithmetic rule (R1): trapping is the only defined behavior
 /// for `Int` operands. The backend emits the checked intrinsic on `Trap`
 /// unconditionally -- it never re-derives this from operand types.
@@ -258,12 +343,15 @@ pub enum DelRule {
 }
 
 /// Ambient builtins. Arity is checked in lowering; `Push` targets a
-/// place, `Input` takes an optional prompt.
+/// place, `Input` takes an optional prompt, `ToInt`/`ToFloat` convert
+/// one value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinOp {
     Len,
     Push,
     Input,
+    ToInt,
+    ToFloat,
 }
 
 /// Method receiver kind, carried through from the declaration.

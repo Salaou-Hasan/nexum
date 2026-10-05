@@ -73,14 +73,14 @@ Status: complete
 
 ## D - HIR
 
-Status: not started
+Status: complete
 
 - [x] All 13 examples lower; nx dump-hir stable enough to diff in tests
 - [x] Name-free: no source identifier survives outside diagnostics
 - [x] Every node typed; a test proves none is untyped
 - [x] Verifier rejects malformed HIR, one negative test per rule
-- [ ] At least integer overflow now lives in HIR, proven by a test that fails if the backend recomputes it
-      Evidence: new crate compiler/nx-hir (model/lower/verify/dump): slots params-first then first-bind order with self as slot 0, IDs in sorted-name order, ty: HTy mandatory on every expression, decided rules on every operator node (Trap/Saturate/Concat/Member/Index/Slice/Iter/Copy/Del) derived by calling nx-types::arith_result; String only in Str literals, HProgram::strings, DiagInfo (grep plus strip test); lowering verifies its own output before returning; nx dump-hir in nx-driver with snapshot compiler/nx-hir/tests/snapshots/control.hir.txt. Tests: 48 in nx-hir (28 lowering, 16 verifier negatives V1-V12, corpus-wide lower of all 42 shipped programs, dump-twice-identical plus snapshot); workspace suite green, verify.ps1 14/14, gate self-tests 10/10. Fifth box half open: lowering records Trap (proven), but the backend-honors proof needs task G since the backend still consumes the AST.
+- [x] At least integer overflow now lives in HIR, proven by a test that fails if the backend recomputes it
+      Evidence: new crate compiler/nx-hir (model/lower/verify/dump): slots params-first then first-bind order with self as slot 0, IDs in sorted-name order, ty: HTy mandatory on every expression, decided rules on every operator node (Trap/Saturate/Concat/Member/Index/Slice/Iter/Copy/Del) derived by calling nx-types::arith_result; String only in Str literals, HProgram::strings, DiagInfo (grep plus strip test); lowering verifies its own output before returning; nx dump-hir in nx-driver with snapshot compiler/nx-hir/tests/snapshots/control.hir.txt. Tests: 63 in nx-hir (29 lowering incl ToInt/ToFloat nodes, 16 verifier negatives V1-V12, 7 arith_plan table, corpus-wide lower of all 42 shipped programs, dump-twice-identical plus snapshot); workspace suite green, verify.ps1 14/14, gate self-tests 10/10. Fifth box: arith_plan in nx-hir (rule plus operator in, emission out, no operand types in the signature, so recomputation inside the table is unrepresentable), emit_arith in nx-codegen (the only consulted table on the scalar path; the remaining type-to-rule derivation is one marked site for task G), and trap_rule_drives_checked_emission in nx-codegen (lowered Trap counts versus emitted checked intrinsics per operator, plus a float control; verified red under a sabotaged plan).
 
 ## E - MIR / SSA
 

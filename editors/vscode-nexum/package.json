@@ -2,7 +2,7 @@
     "name": "vscode-nexum",
     "displayName": "Nexum",
     "description": "Nexum (.nx) language support: highlighting, indentation, brackets",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "publisher": "HasanSalaou",
     "license": "MIT",
     "icon": "icon.png",
@@ -16,6 +16,10 @@
     },
     "categories": [
         "Programming Languages"
+    ],
+    "main": "./extension.js",
+    "activationEvents": [
+        "onLanguage:nexum"
     ],
     "contributes": {
         "languages": [
@@ -39,6 +43,28 @@
                 "label": "Nexum Icons",
                 "path": "./fileicons/nexum-icons.json"
             }
-        ]
+        ],
+        "commands": [
+            {
+                "command": "nexum.check",
+                "title": "Nexum: Check current file",
+                "category": "Nexum"
+            }
+        ],
+        "configuration": {
+            "title": "Nexum",
+            "properties": {
+                "nexum.executablePath": {
+                    "type": "string",
+                    "default": "nx",
+                    "description": "Path to the nx compiler binary used for error checking."
+                },
+                "nexum.checkOnSave": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Run nx check on save and show errors as squiggles."
+                }
+            }
+        }
     }
 }

@@ -20,12 +20,15 @@
         ["\"", "\""]
     ],
     "indentationRules": {
-        "increaseIndentPattern": "^.*:\\s*(#.*)?$",
+        "increaseIndentPattern": "^\\s*(?:fn|type|impl|if|elif|else|for|while)\\b.*:\\s*(#.*)?$",
         "decreaseIndentPattern": "^\\s*(elif|else)\\b.*:\\s*(#.*)?$"
+    },
+    "folding": {
+        "offSide": true
     },
     "onEnterRules": [
         {
-            "beforeText": "^.*:\\s*(#.*)?$",
+            "beforeText": "^\\s*(?:fn|type|impl|if|elif|else|for|while)\\b.*:\\s*(#.*)?$",
             "action": { "indentAction": "indent" }
         }
     ]

@@ -1,6 +1,6 @@
 [package]
 name = "nx-codegen"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 license = "MIT"
 
@@ -15,3 +15,6 @@ nx-parser = { path = "../nx-parser" }
 nx-mem = { path = "../nx-mem" }
 nx-types = { path = "../nx-types" }
 nx-ir = { path = "../nx-ir" }
+# For the rule-driven arithmetic selector only (see `arith_plan`). HIR
+# does not depend on this crate, so the arrow points one way.
+nx-hir = { path = "../nx-hir" }

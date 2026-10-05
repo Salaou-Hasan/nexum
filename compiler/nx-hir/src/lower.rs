@@ -2114,13 +2114,16 @@ impl<'a> FnLower<'a> {
     }
 }
 
-/// The ambient builtin a name spells, or `Len` for a name the arity
-/// table accepted but this build does not implement (unreachable: the
-/// table and this match are the same list).
+/// The ambient builtin a name spells (`Len` only for the integer
+/// queries: every name the arity table accepts has its arm here, and
+/// the verifier's arity table agrees -- a missing arm would mistype,
+/// not misbehave).
 fn builtin_op(name: &str) -> BuiltinOp {
     match name {
         "push" => BuiltinOp::Push,
         "input" => BuiltinOp::Input,
+        "int" => BuiltinOp::ToInt,
+        "float" => BuiltinOp::ToFloat,
         _ => BuiltinOp::Len,
     }
 }
@@ -2131,5 +2134,7 @@ fn builtin_ret(op: BuiltinOp) -> HTy {
         BuiltinOp::Len => HTy::Int,
         BuiltinOp::Push => HTy::None,
         BuiltinOp::Input => HTy::Str,
+        BuiltinOp::ToInt => HTy::Int,
+        BuiltinOp::ToFloat => HTy::Float,
     }
 }

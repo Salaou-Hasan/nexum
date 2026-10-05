@@ -1079,7 +1079,85 @@ fn input_at_eof_is_a_runtime_error() {
 #[test]
 fn input_arity_and_prompt_type_are_checked() {
     assert_rejected("x = input(1, 2)\n", "input() expects at most 1 argument");
-    assert_rejected("x = input(5)\n", "input() prompt must be Str");
+    assert_rejected("x = input(true)\n", "input() prompt must be Str, Int or Float");
+}
+
+#[test]
+fn input_prints_int_and_float_prompts_like_print_does() {
+    // The prompt is a value like any other, so input(p) and print(p)
+    // cannot disagree about how it looks.
+    for nounbox in [false, true] {
+        let o = run_in_with_input("n = input(5)\nprint(n)\n", nounbox, "y\n");
+        assert_eq!(o.lines(), vec!["5y"], "nounbox={nounbox}: {:?}", o.out);
+        assert_eq!(o.code, 0);
+        let o = run_in_with_input("n = input(1.5)\nprint(n)\n", nounbox, "y\n");
+        assert_eq!(o.lines(), vec!["1.5y"], "nounbox={nounbox}: {:?}", o.out);
+        assert_eq!(o.code, 0);
+    }
+}
+
+#[test]
+fn int_conversion_truncates_floats_and_parses_strings() {
+    assert_output("print(int(3))\nprint(int(3.9))\nprint(int(-3.9))\nprint(int(\" -42 \"))\n", &["3", "3", "-3", "-42"]);
+}
+
+#[test]
+fn float_conversion_widens_ints_and_parses_strings() {
+    // R6: a Float prints like its literal, so float(2) prints "2" --
+    // the same thing the literal 2.0 prints. The conversion does not
+    // invent a decimal point the printer would not have written.
+    assert_output("print(float(2))\nprint(float(2.5))\nprint(float(\" -0.5 \"))\n", &["2", "2.5", "-0.5"]);
+}
+
+#[test]
+fn int_and_float_error_on_bad_strings_and_bad_types() {
+    let o = run_with_input("print(int(\"abc\"))\n", "");
+    assert_ne!(o.code, 0, "expected a failure, got {:?}", o.out);
+    assert!(o.out.contains("cannot parse 'abc' as Int"), "got {:?}", o.out);
+    let o = run_with_input("print(float(\"x\"))\n", "");
+    assert_ne!(o.code, 0, "expected a failure, got {:?}", o.out);
+    assert!(o.out.contains("cannot parse 'x' as Float"), "got {:?}", o.out);
+    let o = run_with_input("print(int(\"1.5\"))\n", "");
+    assert_ne!(o.code, 0, "expected a failure, got {:?}", o.out);
+    assert!(o.out.contains("cannot parse '1.5' as Int"), "got {:?}", o.out);
+    // The checker, not the runtime, owns the other failures.
+    assert_rejected("print(int(true))\n", "int() needs Int, Float or Str");
+    assert_rejected("print(float())\n", "float() expects 1 argument");
+}
+
+#[test]
+fn int_and_float_round_trip_through_input() {
+    both_ways_with_input(
+        "age = int(input(\"age: \"))\nprint(age + 1)\nprint(float(input()) * 2)\n",
+        "41\n2.5\n",
+        &["age: 42", "5"],
+    );
+}
+
+#[test]
+fn conversions_do_not_force_a_box_back_through_arithmetic() {
+    // The unboxed scalar path carries known scalars in registers. If
+    // int() answered a value the unboxer could not see through, `a + 1`
+    // would fall back to the boxed @nx_add helper instead of the inline
+    // checked instruction. This asserts on the program's own function
+    // only: the runtime prelude defines @nx_add regardless, so a
+    // module-wide search would prove nothing.
+    let ir = nx_codegen::compile_entry(
+        "a = int(\"7\")\nprint(a + 1)\n",
+        std::path::Path::new("."),
+    )
+    .expect("compiles");
+    let body = ir
+        .split("define void @nx__init")
+        .nth(1)
+        .and_then(|rest| rest.split("define i32 @main").next())
+        .expect("the module has a top-level function");
+    assert!(body.contains("@nx_to_int("), "one runtime call:\n{body}");
+    assert!(
+        body.contains("@llvm.sadd.with.overflow.i64"),
+        "the add must stay unboxed and checked:\n{body}"
+    );
+    assert!(!body.contains("@nx_add("), "no boxed fallback:\n{body}");
 }
 
 // ---------------------------------------------------------------------------

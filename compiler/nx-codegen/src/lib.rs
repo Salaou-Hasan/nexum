@@ -17,6 +17,13 @@ use std::collections::{HashMap, HashSet};
 use nx_ast::{BinOp, Expr, Program, Span, Stmt, UnaryOp};
 use nx_types::Ty;
 
+// The rules and the emission table that reads them. Re-exported from
+// `nx-hir` rather than redefined here: the rule is a lowering decision,
+// and a backend copy of it would be a second owner (ARGONE D, docs/
+// architecture/hir.md sections 4 and 10).
+use nx_hir::{arith_plan, ArithPlan, BinRule, BinRule as Birule, PowRule};
+use nx_hir::ArithRule::{Float, PromoteFloat, Trap};
+
 const PRELUDE: &str = include_str!("runtime.ll");
 
 /// A compiled value. Two facts, deliberately kept apart:
@@ -825,6 +832,234 @@ mod tests {
         );
         assert!(top.contains("i1 false"), "bare input() passes no prompt:\n{top}");
         assert!(top.contains("i1 true"), "input(prompt) passes one:\n{top}");
+    }
+
+    /// ARGONE D, fifth box: integer overflow lives in HIR as
+    /// `ArithRule::Trap`, and the backend honors the recorded rule
+    /// rather than re-deriving the decision from operand types.
+    ///
+    /// This test fails if the backend recomputes it. Each program is
+    /// lowered through `nx-hir` and the `Trap` nodes per operator are
+    /// counted; the same program is compiled, and the top-level body
+    /// must carry exactly that many of the matching checked
+    /// intrinsics -- no more, no fewer. A backend emitting plain `add`
+    /// (or any unchecked form) for `Int + Int` shows up as a missing
+    /// intrinsic; a lowering that misrecorded the rule shows up as a
+    /// mismatch in the other direction. The float control proves the
+    /// `Trap` arm is not taken for free: `1.0 + 2.0` records no `Trap`
+    /// and emits no checked intrinsic.
+    #[test]
+    fn trap_rule_drives_checked_emission() {
+        use nx_hir::{
+            ArithRule, BinRule, Block, HExpr, HExprKind, HProgram, HStmt, HStmtKind, HTarget,
+        };
+
+        fn exprs(block: &Block, op: nx_ast::BinOp, out: &mut usize) {
+            for s in block {
+                match &s.kind {
+                    HStmtKind::Assign { targets, values, .. } => {
+                        for t in targets {
+                            walk_target(t, op, out);
+                        }
+                        for v in values {
+                            expr(v, op, out);
+                        }
+                    }
+                    HStmtKind::AssignOp { target: tgt, value, .. } => {
+                        walk_target(tgt, op, out);
+                        expr(value, op, out);
+                    }
+                    HStmtKind::Print { values } | HStmtKind::Return { values } => {
+                        for v in values {
+                            expr(v, op, out);
+                        }
+                    }
+                    HStmtKind::EnsureInit { .. } | HStmtKind::Break | HStmtKind::Continue => {}
+                    HStmtKind::If { cond, then_body, elifs, else_body } => {
+                        expr(cond, op, out);
+                        exprs(then_body, op, out);
+                        for (c, b) in elifs {
+                            expr(c, op, out);
+                            exprs(b, op, out);
+                        }
+                        if let Some(b) = else_body {
+                            exprs(b, op, out);
+                        }
+                    }
+                    HStmtKind::While { cond, body } => {
+                        expr(cond, op, out);
+                        exprs(body, op, out);
+                    }
+                    HStmtKind::ForRange { start, end, body, .. } => {
+                        expr(start, op, out);
+                        expr(end, op, out);
+                        exprs(body, op, out);
+                    }
+                    HStmtKind::ForEach { iter, body, .. } => {
+                        expr(iter, op, out);
+                        exprs(body, op, out);
+                    }
+                    HStmtKind::Del { targets } => {
+                        for t in targets {
+                            walk_target(&t.target, op, out);
+                        }
+                    }
+                    HStmtKind::Assert { cond, message } => {
+                        expr(cond, op, out);
+                        if let Some(m) = message {
+                            expr(m, op, out);
+                        }
+                    }
+                    HStmtKind::Expr(e) => expr(e, op, out),
+                }
+            }
+        }
+
+        fn walk_target(t: &HTarget, op: nx_ast::BinOp, out: &mut usize) {
+            match t {
+                HTarget::Slot(_) | HTarget::Global(_) => {}
+                HTarget::Index { base, index, .. } => {
+                    expr(base, op, out);
+                    expr(index, op, out);
+                }
+                HTarget::Field { base, .. } => expr(base, op, out),
+            }
+        }
+
+        fn expr(e: &HExpr, op: nx_ast::BinOp, out: &mut usize) {
+            match &e.kind {
+                HExprKind::Binary { left, op: o, rule, right } => {
+                    if *o == op && *rule == BinRule::Arith(ArithRule::Trap) {
+                        *out += 1;
+                    }
+                    expr(left, op, out);
+                    expr(right, op, out);
+                }
+                HExprKind::List(items) => {
+                    for i in items {
+                        expr(i, op, out);
+                    }
+                }
+                HExprKind::Range { start, end, .. } => {
+                    expr(start, op, out);
+                    expr(end, op, out);
+                }
+                HExprKind::Dict(pairs) => {
+                    for (k, v) in pairs {
+                        expr(k, op, out);
+                        expr(v, op, out);
+                    }
+                }
+                HExprKind::Field { base, .. } => expr(base, op, out),
+                HExprKind::Index { base, index, .. } => {
+                    expr(base, op, out);
+                    expr(index, op, out);
+                }
+                HExprKind::Slice { base, from, to, step, .. } => {
+                    expr(base, op, out);
+                    for b in [from, to, step].into_iter().flatten() {
+                        expr(b, op, out);
+                    }
+                }
+                HExprKind::Unary { operand, .. } => expr(operand, op, out),
+                HExprKind::Equal { left, right, .. }
+                | HExprKind::Compare { left, right, .. }
+                | HExprKind::Logic { left, right, .. } => {
+                    expr(left, op, out);
+                    expr(right, op, out);
+                }
+                HExprKind::Contains { needle, hay, .. } => {
+                    expr(needle, op, out);
+                    expr(hay, op, out);
+                }
+                HExprKind::Select { cond, then_value, else_value } => {
+                    expr(cond, op, out);
+                    expr(then_value, op, out);
+                    expr(else_value, op, out);
+                }
+                HExprKind::Compr { element, iter, cond, .. } => {
+                    expr(element, op, out);
+                    expr(iter, op, out);
+                    if let Some(c) = cond {
+                        expr(c, op, out);
+                    }
+                }
+                HExprKind::CallFn { args, .. } | HExprKind::Construct { args, .. } | HExprKind::Builtin { args, .. } => {
+                    for a in args {
+                        expr(a, op, out);
+                    }
+                }
+                HExprKind::CallMethod { receiver, args, writeback, .. } => {
+                    if let Some(r) = receiver {
+                        expr(r, op, out);
+                    }
+                    for a in args {
+                        expr(a, op, out);
+                    }
+                    if let Some(w) = writeback {
+                        walk_target(w, op, out);
+                    }
+                }
+                HExprKind::Int(_)
+                | HExprKind::Float(_)
+                | HExprKind::Bool(_)
+                | HExprKind::Str(_)
+                | HExprKind::None
+                | HExprKind::Place(_) => {}
+            }
+        }
+
+        fn traps_in(prog: &HProgram, op: nx_ast::BinOp) -> usize {
+            let mut n = 0;
+            for f in &prog.funcs {
+                exprs(&f.body, op, &mut n);
+            }
+            n
+        }
+
+        // (source, operator, HIR trap count, intrinsic that must appear
+        // exactly that many times in the top-level body)
+        let cases = [
+            ("print(1 + 2)\n", nx_ast::BinOp::Add, 1, "llvm.sadd.with.overflow.i64"),
+            ("print(7 - 9)\n", nx_ast::BinOp::Sub, 1, "llvm.ssub.with.overflow.i64"),
+            ("print(3 * 4)\n", nx_ast::BinOp::Mul, 1, "llvm.smul.with.overflow.i64"),
+            (
+                "print(1 + 2)\nprint(3 + 4)\nprint(5 * 6)\n",
+                nx_ast::BinOp::Add,
+                2,
+                "llvm.sadd.with.overflow.i64",
+            ),
+        ];
+        for (src, op, want_traps, intrin) in cases {
+            let hir = nx_hir::lower::lower_source(src, std::path::Path::new(".")).expect("lowers");
+            let traps = traps_in(&hir, op);
+            assert_eq!(traps, want_traps, "HIR must record {want_traps} Trap {op:?} node(s) in {src:?}");
+            // Explicit unboxing: the suite must not depend on the
+            // ambient NX_NOUNBOX the way `compile_entry` does.
+            let ir = compile_opts(src, std::path::Path::new("."), true).expect("compiles");
+            let top = void_body_of(&ir, "nx__init___main__");
+            assert_eq!(
+                top.matches(intrin).count(),
+                traps,
+                "backend must honor the {traps} recorded Trap {op:?} node(s) with {intrin}:\n{top}"
+            );
+        }
+        // The float control: no Trap is recorded, so no checked
+        // intrinsic may appear -- the float arm must not take the Trap
+        // path for free.
+        let hir = nx_hir::lower::lower_source("print(1.0 + 2.0)\n", std::path::Path::new("."))
+            .expect("lowers");
+        assert_eq!(traps_in(&hir, nx_ast::BinOp::Add), 0, "float addition records no Trap");
+        let ir = compile_opts("print(1.0 + 2.0)\n", std::path::Path::new("."), true).expect("compiles");
+        let top = void_body_of(&ir, "nx__init___main__");
+        assert!(
+            top.contains("fadd double"),
+            "float addition emits the float instruction:\n{top}"
+        );
+        assert!(
+            !top.contains("with.overflow.i64"),
+            "float addition must not emit a checked intrinsic:\n{top}"
+        );
     }
 
     /// A parameter used only in a float expression has no determined type,
@@ -3980,6 +4215,41 @@ impl Gen {
         self.w(&format!("{done}:"));
     }
 
+    /// Emit one binary arithmetic or bitwise operation from the rule
+    /// HIR recorded, never from the operand types.
+    ///
+    /// `arith_plan` is the only thing consulted here: this function
+    /// reads no `ty` field of either operand, so a rule and a type that
+    /// disagree are resolved in the rule's favour by construction. That
+    /// is the property the Trap proof test asserts, and it is why the
+    /// arm-selection table lives beside the rule rather than beside the
+    /// types.
+    fn emit_arith(&mut self, rule: BinRule, op: BinOp, a: &str, b: &str, ty: Ty) -> NV {
+        let out = self.reg();
+        match arith_plan(rule, op) {
+            // R1 (docs/grammar.md 3.1.1): an Int result that does not fit
+            // in i64 traps rather than wrapping. Checked inline because
+            // that is where the operands are still proven scalars --
+            // boxing them to reach a helper would undo the unboxing this
+            // whole path exists for.
+            ArithPlan::Checked(intrin) => self.emit_i64_checked(intrin, a, b, &out),
+            ArithPlan::FloatMnem(mnem) => self.w(&format!("  {out} = {mnem} double {a}, {b}")),
+            ArithPlan::IntCall(helper) => {
+                self.w(&format!("  {out} = call i64 @{helper}(i64 {a}, i64 {b})"))
+            }
+            ArithPlan::FloatCall(helper) => {
+                self.w(&format!("  {out} = call double @{helper}(double {a}, double {b})"))
+            }
+            ArithPlan::Bitwise(mnem) => self.w(&format!("  {out} = {mnem} i64 {a}, {b}")),
+            // The rule is dynamic, so this node has no unboxed form. The
+            // caller checks the plan before getting here (the scalar path
+            // only asks for rules it has proven), so reaching this is a
+            // lowering bug rather than a dynamic program.
+            ArithPlan::Dispatch => unreachable!("emit_arith asked for a dynamic rule"),
+        }
+        NV::raw(ty, out)
+    }
+
     /// Arithmetic and comparison on two proven scalars, straight to LLVM
     /// instructions with no box in between. Returns None when either
     /// operand is not statically known, so the caller falls back to the
@@ -4004,29 +4274,25 @@ impl Gen {
                 let ty = if float { Ty::Float } else { Ty::Int };
                 let a = self.coerce(&l, &ty);
                 let b = self.coerce(&r, &ty);
-                let out = self.reg();
-                match (op, float) {
-                    // R1 (docs/grammar.md 3.1.1): an Int result that does not
-                    // fit in i64 traps rather than wrapping. Checked inline
-                    // because that is where the operands are still proven
-                    // scalars -- boxing them to reach a helper would undo the
-                    // unboxing this whole path exists for.
-                    (BinOp::Add, false) => self.emit_i64_checked("llvm.sadd.with.overflow.i64", &a, &b, &out),
-                    (BinOp::Sub, false) => self.emit_i64_checked("llvm.ssub.with.overflow.i64", &a, &b, &out),
-                    (BinOp::Mul, false) => self.emit_i64_checked("llvm.smul.with.overflow.i64", &a, &b, &out),
-                    // Division keeps the runtime's divide-by-zero panic.
-                    (BinOp::Div, false) => {
-                        self.w(&format!("  {out} = call i64 @nx_div_i64(i64 {a}, i64 {b})"))
+                // The one place a rule is derived from types today, while
+                // the backend still consumes the AST. Task G moves this to
+                // read the rule HIR already recorded; the emitter below is
+                // already written against the rule alone, so that change
+                // is one line here and no change to `emit_arith`.
+                let rule = match (op, float) {
+                    (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, false) => {
+                        Birule::Arith(Trap)
                     }
-                    (BinOp::Add, true) => self.w(&format!("  {out} = fadd double {a}, {b}")),
-                    (BinOp::Sub, true) => self.w(&format!("  {out} = fsub double {a}, {b}")),
-                    (BinOp::Mul, true) => self.w(&format!("  {out} = fmul double {a}, {b}")),
-                    (BinOp::Div, true) => {
-                        self.w(&format!("  {out} = call double @nx_fdiv(double {a}, double {b})"))
+                    (_, true) => {
+                        if l.ty == Ty::Float && r.ty == Ty::Float {
+                            Birule::Arith(Float)
+                        } else {
+                            Birule::Arith(PromoteFloat)
+                        }
                     }
-                    _ => unreachable!(),
-                }
-                Some(NV::raw(ty, out))
+                    _ => return None,
+                };
+                Some(self.emit_arith(rule, op, &a, &b, ty))
             }
             BinOp::Eq | BinOp::NotEq => {
                 if l.ty != r.ty {
@@ -4093,20 +4359,15 @@ impl Gen {
                 if !numeric || l.ty != Ty::Int || r.ty != Ty::Int {
                     return None;
                 }
-                let out = self.reg();
-                match op {
-                    // The runtime helpers keep the zero-divisor panic.
-                    BinOp::Mod => self
-                        .w(&format!("  {out} = call i64 @nx_mod_i64(i64 {}, i64 {})", l.reg, r.reg)),
-                    BinOp::FloorDiv => self.w(&format!(
-                        "  {out} = call i64 @nx_floordiv_i64(i64 {}, i64 {})",
-                        l.reg, r.reg
-                    )),
-                    BinOp::BitAnd => self.w(&format!("  {out} = and i64 {}, {}", l.reg, r.reg)),
-                    BinOp::BitOr => self.w(&format!("  {out} = or i64 {}, {}", l.reg, r.reg)),
-                    _ => self.w(&format!("  {out} = xor i64 {}, {}", l.reg, r.reg)),
-                }
-                Some(NV::raw(Ty::Int, out))
+                // Integral-only: no promotion, so the rule is Trap for the
+                // dividing pair (the runtime helpers own the zero-divisor
+                // panic) and Bitwise for the rest. Same derivation site as
+                // above, same rule-only emitter.
+                let rule = match op {
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => Birule::Bitwise,
+                    _ => Birule::Arith(Trap),
+                };
+                Some(self.emit_arith(rule, op, &l.reg, &r.reg, Ty::Int))
             }
             // A shift distance outside 0..63 is a runtime panic, which the raw
             // instruction cannot express. The distance is only checked here
@@ -4120,6 +4381,10 @@ impl Gen {
                 if !(0..64).contains(&distance) {
                     return None;
                 }
+                // Shifts are integral-only with no overflow question, so
+                // the rule is Bitwise; the literal distance (not a
+                // register) is why this arm builds its own line rather
+                // than going through `emit_arith`'s register pair.
                 let out = self.reg();
                 let ins = if op == BinOp::Shl { "shl" } else { "ashr" };
                 self.w(&format!("  {out} = {ins} i64 {}, {distance}", l.reg));
@@ -4133,16 +4398,16 @@ impl Gen {
                 let ty = if float { Ty::Float } else { Ty::Int };
                 let a = self.coerce(&l, &ty);
                 let b = self.coerce(&r, &ty);
-                let out = self.reg();
-                if float {
-                    self.w(&format!("  {out} = call double @nx_fpow(double {a}, double {b})"));
+                // R2: integer power saturates, so its rule is
+                // Pow(Saturate); float power has no such question. A
+                // negative exponent on an Int base and an oversized one
+                // are both checked in @nx_ipow.
+                let rule = if float {
+                    Birule::Arith(Float)
                 } else {
-                    // A negative exponent has no integer answer, and an
-                    // oversized one overflows. Both checks live in @nx_pow;
-                    // this path calls @nx_ipow directly and so must add them there.
-                    self.w(&format!("  {out} = call i64 @nx_ipow(i64 {a}, i64 {b})"));
-                }
-                Some(NV::raw(ty, out))
+                    Birule::Pow(PowRule::Saturate)
+                };
+                Some(self.emit_arith(rule, op, &a, &b, ty))
             }
             BinOp::In | BinOp::NotIn => {
                 // Membership is about containers, so it never has an
@@ -4459,6 +4724,31 @@ impl Gen {
                 // needs no clone.
                 Ok(NV::fresh_boxed(r, Ty::Str))
             }
+            "int" => {
+                // `int(x)` converts one value to Int. Parsing lives in the
+                // runtime helper, once -- the checker above owns which
+                // types arrive, so anything else here is unreachable
+                // through checked code.
+                if args.len() != 1 {
+                    return Err(err(span, format!("int() expects 1 argument, got {}", args.len())));
+                }
+                let a = self.emit_expr(&args[0])?;
+                let ab = self.store_boxed(&a);
+                let r = self.reg();
+                self.w(&format!("  {r} = call %NxVal @nx_to_int(%NxVal {ab})"));
+                Ok(NV::fresh_boxed(r, Ty::Int))
+            }
+            "float" => {
+                // `float(x)` converts one value to Float, same shape.
+                if args.len() != 1 {
+                    return Err(err(span, format!("float() expects 1 argument, got {}", args.len())));
+                }
+                let a = self.emit_expr(&args[0])?;
+                let ab = self.store_boxed(&a);
+                let r = self.reg();
+                self.w(&format!("  {r} = call %NxVal @nx_to_float(%NxVal {ab})"));
+                Ok(NV::fresh_boxed(r, Ty::Float))
+            }
             _ => Err(err(span, format!("unknown builtin '{name}'"))),
         }
     }
@@ -4649,4 +4939,3 @@ impl Gen {
     }
 
 }
-

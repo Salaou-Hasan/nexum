@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.4.2
+
+### Editor: Python-like indentation and error squiggles
+- `editors/vscode-nexum/language-configuration.json`: the indent
+  pattern now matches block openers only (`fn type impl if elif else
+  for while`), so `# comment:` lines and value lines ending in a colon
+  no longer mint phantom indent levels and guide columns; `folding:
+  { offSide: true }` declares blank lines belong to the block above,
+  so guides and folding stop at scope boundaries. Highlighting and
+  auto-indent for real blocks are unchanged.
+- New dependency-free `extension.js`: `nx check` diagnostics as editor
+  squiggles on save, on tab switch, and via **Nexum: Check current
+  file** (`nexum.executablePath`, `nexum.checkOnSave` settings).
+  Parser proven against real compiler output; `node --check` runs in CI.
+
+### input() takes numbers, int()/float() convert
+- `input()` prompts may be `Str`, `Int` or `Float` (printed the way
+  `print` prints them); the answer is still always `Str`.
+- New `int(x)` / `float(x)` builtins (direct and sugar spellings):
+  identity/widening for the numeric side, truncation toward zero for
+  `Float`-to-`Int`, runtime parsing for `Str` (integer/decimal syntax,
+  blanks allowed, hex rejected for floats since NX has none anywhere).
+  Bad strings are runtime errors naming the value; wrong types and
+  arities are type errors. Grammar 4.3 and the error table own the
+  semantics; parsing lives once in `runtime.ll` (`@nx_to_int`,
+  `@nx_to_float`).
+
+### ARGONE D: fifth box proven, task complete
+- `arith_plan` in `nx-hir` (rule plus operator in, emission out; no
+  operand types in the signature, so recomputation inside the table is
+  unrepresentable), `emit_arith` in `nx-codegen` (the only consulted
+  table on the scalar path; the remaining type-to-rule derivation is
+  one marked site awaiting task G), `arith_plan` table tests (7), and
+  `trap_rule_drives_checked_emission` in `nx-codegen` (lowered `Trap`
+  counts versus emitted checked intrinsics per operator, plus a float
+  control; verified red under a sabotaged plan).
+- `BuiltinOp::ToInt/ToFloat` in the HIR model with lowering, verifier
+  and dump coverage for the new builtins.
+
 ## Unreleased
 
 ### ARGONE D: HIR lowering, verifier, dump-hir (4 of 5 boxes)

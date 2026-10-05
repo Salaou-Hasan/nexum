@@ -45,6 +45,7 @@ declare i32 @memcmp(ptr, ptr, i64)
 declare i32 @snprintf(ptr, i64, ptr, ...)
 declare i32 @fflush(ptr)
 declare i32 @getchar()
+declare double @strtod(ptr, ptr)
 declare double @llvm.fabs.f64(double)
 declare double @llvm.round.f64(double)
 declare double @llvm.floor.f64(double)
@@ -648,18 +649,11 @@ define %NxVal @nx_input(%NxVal %prompt, i1 %has) {
 entry:
   br i1 %has, label %show, label %read
 show:
-  %pt = extractvalue %NxVal %prompt, 0
-  %isstr = icmp eq i64 %pt, 4
-  br i1 %isstr, label %emit, label %badtype
-badtype:
-  call void @nx_panic(ptr @.msg.type)
-  unreachable
-emit:
-  %pp = extractvalue %NxVal %prompt, 1
-  %pl = extractvalue %NxVal %prompt, 2
-  %ps = inttoptr i64 %pp to ptr
-  %pl32 = trunc i64 %pl to i32
-  call i32 (ptr, ...) @printf(ptr @.fmt.ss, i32 %pl32, ptr %ps)
+  ; The prompt prints the way print prints a value: the checker pins
+  ; Str, Int and Float prompts, and an Unknown prompt prints whatever
+  ; it turns out to be. No tag check here -- an unresolved prompt that
+  ; reads as a number prints the number instead of panicking.
+  call void @nx_print_val(%NxVal %prompt)
   br label %read
 read:
   ; fflush(NULL) flushes every output stream. The prompt has no
@@ -715,6 +709,279 @@ wrap:
   %flen = phi i64 [%len, %finish], [%flen0, %strip]
   %sv = call %NxVal @nx_str(ptr %buf, i64 %flen)
   ret %NxVal %sv
+}
+
+; --- value conversion: int(x) / float(x) ---
+;
+; One implementation per conversion, called by every spelling (direct
+; and sugar): the grammar owns the accepted types, the checker owns
+; which of them arrive, and these helpers own what each one means. A
+; Str outside numeric syntax is a runtime error naming the value; a
+; non-numeric type never reaches here through checked code, so the
+; fallback panics rather than guessing.
+define %NxVal @nx_to_int(%NxVal %v) {
+entry:
+  ; Scratch for the parse-failure message, hoisted here: an alloca
+  ; inside a branch would be a fresh allocation on the path that takes
+  ; it (the rule every helper in this file follows).
+  %bad = alloca [128 x i8]
+  %t = extractvalue %NxVal %v, 0
+  switch i64 %t, label %badtype [
+    i64 1, label %isint
+    i64 2, label %isflt
+    i64 4, label %isstr
+  ]
+isint:
+  ret %NxVal %v
+isflt:
+  %fb = extractvalue %NxVal %v, 1
+  %f = bitcast i64 %fb to double
+  ; fptosi is poison outside [-2^63, 2^63): both bounds are exactly
+  ; representable, so steering around them first keeps every path
+  ; defined. NaN fails both comparisons and panics with the rest.
+  %lo = fcmp oge double %f, -9.223372036854776e18
+  %hi = fcmp olt double %f, 9.223372036854776e18
+  %ok = and i1 %lo, %hi
+  br i1 %ok, label %conv, label %badrange
+conv:
+  ; Toward zero, matching what fptosi means everywhere else.
+  %i = fptosi double %f to i64
+  %nv = call %NxVal @nx_int(i64 %i)
+  ret %NxVal %nv
+badrange:
+  call void @nx_panic(ptr @.msg.badint)
+  unreachable
+isstr:
+  %sp0 = extractvalue %NxVal %v, 1
+  %sl = extractvalue %NxVal %v, 2
+  %sp = inttoptr i64 %sp0 to ptr
+  ; An empty string names no number; the echo below needs at least
+  ; one byte to point at, so emptiness takes the static message.
+  %empty = icmp eq i64 %sl, 0
+  br i1 %empty, label %badtype, label %lskip
+lskip:
+  ; Leading ASCII blanks are not part of the number.
+  %lp = phi ptr [%sp, %isstr], [%lp2, %lchk]
+  %ln = phi i64 [%sl, %isstr], [%ln2, %lchk]
+  %lend = icmp eq i64 %ln, 0
+  br i1 %lend, label %badstr, label %lchk
+lchk:
+  ; The C-locale blank set, matching what strtod skips for float():
+  ; space, tab, LF, VT, FF, CR. Both converters agree on the edges.
+  %lc = load i8, ptr %lp
+  %lsp = icmp eq i8 %lc, 32
+  %ltb = icmp eq i8 %lc, 9
+  %lnl = icmp eq i8 %lc, 10
+  %lvt = icmp eq i8 %lc, 11
+  %lff = icmp eq i8 %lc, 12
+  %lcr = icmp eq i8 %lc, 13
+  %lw1 = or i1 %lsp, %ltb
+  %lw2 = or i1 %lnl, %lvt
+  %lw3 = or i1 %lff, %lcr
+  %lw4 = or i1 %lw1, %lw2
+  %lws = or i1 %lw4, %lw3
+  %lp2 = getelementptr i8, ptr %lp, i64 1
+  %ln2 = sub i64 %ln, 1
+  br i1 %lws, label %lskip, label %sign
+sign:
+  ; One optional sign, then digits. A second sign, a missing digit
+  ; run, or anything non-numeric falls out below as a parse error.
+  ; sign dominates the loop: it is the only entry, so %neg below is
+  ; defined on every path that reads it.
+  %sc = load i8, ptr %lp
+  %splus = icmp eq i8 %sc, 43
+  %sminus = icmp eq i8 %sc, 45
+  %ssigned = or i1 %splus, %sminus
+  %dpfirst = getelementptr i8, ptr %lp, i64 1
+  %dp1 = select i1 %ssigned, ptr %dpfirst, ptr %lp
+  %used = select i1 %ssigned, i64 1, i64 0
+  %dn1 = sub i64 %ln, %used
+  br label %digits
+digits:
+  ; Negative accumulation handles MIN exactly: the most negative
+  ; value has no positive mirror, so accumulating downward (acc stays
+  ; <= 0) never needs one. The sign applies once, at the end.
+  %acc = phi i64 [0, %sign], [%acc2, %dstep]
+  %cnt = phi i64 [0, %sign], [%cnt2, %dstep]
+  %dp = phi ptr [%dp1, %sign], [%dp2, %dstep]
+  %dn = phi i64 [%dn1, %sign], [%dn2, %dstep]
+  %ddone = icmp eq i64 %dn, 0
+  br i1 %ddone, label %tend, label %dchk
+dchk:
+  %dc = load i8, ptr %dp
+  %dlo = icmp uge i8 %dc, 48
+  %dhi = icmp ule i8 %dc, 57
+  %disdigit = and i1 %dlo, %dhi
+  br i1 %disdigit, label %dacc, label %tend
+dacc:
+  %dz = zext i8 %dc to i64
+  %d = sub i64 %dz, 48
+  ; Overflow guard before the multiply: below -922337203685477580 any
+  ; further digit overflows; exactly there only the boundary digit
+  ; fits (8 for a negative literal, 7 for a positive one, since the
+  ; negation at the end must land at or below MAX).
+  %toolow = icmp slt i64 %acc, -922337203685477580
+  br i1 %toolow, label %badstr, label %dbnd
+dbnd:
+  %atbnd = icmp eq i64 %acc, -922337203685477580
+  %maxd = select i1 %sminus, i64 8, i64 7
+  %dtoobig = icmp sgt i64 %d, %maxd
+  %fail = and i1 %atbnd, %dtoobig
+  br i1 %fail, label %badstr, label %dstep
+dstep:
+  %acc10 = mul i64 %acc, 10
+  %acc2 = sub i64 %acc10, %d
+  %cnt2 = add i64 %cnt, 1
+  %dp2 = getelementptr i8, ptr %dp, i64 1
+  %dn2 = sub i64 %dn, 1
+  br label %digits
+tend:
+  ; At least one digit must have been read, and only blanks may trail
+  ; ("12 " reads; "12x" and "+" do not).
+  %nocnt = icmp eq i64 %cnt, 0
+  br i1 %nocnt, label %badstr, label %tskip
+tskip:
+  %tp = phi ptr [%dp, %tend], [%tp2, %tchk]
+  %tn = phi i64 [%dn, %tend], [%tn2, %tchk]
+  %tdone = icmp eq i64 %tn, 0
+  br i1 %tdone, label %fin, label %tchk
+tchk:
+  %tc = load i8, ptr %tp
+  %tsp = icmp eq i8 %tc, 32
+  %ttb = icmp eq i8 %tc, 9
+  %tnl = icmp eq i8 %tc, 10
+  %tvt = icmp eq i8 %tc, 11
+  %tff = icmp eq i8 %tc, 12
+  %tcr = icmp eq i8 %tc, 13
+  %tw1 = or i1 %tsp, %ttb
+  %tw2 = or i1 %tnl, %tvt
+  %tw3 = or i1 %tff, %tcr
+  %tw4 = or i1 %tw1, %tw2
+  %tws = or i1 %tw4, %tw3
+  %tp2 = getelementptr i8, ptr %tp, i64 1
+  %tn2 = sub i64 %tn, 1
+  br i1 %tws, label %tskip, label %badstr
+fin:
+  %pos = sub i64 0, %acc
+  %res = select i1 %sminus, i64 %acc, i64 %pos
+  %nvi = call %NxVal @nx_int(i64 %res)
+  ret %NxVal %nvi
+badstr:
+  ; Cold path: names the offending value. %sp/%sl dominate every
+  ; edge here (all flow through isstr), and len >= 1 on each, so the
+  ; pointer is live and the precision bound holds.
+  %bp = getelementptr [128 x i8], ptr %bad, i64 0, i64 0
+  %sl32 = trunc i64 %sl to i32
+  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %bp, i64 128, ptr @.msg.badintstr, i32 %sl32, ptr %sp)
+  call void @nx_panic(ptr %bp)
+  unreachable
+badtype:
+  call void @nx_panic(ptr @.msg.badint)
+  unreachable
+}
+
+define %NxVal @nx_to_float(%NxVal %v) {
+entry:
+  ; Scratch for the parse-failure message and for strtod's end
+  ; pointer, both hoisted for the same reason as everywhere else.
+  %err = alloca [128 x i8]
+  %endp = alloca ptr
+  %t = extractvalue %NxVal %v, 0
+  switch i64 %t, label %badtype [
+    i64 1, label %isint
+    i64 2, label %isflt
+    i64 4, label %isstr
+  ]
+isint:
+  %a = extractvalue %NxVal %v, 1
+  %f = sitofp i64 %a to double
+  %nv = call %NxVal @nx_float(double %f)
+  ret %NxVal %nv
+isflt:
+  ret %NxVal %v
+isstr:
+  ; strtod needs a NUL-terminated buffer; Nx strings carry a length
+  ; instead, so copy once. The copy is freed on the way out: this
+  ; helper must not leak one buffer per conversion.
+  %sp0 = extractvalue %NxVal %v, 1
+  %sl = extractvalue %NxVal %v, 2
+  %sp = inttoptr i64 %sp0 to ptr
+  %empty = icmp eq i64 %sl, 0
+  br i1 %empty, label %badtype, label %copy
+copy:
+  %n1 = add i64 %sl, 1
+  %acc = call ptr @malloc(i64 %n1)
+  call void @nx_memcpy(ptr %acc, ptr %sp, i64 %sl)
+  %zp = getelementptr i8, ptr %acc, i64 %sl
+  store i8 0, ptr %zp
+  %fv = call double @strtod(ptr %acc, ptr %endp)
+  %end = load ptr, ptr %endp
+  ; Nothing consumed is not a number ("", "abc", "+").
+  %nocons = icmp eq ptr %end, %acc
+  br i1 %nocons, label %badstr, label %xscan
+xscan:
+  ; strtod reads hex ("0x10" is 16.0 to it), but NX has no hex float
+  ; syntax anywhere -- literals, printing, or here. Any x in what was
+  ; consumed means the syntax was hex, so reject it. The bounds check
+  ; comes first: on an empty tail (%end == %acc) the header falls
+  ; straight to tskip and %xp2 is never read.
+  %xp = phi ptr [%acc, %copy], [%xp2, %xchk]
+  %xdone = icmp eq ptr %xp, %end
+  br i1 %xdone, label %tskip, label %xchk
+xchk:
+  %xc = load i8, ptr %xp
+  %xl = icmp eq i8 %xc, 120
+  %xu = icmp eq i8 %xc, 88
+  %xisx = or i1 %xl, %xu
+  %xp2 = getelementptr i8, ptr %xp, i64 1
+  br i1 %xisx, label %badstr, label %xscan
+tskip:
+  ; Only blanks may trail the number ("2.5 " reads; "2.5x" does not).
+  ; The set matches what strtod skips up front, so both ends agree.
+  %tp = phi ptr [%end, %xscan], [%tp2, %tchk]
+  %lim = getelementptr i8, ptr %acc, i64 %sl
+  %tdone = icmp eq ptr %tp, %lim
+  br i1 %tdone, label %fin, label %tchk
+tchk:
+  %tc = load i8, ptr %tp
+  %csp = icmp eq i8 %tc, 32
+  %ctb = icmp eq i8 %tc, 9
+  %cnl = icmp eq i8 %tc, 10
+  %cvt = icmp eq i8 %tc, 11
+  %cff = icmp eq i8 %tc, 12
+  %ccr = icmp eq i8 %tc, 13
+  %w1 = or i1 %csp, %ctb
+  %w2 = or i1 %cnl, %cvt
+  %w3 = or i1 %cff, %ccr
+  %w4 = or i1 %w1, %w2
+  %tws = or i1 %w4, %w3
+  %tp2 = getelementptr i8, ptr %tp, i64 1
+  br i1 %tws, label %tskip, label %badstr
+fin:
+  ; NaN and infinities are not NX floats -- no literal spells them --
+  ; so a string naming one is a failed conversion, not a value.
+  %isnan = fcmp uno double %fv, 0.0
+  br i1 %isnan, label %badstr, label %fchk
+fchk:
+  %abs = call double @llvm.fabs.f64(double %fv)
+  %inf = bitcast i64 9218868437227405312 to double
+  %isinf = fcmp oeq double %abs, %inf
+  br i1 %isinf, label %badstr, label %wrap
+wrap:
+  call void @free(ptr %acc)
+  %nvf = call %NxVal @nx_float(double %fv)
+  ret %NxVal %nvf
+badstr:
+  ; Cold path; the buffer leaks here, but the process exits on the
+  ; next line, like every other panic path in this file.
+  %errp = getelementptr [128 x i8], ptr %err, i64 0, i64 0
+  %sl32 = trunc i64 %sl to i32
+  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %errp, i64 128, ptr @.msg.badfloatstr, i32 %sl32, ptr %sp)
+  call void @nx_panic(ptr %errp)
+  unreachable
+badtype:
+  call void @nx_panic(ptr @.msg.badfloat)
+  unreachable
 }
 
 ; --- arithmetic (mirrors the interpreter matrix) ---
@@ -1700,6 +1967,10 @@ out:
 @.msg.step = private constant [28 x i8] c"slice step must be positive\00"
 @.msg.nofield = private constant [23 x i8] c"type has no such field\00"
 @.msg.negexp = private constant [71 x i8] c"negative exponent on Int; use a Float exponent for a fractional result\00"
+@.msg.badint = private constant [22 x i8] c"cannot convert to Int\00"
+@.msg.badintstr = private constant [27 x i8] c"cannot parse '%.*s' as Int\00"
+@.msg.badfloat = private constant [24 x i8] c"cannot convert to Float\00"
+@.msg.badfloatstr = private constant [29 x i8] c"cannot parse '%.*s' as Float\00"
 ; --- integral operators -------------------------------------------
 ; `%` and `//` both need floor division, so it is factored out once.
 ; `sdiv` truncates toward zero, which is wrong for negative operands;
