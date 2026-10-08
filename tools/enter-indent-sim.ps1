@@ -2,6 +2,11 @@
 # corpus of cursor positions, plus a differential against the language
 # configuration VS Code ships for Python.
 #
+# tools/vscode-python-language-configuration.json is that configuration,
+# vendored verbatim from microsoft/vscode (MIT licensed,
+# extensions/python/language-configuration.json) so the comparison cannot
+# drift when upstream changes. It is a data file, not code we maintain.
+#
 # Why this file exists at all: the previous version of this script was a
 # *model* of the pipeline rather than a port of it, and it read
 # `onEnterRules[i].action.indentAction`. VS Code does not read that key. It
