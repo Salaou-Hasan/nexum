@@ -24,7 +24,7 @@ README.md      this file
 ```powershell
 cd C:\nexum\bench\compiler
 
-# one-time: build the compiler under test (the PATH `nx` is v0.3.0 and STALE)
+# one-time: build the compiler under test (the PATH `nx` is v0.4.2 and STALE)
 cargo build --release --offline -p nx-driver      # run from C:\nexum
 
 # regenerate the corpus and prove it is deterministic
@@ -357,8 +357,8 @@ comparable — only the ratios are. `programs/manifest.json` must match
 (`gen.ps1 -Verify`) or you are not measuring the same input.
 
 The compiler under test is pinned by path, not by `PATH`: `-NxExe` defaults
-to `C:\nexum\target\release\nx.exe`. **The `nx` on `PATH` is v0.3.0 and is
-two minor versions behind the tree** — using it would silently measure
+to `C:\nexum\target\release\nx.exe`. **The `nx` on `PATH` is v0.4.2 and is
+one release behind the tree** — using it would silently measure
 different code.
 
 ### How long a full run takes
@@ -393,4 +393,4 @@ not instant.
   binary and the crates expose `check_source` / `compile_entry` directly.
 * **Incremental / warm builds.** `up_to_date()` is deliberately defeated
   before every timed build, so the "nothing changed" path is never measured.
-* **The `nx` on `PATH`.** See above; it is two minor versions stale.
+* **The `nx` on `PATH`.** See above; it is a release stale.

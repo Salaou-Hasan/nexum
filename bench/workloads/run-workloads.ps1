@@ -25,14 +25,31 @@
 param(
     [int]$Runs = 5,
     [switch]$SkipRust,
-    [string]$Only = ''
+    [string]$Only = '',
+    [string]$EmitJson = ''
 )
 
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $here = $PSScriptRoot
 $outDir = Join-Path $env:TEMP "nxbench-workloads"
-if (Test-Path $outDir) { Remove-Item $outDir -Recurse -Force }
+# A previous run that was killed mid-benchmark leaves its .exe running and
+# the file locked, and Remove-Item then fails the whole harness. Kill any
+# leftover first, then retry the delete: a locked file is the only thing
+# that can be holding the directory.
+if (Test-Path $outDir) {
+    Get-ChildItem $outDir -Filter *.exe -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $p = $_.Name -replace '\.exe$', ''
+            Get-Process -Name $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+    Start-Sleep -Milliseconds 200
+    Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path $outDir) {
+    Write-Host "FATAL: could not clear $outDir (a benchmark executable from an earlier run is still running)"
+    exit 1
+}
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 function Get-Median($values) {
@@ -122,5 +139,15 @@ foreach ($r in $results) {
 }
 Write-Host ""
 Write-Host "rust/nx above 1.00 means Rust was faster." -ForegroundColor DarkGray
+
+# Machine-readable export for bench/baseline.ps1. Console output above is
+# unchanged; this only adds a file when asked.
+if ($EmitJson) {
+    # -Encoding utf8NoBOM is PowerShell 7 only; this harness has to run on
+    # the 5.1 that ships with Windows, where UTF8 means "with a BOM" and
+    # ConvertFrom-Json then chokes on the leading U+FEFF.
+    $json = @{ runs = $Runs; only = $Only; results = @($results) } | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($EmitJson, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue

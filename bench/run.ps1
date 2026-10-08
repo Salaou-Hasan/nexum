@@ -27,7 +27,8 @@
 param(
     [int]$Runs = 5,
     [switch]$SkipRust,
-    [switch]$NoUnbox
+    [switch]$NoUnbox,
+    [string]$EmitJson = ''
 )
 
 # Native tools (clang, rustc) write progress and warnings to stderr, which
@@ -152,5 +153,15 @@ foreach ($r in $results) {
 }
 Write-Host ""
 Write-Host "rust/nx above 1.00 means Rust was faster." -ForegroundColor DarkGray
+
+# Machine-readable export for bench/baseline.ps1. Console output above is
+# unchanged; this only adds a file when asked.
+if ($EmitJson) {
+    # -Encoding utf8NoBOM is PowerShell 7 only; this harness has to run on
+    # the 5.1 that ships with Windows, where UTF8 means "with a BOM" and
+    # ConvertFrom-Json then chokes on the leading U+FEFF.
+    $json = @{ runs = $Runs; results = @($results) } | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($EmitJson, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 Remove-Item $outDir -Recurse -Force -ErrorAction SilentlyContinue
