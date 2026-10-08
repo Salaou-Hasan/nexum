@@ -36,6 +36,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Cold release builds are the slowest part of this workflow (the
+      # whole workspace, optimized, from scratch on every matrix leg),
+      # which is why releases used to sit in the queue until someone
+      # gave up and cancelled them. The cache is keyed per target triple
+      # so the six legs do not evict each other; first run after this
+      # lands is still cold, every run after it is warm.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nx-${{ matrix.target }}
+          workspaces: .
       - name: install 32-bit C libs (linux i686)
         if: matrix.target == 'i686-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib g++-multilib
