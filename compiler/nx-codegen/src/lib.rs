@@ -3961,7 +3961,7 @@ impl Gen {
                 self.block(&format!("{tl}"));
                 let tv = self.emit_expr(then_value)?;
                 let tb = self.unbox(&tv);
-                // An arm can open blocks of its own -- `if c: xs[i-1] else: y`
+                // An arm can open blocks of its own -- `xs[i - 1] if c else y`
                 // leaves the subtraction's `ovf_done` holding the value -- so
                 // the phi below may not name `%if_then`/`%if_else` directly.
                 let theld = self.funnel(&tl);
@@ -4631,10 +4631,10 @@ impl Gen {
         self.block(&format!("{rhs}"));
         let rv = self.emit_expr(right)?;
         let rb = self.as_i1(&rv);
-        // The right operand can open blocks of its own -- `i < n and xs[i-1] > xs[i]`
-        // puts two checked subtractions and their diamonds in here -- so the
-        // value may no longer live in `%rhs`. The phi below names the block
-        // it does live in, so funnel first.
+        // The right operand can open blocks of its own -- `xs[i - 1] > xs[i]`
+        // puts a checked subtraction and its diamond in here -- so the value
+        // may no longer live in `%rhs`. The phi below names the block it does
+        // live in, so funnel first.
         let held = self.funnel(&rhs);
         // RHS is an expression: it cannot terminate (no return/break inside).
         self.w(&format!("  br label %{merge}"));
