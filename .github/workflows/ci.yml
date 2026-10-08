@@ -36,12 +36,21 @@ jobs:
         run: cargo run -q -p nx-driver -- check examples/hello.nx
       - name: type-check modules/main
         run: cargo run -q -p nx-driver -- check examples/modules/main.nx
-      # The VS Code extension host is dependency-free plain Node, so this
-      # is a syntax check rather than a test run: it keeps a broken
-      # extension.js from reaching the vsix the release job packages.
+      # The VS Code extension host is dependency-free plain Node, so these
+      # need nothing installed: a syntax check, then the pure helpers
+      # (the diagnostics parser and the elif/else dedent) under test.
       # GitHub-hosted runners ship node on all three OSs; no setup step.
       - name: syntax-check the VS Code extension host
         run: node --check editors/vscode-nexum/extension.js
+      - name: test the VS Code extension helpers
+        run: node editors/vscode-nexum/test/extension.test.js
+      # The language configuration's Enter behaviour is a port of VS Code's
+      # own pipeline, differentially checked against the configuration VS
+      # Code ships for Python. It caught the `action.indentAction` key that
+      # made every onEnterRule a silent no-op, which no other check did.
+      - name: check the editor indentation against VS Code's pipeline
+        shell: pwsh
+        run: ./tools/enter-indent-sim.ps1
       # `nx <file.nx>` compiles to a native executable and runs it; there is
       # no interpreter left to agree with, so these are smoke tests only --
       # they prove the end-to-end path works on each OS. Every example is

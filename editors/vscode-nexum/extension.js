@@ -66,6 +66,82 @@ function toRange(vscode, doc, hit) {
     return new vscode.Range(hit.line, start, hit.line, Math.max(end, start));
 }
 
+// `elif:`/`else:` must sit at the same column as the `if` they belong to --
+// `    else:` under a column-0 `if` is a parse error, not a style question.
+// VS Code used to do that dedent for us through the language configuration's
+// `indentationRules`, but those rules are what made Enter on a blank line
+// recompute indentation from the nearest preceding line and drop the cursor
+// back inside the block it had just left, and they also broke continuation
+// inside an open bracket. Removing them fixed both, and moved this one
+// behaviour here, where it can be tested.
+const ELIF_RE = /^\s*elif\b[^:]*:\s*(?:#.*)?$/;
+const ELSE_RE = /^\s*else\b[^:]*:\s*(?:#.*)?$/;
+const CLAUSE_RE = /^\s*(?:elif|else)\b[^:]*:\s*(?:#.*)?$/;
+const OPENER_RE = /^\s*(?:fn|type|impl|if|for|while)\b[^:]*:\s*(?:#.*)?$/;
+
+/**
+ * The indent an `elif:`/`else:` line should have, or null when the line is
+ * not a clause head or is already correct.
+ *
+ * `lines` is the document's lines and `index` the zero-based line to inspect.
+ * The target is the column of the opener this clause belongs to.
+ *
+ * Finding that opener is the whole problem, because an `else:` above the
+ * cursor is ambiguous: it is either a block whose body the cursor is inside,
+ * or the branch that already closed the `if` the cursor's own clause belongs
+ * to. Indentation alone cannot tell them apart -- both sit at the same
+ * column -- so they are counted. Walking up, an `else:` passed is a branch
+ * already closed, so the next opener found belongs to an enclosing block; an
+ * `elif:` passed is not, because it continues the same chain rather than
+ * closing one, and so the chain's `if` is still the answer.
+ *
+ * No indent size is needed: both columns are read off existing lines.
+ *
+ * Returns { from, to } as indent widths, or null when there is nothing to do.
+ */
+function clauseDedent(lines, index) {
+    if (!Array.isArray(lines) || index < 0 || index >= lines.length) {
+        return null;
+    }
+    const text = lines[index];
+    if (!CLAUSE_RE.test(text)) {
+        return null;
+    }
+    const from = text.length - text.replace(/^[ \t]+/, "").length;
+    if (from === 0) {
+        return null;
+    }
+    let closed = 0;
+    for (let i = index - 1; i >= 0; i--) {
+        const above = lines[i];
+        if (above.trim() === "") {
+            continue;
+        }
+        const width = above.length - above.replace(/^[ \t]+/, "").length;
+        // Deeper than the clause: inside the body this clause heads, not
+        // around it.
+        if (width > from) {
+            continue;
+        }
+        if (ELSE_RE.test(above)) {
+            closed++;
+            continue;
+        }
+        if (ELIF_RE.test(above)) {
+            continue;
+        }
+        if (!OPENER_RE.test(above)) {
+            continue;
+        }
+        if (closed > 0) {
+            closed--;
+            continue;
+        }
+        return width === from ? null : { from, to: width };
+    }
+    return null;
+}
+
 function checkDocument(vscode, collection, config, doc, opts) {
     const showErrors = !opts || opts.showErrors !== false;
     if (!doc || doc.languageId !== "nexum" || doc.isUntitled) {
@@ -133,12 +209,55 @@ function activate(context) {
             }
         })
     );
+
+    // `elif:`/`else:` dedent, moved out of the language configuration (see
+    // clauseDedent). It runs on the line the caret is on, and it is
+    // self-limiting: once the column matches the target, every further
+    // keystroke on that line is a no-op, so there is nothing to suppress.
+    let applying = false;
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument(async (event) => {
+            if (applying) {
+                return;
+            }
+            const doc = event.document;
+            const editor = vscode.window.activeTextEditor;
+            if (doc.languageId !== "nexum" || !editor || editor.document !== doc) {
+                return;
+            }
+            const options = editor.options;
+            if (options.insertSpaces === false) {
+                return;
+            }
+            const indentSize = typeof options.tabSize === "number" ? options.tabSize : 4;
+            const line = editor.selection.active.line;
+            const lines = [];
+            for (let i = 0; i < doc.lineCount; i++) {
+                lines.push(doc.lineAt(i).text);
+            }
+            const fix = clauseDedent(lines, line, indentSize);
+            if (!fix) {
+                return;
+            }
+            applying = true;
+            try {
+                await editor.edit((builder) => {
+                    builder.replace(
+                        new vscode.Range(line, 0, line, fix.from),
+                        " ".repeat(fix.to)
+                    );
+                });
+            } finally {
+                applying = false;
+            }
+        })
+    );
 }
 
 function deactivate() {}
 
 if (typeof module !== "undefined" && module.exports) {
-    module.exports = { parseNxDiagnostics };
+    module.exports = { parseNxDiagnostics, clauseDedent };
 }
 
 module.exports.activate = activate;

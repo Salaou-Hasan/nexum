@@ -1,5 +1,70 @@
 # Changelog
 
+## v0.4.5
+
+### Fixed: every `onEnterRules` entry was a silent no-op
+`onEnterRules[i].action` has exactly one recognised key: `indent`. Ours said
+`indentAction`, which VS Code does not read —
+
+    [nexum]: language configuration: expected
+    `onEnterRules[0].action.indent` to be 'none', 'indent', 'indentOutdent'
+    or 'outdent'.
+
+— and then `continue`s past the rule, in the extension host, where nothing
+sees it. Both rules had been dropped since they were written. Indentation
+after `fn f():` only ever worked because `indentationRules` happened to
+produce the same answer, which is why the bug was invisible rather than
+merely unnoticed.
+
+### Fixed: Enter on a blank line put the cursor back inside the block
+That is what the missing rule was for. Without it, Enter on a blank line at
+column 0 falls through to VS Code's `getIndentForEnter`, which recomputes
+indentation from the nearest preceding non-blank line — the last line of the
+function you had just left. The rule was there; it was being discarded.
+
+### `indentationRules` removed: NX now uses Python's indentation system
+Python's shipped configuration has no `indentationRules`, and that is what
+gives it this behaviour rather than the rule it appears to be. When a
+language has them, VS Code replaces "keep this line's own indent" with
+"recompute from the nearest preceding line that matches a rule", and where
+no rule matches the walk gives up and returns **line 1's** indentation.
+That produced a second bug nobody had reported yet: Enter inside an open
+list literal continued at column 0.
+
+    xs = [
+        1,
+        2<Enter>            -> column 0, not 4
+
+So `indentationRules` is gone and the language configuration now has
+Python's shape: brackets, auto-closing pairs, off-side folding with
+`#region` markers, one `onEnter` rule for block openers, no
+`indentationRules`. NX's keywords and its comment-tolerant trailing colon
+stay. `tools/enter-indent-sim.ps1` is rewritten as a port of VS Code's
+actual pipeline — `_enter`, `getEnterAction`, `getIndentForEnter`,
+`getInheritIndentForLine`, the schema check — and run differentially
+against the configuration VS Code ships for Python. All 14 comparable
+cases produce identical columns, and four self-tests re-break the config
+the three ways it has actually been wrong and require the harness to
+notice.
+
+### `elif:`/`else:` still dedent themselves, now where they can be tested
+NX requires `else:` at its `if`'s column — `    else:` under a column-0
+`if` is a parse error — and that dedent came from `decreaseIndentPattern`,
+which cannot survive the change above. It moved to `extension.js`, where
+finding the right `if` is a small pure function instead of a regex: an
+`else:` above the cursor is ambiguous between "a block I am inside" and
+"the branch that already closed my `if`", and both sit at the same column,
+so the closed branches are counted. 20 unit tests, no dependencies.
+
+### Install: delete old copies first
+Three extension folders were installed on the machine that reported the
+blank-line bug — `nexum-0.0.1`, `hasansalaou.vscode-nexum-0.4.3` and
+`-0.4.4`. VS Code loads every folder that contributes the `nexum` language
+and merges them, so the stale copy was competing with the new one. The
+README now leads with the marketplace, and the copy install step deletes
+old folders first. **Developer: Reload Window** after upgrading:
+`language-configuration.json` is read once, at activation.
+
 ## v0.4.4
 
 ### Fixed: a short-circuit operand containing arithmetic produced IR clang rejected

@@ -21,13 +21,23 @@ nx setup --apply  # writes it (keeps a .bak backup)
 
 ## Install (pick one)
 
-### A. Copy into extensions (simplest)
-1. Close VS Code.
-2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.4`
-   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.4\package.json`).
-3. Reopen VS Code on `C:\nexum`. Open any `.nx` file — bottom-right should say **Nexum**.
+### A. Install from the marketplace (recommended)
+Extensions → search **Nexum** → Install. The marketplace keeps one copy, so
+there is nothing to clean up when you upgrade.
 
-### B. Debug once (no copy)
+### B. Copy into extensions
+1. Close VS Code.
+2. **Delete any Nexum extension folders you already have.** This is the
+   step people skip, and it matters: VS Code loads *every* folder that
+   contributes the `nexum` language, so a leftover copy silently competes
+   with the new one and you get the old behaviour with no error anywhere.
+   Check `%USERPROFILE%\.vscode\extensions` for `nexum-*` and
+   `*.vscode-nexum-*` and remove them.
+3. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.5`
+   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.5\package.json`).
+4. Reopen VS Code on `C:\nexum`. Open any `.nx` file — bottom-right should say **Nexum**.
+
+### C. Debug once (no copy)
 1. VS Code → File → Open Folder → `C:\nexum\editors\vscode-nexum`.
 2. Press `F5`. A new window opens with Nexum loaded.
 3. Open a `.nx` file there to test.
@@ -35,18 +45,27 @@ nx setup --apply  # writes it (keeps a .bak backup)
 ## What you get
 - `.nx` recognized as Nexum (no Python extension needed)
 - `#` comments, `"strings"`, `123` / `10.8`, keywords, `fn()` calls
-- Python's indentation system, with NX keywords: `language-configuration.json`
-  mirrors VS Code's built-in Python config rule-for-rule (block-opener
-  `onEnter` rule, `elif`/`else` dedent, off-side folding, `#region`
-  markers). It cannot literally *be* Python's file -- Python's patterns
-  don't know `fn`, `type` or `impl`, and its string-prefix pairs don't
-  exist in NX -- so the keywords, the comment-tolerant trailing colon,
-  and the blank-line rule are NX's own; everything else tracks upstream
-  instead of being hand-rolled. Concretely: `:` + Enter auto-indents on
-  block openers only; Enter on a blank line keeps that line's own
-  indent instead of inheriting the block above, so leaving a function
-  no longer pulls you back inside it; blank lines fold with the block
-  above, so guides stop at scope boundaries
+- **Python's indentation system.** `language-configuration.json` has the
+  same shape as the one VS Code ships for Python: `brackets`,
+  `autoClosingPairs`, `surroundingPairs`, off-side folding with `#region`
+  markers, one `onEnter` rule for block openers, and **no
+  `indentationRules`** — which is the part that matters. With
+  `indentationRules` present, VS Code stops keeping each line's own indent
+  and instead recomputes it from the nearest preceding line that matches a
+  rule; where none matches it gives up and returns line 1's indent. That is
+  what put the cursor back inside the block you had just left, and what
+  made a list literal continue at column 0. NX's keywords and its
+  comment-tolerant trailing colon are its own; everything else tracks
+  Python. Concretely: `:` + Enter indents on block openers only; Enter
+  anywhere else keeps that line's own indent, so pressing Enter on a blank
+  line at column 0 stays at column 0 and pressing Enter inside a block
+  stays in it; blank lines fold with the block above, so guides stop at
+  scope boundaries
+- `elif:`/`else:` dedent themselves to their `if`'s column as you type.
+  NX requires that column — `    else:` under a column-0 `if` is a parse
+  error, not a style choice — and this used to come from
+  `indentationRules`, which had to go. It is now in `extension.js`, where
+  it is unit-tested
 - `()` `[]` `""` auto-close
 - Spaces, tabSize 4 (tabs still rejected by the `nx` lexer)
 - Error squiggles from `nx check`: on save, on tab switch, and on
@@ -55,4 +74,10 @@ nx setup --apply  # writes it (keeps a .bak backup)
   save hook off)
 
 ## Uninstall / update
-Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.4` and repeat A.
+Delete **every** Nexum extension folder — `%USERPROFILE%\.vscode\extensions\nexum-*`
+and `*.vscode-nexum-*` — then repeat the install step. Leaving one behind is
+how a stale copy keeps winning.
+
+If the indentation behaves as if nothing changed, run **Developer: Reload
+Window** first: VS Code reads `language-configuration.json` once, when the
+extension activates, so an edit to it needs a reload to take effect.

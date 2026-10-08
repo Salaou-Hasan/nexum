@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "nx-ast"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-lexer",
 ]
 
 [[package]]
 name = "nx-codegen"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-ast",
  "nx-hir",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "nx-driver"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-ast",
  "nx-codegen",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "nx-hir"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-ast",
  "nx-lexer",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "nx-ir"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-ast",
  "nx-lexer",
@@ -67,11 +67,11 @@ dependencies = [
 
 [[package]]
 name = "nx-lexer"
-version = "0.4.4"
+version = "0.4.5"
 
 [[package]]
 name = "nx-mem"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-ast",
  "nx-parser",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "nx-parser"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-ast",
  "nx-lexer",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "nx-types"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "nx-ast",
  "nx-lexer",

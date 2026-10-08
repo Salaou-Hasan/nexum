@@ -19,10 +19,6 @@
         ["(", ")"],
         ["\"", "\""]
     ],
-    "indentationRules": {
-        "increaseIndentPattern": "^\\s*(?:fn|type|impl|if|elif|else|for|while)\\b.*:\\s*(#.*)?$",
-        "decreaseIndentPattern": "^\\s*(elif|else)\\b.*:\\s*(#.*)?$"
-    },
     "folding": {
         "offSide": true,
         "markers": {
@@ -33,11 +29,11 @@
     "onEnterRules": [
         {
             "beforeText": "^\\s*(?:fn|type|impl|if|elif|else|for|while)\\b.*:\\s*(#.*)?$",
-            "action": { "indentAction": "indent" }
+            "action": { "indent": "indent" }
         },
         {
             "beforeText": "^\\s*$",
-            "action": { "indentAction": "none" }
+            "action": { "indent": "none" }
         }
     ]
 }
