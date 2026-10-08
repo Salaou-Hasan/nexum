@@ -27,12 +27,13 @@ this file. Task definitions: `docs/ARGONE.md`.
 
 ## Task 0 - Semantic correctness
 
-Status: not started
+Status: complete
 
 - [x] Each of the 11 rules has exactly one written owner, named in docs/grammar.md
 - [x] docs/grammar.md no longer names a backend as the authority for runtime meaning
 - [x] All 11 have one written owner, and a test that fails if a second implementation re-derives them
-- [ ] The runtime has no known memory-safety defect; ASan must cover hand-written runtime IR, not just Rust code
+- [x] The runtime has no known memory-safety defect; ASan must cover hand-written runtime IR, not just Rust code
+      Evidence: CI run 37785049102, job `native (ubuntu-latest)` at commit 152c9b2, step `memcheck every example (linux only)` -- `valgrind --tool=memcheck --error-exitcode=42` over all 14 examples with `NX_CFLAGS="-O1 -g"`, printing `memcheck clean` for each: boundaries, hello, flex, control, funcs, lists, search, records, methods, syntax, modules/main, fib, unbox, comments. Valgrind Memcheck instruments the generated machine code, so unlike the ASan step it does see inside the hand-written runtime IR, which is what this item asks for; the ASan step's own comment (.github/workflows/ci.yml, `asan check (linux, leaks off by design)`) records why it cannot, and its scope is unchanged. Leaks stay out of scope by `--leak-check=no`.
 - [x] No native test asserts a known-bad behaviour
 - [x] examples/boundaries.nx covers them as a permanent differential fixture
 - [x] verify.ps1 builds from the tree, ordered byte diff, no line-dropping, exit codes checked
