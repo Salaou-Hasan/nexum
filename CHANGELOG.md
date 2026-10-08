@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.4.4
+
+### Fixed: a short-circuit operand containing arithmetic produced IR clang rejected
+`xs[i - 1] > xs[i] and xs[i] > xs[i]` is not straight-line code. Each
+checked subtraction opens its own overflow diamond, so the right-hand
+operand's value ends up in the last of those blocks -- not in the block
+the merge opened for it. The merge's `phi` named the block the operand
+*started* in, which was never a predecessor of the merge at all, and
+clang rejected the whole module:
+
+    error: invalid LLVM IR input: PHI node entries do not match predecessors!
+
+Nothing in the suite covered the shape, so four benchmark workloads
+(`sortint`, `sortstr`, `strscan`, `textstat`) had silently stopped
+building, and any program combining `and`/`or` with arithmetic, a
+subscript, or a nested `and`/`or` was rejected the same way. The
+`a if c else b` conditional had the identical defect in both arms.
+
+The emitter now tracks the block it is writing into and closes it when
+an operand turns out not to have stayed straight-line, so the `phi`
+names the block that actually holds the value. Pinned by
+`every_phi_names_a_real_predecessor`, which checks the invariant
+directly rather than one program's shape, and by an end-to-end test
+that compiles and runs the shape.
+
+### Editor: indentation tracks Python's system instead of hand-rolled rules
+`language-configuration.json` now mirrors VS Code's built-in Python
+config rule-for-rule: block-opener `onEnter` rule, `elif`/`else`
+dedent, off-side folding, `#region` markers. It cannot literally be
+Python's file -- Python's patterns don't know `fn`, `type` or `impl`,
+and its string-prefix pairs don't exist in NX -- so the keywords, the
+comment-tolerant trailing colon, and the blank-line rule stay NX's
+own; everything else tracks upstream. No behavior changes beyond the
+`#region` folding markers.
+
 ## v0.4.3
 
 ### Error highlighter: one root cause, not sixteen squiggles

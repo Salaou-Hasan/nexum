@@ -401,6 +401,96 @@ mod tests {
         }
     }
 
+    /// Structural invariant: every `phi` names blocks that really do branch
+    /// to the block holding the `phi`.
+    ///
+    /// A `phi` is only meaningful relative to a predecessor edge. The
+    /// backend builds a merge by opening a block, emitting an arm into it,
+    /// and naming that block in the `phi` -- which silently assumes the arm
+    /// stayed straight-line. It does not: `xs[i - 1] > xs[i]` opens an
+    /// overflow diamond per checked subtraction, so the arm's value ends up
+    /// in the last of those, and the named block is not a predecessor of
+    /// the merge at all. clang rejects the whole module:
+    ///
+    ///     error: invalid LLVM IR input: PHI node entries do not match predecessors!
+    ///
+    /// Nothing in the suite covered the shape, so four benchmark workloads
+    /// (`sortint`, `sortstr`, `strscan`, `textstat`) had stopped building.
+    #[test]
+    fn every_phi_names_a_real_predecessor() {
+        let ir = compile_entry(
+            "xs = [3, 2, 1]\n\
+             i = 1\n\
+             a = xs[i - 1] > xs[i] and xs[i] > xs[i + 1] - 3\n\
+             b = xs[i - 1] > xs[i] or xs[i] > xs[i + 1] - 3\n\
+             c = i > 0 and (xs[i - 1] > 5 or xs[i] > 5)\n\
+             d = len(xs) - 1 if i > 0 and xs[i - 1] > xs[i] else 0\n\
+             e = 100 + 1 if i > 1 else 7 + 2\n\
+             while i < 3 and xs[i - 1] > xs[i]:\n\
+             \x20   print(i)\n\
+             \x20   i = i + 1\n\
+             for v in xs:\n\
+             \x20   if v > 1 and v - 1 > 0:\n\
+             \x20       print(v)\n\
+             print(a, b, c, d, e)\n",
+            std::path::Path::new("."),
+        )
+        .unwrap();
+
+        for (name, body) in functions(&ir) {
+            // Block label -> its terminator, and block label -> the phis in it.
+            let mut term: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            let mut phis: Vec<(String, String)> = Vec::new();
+            let mut cur = String::new();
+            for line in body.lines() {
+                let t = line.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                if t.ends_with(':') && !t.contains(' ') && !t.contains('=') {
+                    cur = t.trim_end_matches(':').to_string();
+                } else if t.starts_with("br ") || t.starts_with("ret ") || t == "unreachable" {
+                    term.insert(cur.clone(), t.to_string());
+                } else if t.contains(" = phi ") {
+                    phis.push((cur.clone(), t.to_string()));
+                }
+            }
+            for (block, phi) in &phis {
+                for m in incoming_labels(phi) {
+                    let ends = term
+                        .get(&m)
+                        .unwrap_or_else(|| panic!("{name}: phi names unknown block %{m}: {phi}"));
+                    assert!(
+                        ends.contains(&format!("label %{block}")),
+                        "{name}: phi in %{block} names %{m}, whose terminator \
+                         does not branch there: {ends}\n{phi}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The `%label` of each `[ value, %label ]` pair in a `phi` line.
+    fn incoming_labels(phi: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes: Vec<char> = phi.chars().collect();
+        let mut i = 0;
+        while i + 1 < bytes.len() {
+            if bytes[i] == ',' && bytes[i + 1].is_whitespace() && bytes[i + 2..].starts_with(&['%']) {
+                let rest: String = bytes[i + 3..].iter().collect();
+                let label: String =
+                    rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.').collect();
+                if !label.is_empty() {
+                    out.push(label);
+                }
+                i += 3;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
     /// `parallel:` was removed rather than deprecated. It asked the scheduler
     /// to prove race-freedom statically, and the proof had holes: a name
     /// bound inside a `parallel:` block is a module global in the emitted
@@ -1529,6 +1619,14 @@ struct Gen {
     globals: HashSet<String>,
     cur_module: String,
     cur_fn: String,
+    /// Name of the basic block the emitter is currently writing into: the
+    /// last label passed to `block()`. A phi names the block its incoming
+    /// value was computed in, so anything that assumes "I am still in the
+    /// block I just opened" has to be able to check that. It is not: a
+    /// subexpression can open blocks of its own -- every checked
+    /// arithmetic op does, and so does a nested `and`/`or` -- and leave
+    /// the emitter somewhere else entirely.
+    cur_block: String,
     /// When true, `w()` writes to the top-level buffer (for outlining
     /// task functions in the middle of another function body).
     to_top: bool,
@@ -1646,6 +1744,7 @@ impl Gen {
             globals: HashSet::new(),
             cur_module: String::new(),
             cur_fn: String::new(),
+            cur_block: String::new(),
             to_top: false,
             in_init: false,
             term: None,
@@ -1892,6 +1991,40 @@ impl Gen {
             self.out.push_str(s);
             self.out.push('\n');
         }
+    }
+
+    /// Open a basic block. Every label in the generated IR goes through
+    /// here, so `cur_block` is always the truth about where the next
+    /// instruction lands.
+    fn block(&mut self, name: &str) {
+        self.w(&format!("{name}:"));
+        self.cur_block = name.to_string();
+    }
+
+    /// Close the current block and continue in a fresh one, unless the
+    /// emitter is still in `opened`. Returns the label that now holds
+    /// whatever the just-emitted expression produced.
+    ///
+    /// This exists because a phi has to name the block its incoming value
+    /// was computed in, and "the block I opened before emitting that
+    /// expression" is only true when the expression stayed straight-line.
+    /// `xs[i - 1] > xs[i]` does not: the two checked subtractions each open
+    /// an `ovf_ok`/`ovf_done` diamond, so the comparison lands in the last
+    /// of those, not in the block the caller opened. Naming the caller's
+    /// block there produced IR clang rejects --
+    /// `PHI node entries do not match predecessors!` -- because the named
+    /// block was never a predecessor of the merge at all.
+    ///
+    /// The new block has exactly one predecessor, so the value dominates it
+    /// and a phi naming it is well formed.
+    fn funnel(&mut self, opened: &str) -> String {
+        if self.cur_block == opened {
+            return opened.to_string();
+        }
+        let j = self.lab("funnel");
+        self.w(&format!("  br label %{j}"));
+        self.block(&j);
+        j
     }
 
     // --- entry-block allocation -------------------------------------
@@ -2349,14 +2482,14 @@ impl Gen {
         self.cur_fn = "<top>".to_string();
         let init = mangle_init(module);
         self.w(&format!("define void @{init}() {{"));
-        self.w("entry:");
+        self.block("entry");
         self.begin_allocs();
         let flag = self.reg();
         let run = self.lab("initrun");
         let skip = self.lab("initskip");
         self.w(&format!("  {flag} = load i1, ptr @{done}"));
         self.w(&format!("  br i1 {flag}, label %{skip}, label %{run}"));
-        self.w(&format!("{run}:"));
+        self.block(&format!("{run}"));
         self.w(&format!("  store i1 true, ptr @{done}"));
         for s in &prog.stmts {
             if matches!(s, Stmt::Fn { .. }) {
@@ -2372,7 +2505,7 @@ impl Gen {
         if self.term.is_none() {
             self.w("  ret void");
         }
-        self.w(&format!("{skip}:"));
+        self.block(&format!("{skip}"));
         self.w("  ret void");
         self.w("}");
         self.end_allocs();
@@ -2384,7 +2517,7 @@ impl Gen {
 
     fn emit_main(&mut self) {
         self.w("define i32 @main() {");
-        self.w("entry:");
+        self.block("entry");
         self.w(&format!("  call void @{}()", mangle_init("__main__")));
         self.w("  ret i32 0");
         self.w("}");
@@ -2450,7 +2583,7 @@ impl Gen {
         self.rep.clear();
         self.term = None;
         self.w(&format!("define %NxVal @{fname}(%NxVal* %args, i64 %nargs) {{"));
-        self.w("entry:");
+        self.block("entry");
         self.begin_allocs();
         // Memo prologue for purity-proven functions: hit returns cached.
         // `memo_key` is None for anything whose call has effects the cache
@@ -2466,7 +2599,7 @@ impl Gen {
             let go = self.lab("mhit");
             let miss = self.lab("mmiss");
             self.w(&format!("  br i1 {hit}, label %{go}, label %{miss}"));
-            self.w(&format!("{go}:"));
+            self.block(&format!("{go}"));
             let cv = self.reg();
             self.w(&format!("  {cv} = load %NxVal, ptr {slot}"));
             // The cache holds one box shared across calls; the caller gets
@@ -2475,7 +2608,7 @@ impl Gen {
             let cc = self.reg();
             self.w(&format!("  {cc} = call %NxVal @nx_clone(%NxVal {cv})"));
             self.w(&format!("  ret %NxVal {cc}"));
-            self.w(&format!("{miss}:"));
+            self.block(&format!("{miss}"));
         }
         let saved = self.cur_module.clone();
         let saved_fn = self.cur_fn.clone();
@@ -2716,11 +2849,11 @@ impl Gen {
                 let fail = self.lab("assert_fail");
                 let done = self.lab("assert_done");
                 self.w(&format!("  br i1 {b}, label %{ok}, label %{fail}"));
-                self.w(&format!("{ok}:"));
+                self.block(&format!("{ok}"));
                 self.w(&format!("  br label %{done}"));
                 // The failing path is a separate block, so an assertion that
                 // holds costs one branch and nothing else.
-                self.w(&format!("{fail}:"));
+                self.block(&format!("{fail}"));
                 match message {
                     Some(m) => {
                         let mv = self.emit_expr(m)?;
@@ -2730,7 +2863,7 @@ impl Gen {
                     None => self.w("  call void @nx_assert_fail()"),
                 }
                 self.w("  unreachable");
-                self.w(&format!("{done}:"));
+                self.block(&format!("{done}"));
                 Ok(())
             }
             Stmt::TypeDecl { .. } => {
@@ -2770,11 +2903,11 @@ impl Gen {
                 let bodyl = self.lab("wbody");
                 let endl = self.lab("wend");
                 self.w(&format!("  br label %{condl}"));
-                self.w(&format!("{condl}:"));
+                self.block(&format!("{condl}"));
                 let c = self.emit_expr(cond)?;
                 let b = self.as_i1(&c);
                 self.w(&format!("  br i1 {b}, label %{bodyl}, label %{endl}"));
-                self.w(&format!("{bodyl}:"));
+                self.block(&format!("{bodyl}"));
                 self.loops.push((condl.clone(), endl.clone()));
                 self.term = None;
                 for s in body {
@@ -2788,17 +2921,17 @@ impl Gen {
                 match body_term {
                     Some(Term::Ret) => {
                         self.term = Some(Term::Ret);
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.w("  unreachable");
                     }
                     Some(_) => {
                         // break/continue already branched; no back-edge.
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.term = None;
                     }
                     None => {
                         self.w(&format!("  br label %{condl}"));
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.term = None;
                     }
                 }
@@ -3459,7 +3592,7 @@ impl Gen {
             let cv = self.emit_expr(c)?;
             let bv = self.as_i1(&cv);
             self.w(&format!("  br i1 {bv}, label %{bodyl}, label %{next}"));
-            self.w(&format!("{bodyl}:"));
+            self.block(&format!("{bodyl}"));
             self.term = None;
             for s in b {
                 self.emit_stmt(s)?;
@@ -3472,7 +3605,7 @@ impl Gen {
                 reachable = true;
             }
             self.term = None;
-            self.w(&format!("{next}:"));
+            self.block(&format!("{next}"));
         }
         if let Some(b) = else_body {
             self.term = None;
@@ -3492,7 +3625,7 @@ impl Gen {
             self.w(&format!("  br label %{endl}"));
             reachable = true;
         }
-        self.w(&format!("{endl}:"));
+        self.block(&format!("{endl}"));
         if reachable {
             self.term = None;
         } else {
@@ -3529,7 +3662,7 @@ impl Gen {
                 // the condition re-tests the same index and never terminates.
                 let latchl = self.lab("flatch");
                 self.w(&format!("  br label %{condl}"));
-                self.w(&format!("{condl}:"));
+                self.block(&format!("{condl}"));
                 let cur = self.reg();
                 let go = self.reg();
                 let goup = self.reg();
@@ -3539,7 +3672,7 @@ impl Gen {
                 self.w(&format!("  {godn} = icmp sgt i64 {cur}, {b}"));
                 self.w(&format!("  {go} = select i1 {up}, i1 {goup}, i1 {godn}"));
                 self.w(&format!("  br i1 {go}, label %{bodyl}, label %{endl}"));
-                self.w(&format!("{bodyl}:"));
+                self.block(&format!("{bodyl}"));
                 // The induction variable is statically Int.
                 let iv = NV::raw(Ty::Int, cur.clone());
                 let scope = self.bind_loop_var(var, &iv);
@@ -3559,23 +3692,23 @@ impl Gen {
                 match bt {
                     Some(Term::Ret) => {
                         self.term = Some(Term::Ret);
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.w("  unreachable");
                     }
                     Some(_) => {
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.term = None;
                     }
                     None => {
                         self.w(&format!("  br label %{latchl}"));
-                        self.w(&format!("{latchl}:"));
+                        self.block(&format!("{latchl}"));
                         let cur3 = self.reg();
                         let nxt = self.reg();
                         self.w(&format!("  {cur3} = load i64, ptr {slot}"));
                         self.w(&format!("  {nxt} = add i64 {cur3}, {step}"));
                         self.w(&format!("  store i64 {nxt}, ptr {slot}"));
                         self.w(&format!("  br label %{condl}"));
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.term = None;
                     }
                 }
@@ -3598,13 +3731,13 @@ impl Gen {
                 // See the range arm: `continue` must go through the increment.
                 let latchl = self.lab("elatch");
                 self.w(&format!("  br label %{condl}"));
-                self.w(&format!("{condl}:"));
+                self.block(&format!("{condl}"));
                 let i = self.reg();
                 let go = self.reg();
                 self.w(&format!("  {i} = load i64, ptr {islot}"));
                 self.w(&format!("  {go} = icmp slt i64 {i}, {n}"));
                 self.w(&format!("  br i1 {go}, label %{bodyl}, label %{endl}"));
-                self.w(&format!("{bodyl}:"));
+                self.block(&format!("{bodyl}"));
                 let el = self.reg();
                 let scope = if is_dict {
                     // Iterating a dict yields its keys, in insertion order.
@@ -3656,23 +3789,23 @@ impl Gen {
                 match bt {
                     Some(Term::Ret) => {
                         self.term = Some(Term::Ret);
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.w("  unreachable");
                     }
                     Some(_) => {
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.term = None;
                     }
                     None => {
                         self.w(&format!("  br label %{latchl}"));
-                        self.w(&format!("{latchl}:"));
+                        self.block(&format!("{latchl}"));
                         let i2 = self.reg();
                         let i3 = self.reg();
                         self.w(&format!("  {i2} = load i64, ptr {islot}"));
                         self.w(&format!("  {i3} = add i64 {i2}, 1"));
                         self.w(&format!("  store i64 {i3}, ptr {islot}"));
                         self.w(&format!("  br label %{condl}"));
-                        self.w(&format!("{endl}:"));
+                        self.block(&format!("{endl}"));
                         self.term = None;
                     }
                 }
@@ -3700,13 +3833,13 @@ impl Gen {
         let bodyl = self.lab("rng_body");
         let endl = self.lab("rng_end");
         self.w(&format!("  br label %{condl}"));
-        self.w(&format!("{condl}:"));
+        self.block(&format!("{condl}"));
         let i = self.reg();
         self.w(&format!("  {i} = load i64, ptr {ireg}"));
         let done = self.reg();
         self.w(&format!("  {done} = icmp sge i64 {i}, {n}"));
         self.w(&format!("  br i1 {done}, label %{endl}, label %{bodyl}"));
-        self.w(&format!("{bodyl}:"));
+        self.block(&format!("{bodyl}"));
         let v = self.reg();
         self.w(&format!("  {v} = add i64 {start}, {i}"));
         let bv = self.reg();
@@ -3716,7 +3849,7 @@ impl Gen {
         self.w(&format!("  {inc} = add i64 {i}, 1"));
         self.w(&format!("  store i64 {inc}, ptr {ireg}"));
         self.w(&format!("  br label %{condl}"));
-        self.w(&format!("{endl}:"));
+        self.block(&format!("{endl}"));
     }
 
     fn emit_expr(&mut self, expr: &Expr) -> Result<NV, CodegenError> {
@@ -3825,19 +3958,24 @@ impl Gen {
                 let el = self.lab("if_else");
                 let jn = self.lab("if_join");
                 self.w(&format!("  br i1 {b}, label %{tl}, label %{el}"));
-                self.w(&format!("{tl}:"));
+                self.block(&format!("{tl}"));
                 let tv = self.emit_expr(then_value)?;
                 let tb = self.unbox(&tv);
+                // An arm can open blocks of its own -- `if c: xs[i-1] else: y`
+                // leaves the subtraction's `ovf_done` holding the value -- so
+                // the phi below may not name `%if_then`/`%if_else` directly.
+                let theld = self.funnel(&tl);
                 self.w(&format!("  br label %{jn}"));
-                self.w(&format!("{el}:"));
+                self.block(&format!("{el}"));
                 let ev = self.emit_expr(else_value)?;
                 let eb = self.unbox(&ev);
+                let eheld = self.funnel(&el);
                 self.w(&format!("  br label %{jn}"));
-                self.w(&format!("{jn}:"));
+                self.block(&format!("{jn}"));
                 // Both arms carry the same `%NxVal` type, so a phi over the
                 // boxed form is all that is needed to merge them.
                 let out = self.reg();
-                self.w(&format!("  {out} = phi %NxVal [ {tb}, %{tl} ], [ {eb}, %{el} ]"));
+                self.w(&format!("  {out} = phi %NxVal [ {tb}, %{theld} ], [ {eb}, %{eheld} ]"));
                 // The phi merges the boxed form, so the result type only has to be
                 // precise when both arms agree. Otherwise it stays dynamic,
                 // which is correct and merely unspecialised. Fresh only when
@@ -3904,13 +4042,13 @@ impl Gen {
                 let bodyl = self.lab("comp_body");
                 let endl = self.lab("comp_end");
                 self.w(&format!("  br label %{condl}"));
-                self.w(&format!("{condl}:"));
+                self.block(&format!("{condl}"));
                 let i = self.reg();
                 self.w(&format!("  {i} = load i64, ptr {ireg}"));
                 let done = self.reg();
                 self.w(&format!("  {done} = icmp sge i64 {i}, {n}"));
                 self.w(&format!("  br i1 {done}, label %{endl}, label %{bodyl}"));
-                self.w(&format!("{bodyl}:"));
+                self.block(&format!("{bodyl}"));
                 // Fetch the current element through the same helpers the
                 // `for` loop uses, so both spellings agree: a string
                 // yields one-character strings (nx_index), a dynamic
@@ -3958,12 +4096,12 @@ impl Gen {
                         let drop = self.lab("comp_drop");
                         let adv = self.lab("comp_adv");
                         self.w(&format!("  br i1 {cb}, label %{take}, label %{drop}"));
-                        self.w(&format!("{take}:"));
+                        self.block(&format!("{take}"));
                         emit_push(self)?;
                         self.w(&format!("  br label %{adv}"));
-                        self.w(&format!("{drop}:"));
+                        self.block(&format!("{drop}"));
                         self.w(&format!("  br label %{adv}"));
-                        self.w(&format!("{adv}:"));
+                        self.block(&format!("{adv}"));
                     }
                     None => emit_push(self)?,
                 }
@@ -3971,7 +4109,7 @@ impl Gen {
                 self.w(&format!("  {inc} = add i64 {i}, 1"));
                 self.w(&format!("  store i64 {inc}, ptr {ireg}"));
                 self.w(&format!("  br label %{condl}"));
-                self.w(&format!("{endl}:"));
+                self.block(&format!("{endl}"));
                 let res = self.reg();
                 self.w(&format!("  {res} = load %NxVal, ptr {slot}"));
                 Ok(NV::fresh_boxed(res, items_ty))
@@ -4207,12 +4345,12 @@ impl Gen {
         self.w(&format!("  {out} = extractvalue {{ i64, i1 }} {pair}, 0"));
         self.w(&format!("  {flag} = extractvalue {{ i64, i1 }} {pair}, 1"));
         self.w(&format!("  br i1 {flag}, label %{bad}, label %{ok}"));
-        self.w(&format!("{ok}:"));
+        self.block(&format!("{ok}"));
         self.w(&format!("  br label %{done}"));
-        self.w(&format!("{bad}:"));
+        self.block(&format!("{bad}"));
         self.w("  call void @nx_panic(ptr @.msg.overflow)");
         self.w("  unreachable");
-        self.w(&format!("{done}:"));
+        self.block(&format!("{done}"));
     }
 
     /// Emit one binary arithmetic or bitwise operation from the rule
@@ -4488,17 +4626,22 @@ impl Gen {
             BinOp::And => "false",
             _ => "true",
         };
-        self.w(&format!("{short}:"));
+        self.block(&format!("{short}"));
         self.w(&format!("  br label %{merge}"));
-        self.w(&format!("{rhs}:"));
+        self.block(&format!("{rhs}"));
         let rv = self.emit_expr(right)?;
         let rb = self.as_i1(&rv);
+        // The right operand can open blocks of its own -- `i < n and xs[i-1] > xs[i]`
+        // puts two checked subtractions and their diamonds in here -- so the
+        // value may no longer live in `%rhs`. The phi below names the block
+        // it does live in, so funnel first.
+        let held = self.funnel(&rhs);
         // RHS is an expression: it cannot terminate (no return/break inside).
         self.w(&format!("  br label %{merge}"));
-        self.w(&format!("{merge}:"));
+        self.block(&format!("{merge}"));
         // The result is always a proven Bool: both operands had to be.
         let phi = self.reg();
-        self.w(&format!("  {phi} = phi i1 [{decided}, %{short}], [{rb}, %{rhs}]"));
+        self.w(&format!("  {phi} = phi i1 [{decided}, %{short}], [{rb}, %{held}]"));
         Ok(NV::raw(Ty::Bool, phi))
     }
 

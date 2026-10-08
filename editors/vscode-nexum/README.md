@@ -23,8 +23,8 @@ nx setup --apply  # writes it (keeps a .bak backup)
 
 ### A. Copy into extensions (simplest)
 1. Close VS Code.
-2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.3`
-   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.3\package.json`).
+2. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.4`
+   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.4\package.json`).
 3. Reopen VS Code on `C:\nexum`. Open any `.nx` file — bottom-right should say **Nexum**.
 
 ### B. Debug once (no copy)
@@ -35,11 +35,18 @@ nx setup --apply  # writes it (keeps a .bak backup)
 ## What you get
 - `.nx` recognized as Nexum (no Python extension needed)
 - `#` comments, `"strings"`, `123` / `10.8`, keywords, `fn()` calls
-- `:` + Enter auto-indents on block openers only (`fn`, `type`, `impl`,
-  `if`/`elif`/`else`, `for`, `while`); Enter on a blank line keeps that
-  line's own indent instead of inheriting the block above, so leaving a
-  function no longer pulls you back inside it; blank lines fold with the
-  block above, so guides stop at scope boundaries
+- Python's indentation system, with NX keywords: `language-configuration.json`
+  mirrors VS Code's built-in Python config rule-for-rule (block-opener
+  `onEnter` rule, `elif`/`else` dedent, off-side folding, `#region`
+  markers). It cannot literally *be* Python's file -- Python's patterns
+  don't know `fn`, `type` or `impl`, and its string-prefix pairs don't
+  exist in NX -- so the keywords, the comment-tolerant trailing colon,
+  and the blank-line rule are NX's own; everything else tracks upstream
+  instead of being hand-rolled. Concretely: `:` + Enter auto-indents on
+  block openers only; Enter on a blank line keeps that line's own
+  indent instead of inheriting the block above, so leaving a function
+  no longer pulls you back inside it; blank lines fold with the block
+  above, so guides stop at scope boundaries
 - `()` `[]` `""` auto-close
 - Spaces, tabSize 4 (tabs still rejected by the `nx` lexer)
 - Error squiggles from `nx check`: on save, on tab switch, and on
@@ -48,4 +55,4 @@ nx setup --apply  # writes it (keeps a .bak backup)
   save hook off)
 
 ## Uninstall / update
-Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.3` and repeat A.
+Delete `%USERPROFILE%\.vscode\extensions\nexum-0.4.4` and repeat A.

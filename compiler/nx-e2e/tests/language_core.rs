@@ -1199,3 +1199,34 @@ fn and_or_short_circuit_on_both_branches() {
         &["false", "right", "false", "true", "right", "false"],
     );
 }
+
+/// A short-circuit operand is not straight-line code. `xs[i - 1] > xs[i]`
+/// emits an overflow diamond per checked subtraction, so the operand's
+/// value lands in the last of those blocks rather than the one the merge
+/// opened for it. The merge named the block the operand *started* in, which
+/// was never a predecessor of it, and clang rejected the module outright
+/// ("PHI node entries do not match predecessors!"). Four benchmark
+/// workloads stopped building and no test covered the shape, so this
+/// pins both operators, a nested one, a loop condition and the
+/// conditional expression against a real compile.
+#[test]
+fn a_short_circuit_operand_that_opens_blocks_still_merges() {
+    assert_output(
+        "xs = [3, 2, 1]\n\
+         i = 1\n\
+         print(xs[i - 1] > xs[i] and xs[i] > xs[i + 1] - 3)\n\
+         print(xs[i - 1] > xs[i] or xs[i] > xs[i + 1] - 3)\n\
+         print(i > 5 or xs[i] > xs[i + 1] - 3)\n\
+         print(i > 0 and (xs[i - 1] > 5 or xs[i] > 5))\n\
+         print(len(xs) - 1 if i > 0 and xs[i - 1] > xs[i] else 0)\n\
+         print(100 + 1 if i > 1 else 7 + 2)\n\
+         print(1 if i > 0 else 2 if i > 5 else 3)\n\
+         j = 1\n\
+         while j < 3 and xs[j - 1] > xs[j]:\n\
+         \x20   print(j)\n\
+         \x20   j = j + 1\n",
+        &[
+            "true", "true", "true", "false", "2", "9", "1", "1", "2",
+        ],
+    );
+}
