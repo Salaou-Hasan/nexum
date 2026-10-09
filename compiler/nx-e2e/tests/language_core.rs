@@ -1260,3 +1260,52 @@ fn a_short_circuit_operand_that_opens_blocks_still_merges() {
         &["true", "true", "true", "false", "2", "9", "1", "1", "2"],
     );
 }
+
+/// A matrix is a 2-D list of lists, and `*` on two of them is the matrix
+/// product: `List(List(Int)) * List(List(Int)) -> List(List(Int))`. The
+/// literal may span lines; without the bracket-aware lexer every such
+/// break was a parse error.
+#[test]
+fn matrix_mul_is_matrix_product_and_spans_lines() {
+    assert_output(
+        "a = [\n    [1, 2, 3],\n    [4, 5, 6],\n    [7, 8, 9]\n]\n\
+         b = [\n    [9, 8, 7],\n    [6, 5, 4],\n    [3, 2, 1]\n]\n\
+         c = a * b\n\
+         print(c)\n",
+        &["[[30, 24, 18], [84, 69, 54], [138, 114, 90]]"],
+    );
+}
+
+/// A non-square product, and left-multiplication by the identity.
+#[test]
+fn matrix_mul_handles_nonsquare_shapes() {
+    assert_output(
+        "a = [[1, 2, 3], [4, 5, 6]]\n\
+         b = [[7, 8], [9, 10], [11, 12]]\n\
+         print(a * b)\n\
+         print([[1, 0], [0, 1]] * [[1, 2], [3, 4]])\n",
+        &["[[58, 64], [139, 154]]", "[[1, 2], [3, 4]]"],
+    );
+}
+
+/// A ragged nested list is not a matrix, and conformable shapes are
+/// checked: both are the runtime error `matrix shape mismatch`, which
+/// names both shapes, not an out-of-bounds read.
+#[test]
+fn matrix_shapes_must_conform() {
+    assert_runtime_error(
+        "a = [[1, 2], [3]]\nb = [[1, 2], [3, 4]]\nprint(a * b)\n",
+        "matrix shape mismatch: 2x2 * 2x2",
+    );
+    assert_runtime_error(
+        "a = [[1, 2, 3], [4, 5, 6]]\nb = [[1, 2], [3, 4]]\nprint(a * b)\n",
+        "matrix shape mismatch: 2x3 * 2x2",
+    );
+}
+
+/// `*` on two scalar lists is still a compile-time type error: a `List`
+/// element is not a scalar to multiply.
+#[test]
+fn scalar_list_mul_does_not_typecheck() {
+    assert_rejected("a = [1, 2]\nb = [3, 4]\nprint(a * b)\n", "not supported for List");
+}

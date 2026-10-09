@@ -512,6 +512,19 @@ not the representation error. What you see is what the value is to the
 printed precision: no integer part is ever trimmed, so `1e14` is
 `100000000000000`, not `1`.
 
+**R7. `List(List(N))` is a matrix, and `*` on two of them is the matrix
+product.** A matrix has no separate literal: it is an ordinary 2-D list
+of numeric scalars. For two such operands, `*` checks that the columns of
+the left equal the rows of the right and then computes the dot product of
+each row with each column: `a * b` yields the `List(List(N))` whose
+`[i][j]` is `sum_k a[i][k] * b[k][j]`. Cell arithmetic is the ordinary
+scalar arithmetic, so `Int` overflow inside a product still traps under R1
+and `Float` still widens. A non-rectangular operand or a mismatched shape
+is the runtime error `matrix shape mismatch`, which names both shapes
+(`matrix shape mismatch: 2x3 * 2x2`); a ragged literal like `[[1, 2], [3]]`
+fails the same way. Scalar `*` is unchanged, so `*` on two scalar lists
+does not type-check: a `List` element is not a scalar to multiply.
+
 ### 3.2 Primary expressions
 
 ```text
@@ -552,13 +565,12 @@ args  ::= expr ( "," expr )* ","?
 slice ::= [expr] ":" [expr] [ ":" [expr] ]
 ```
 
-Call arguments, list elements and dict entries may span lines: the
-parser skips newlines inside `(`...`)`, `[`...`]` and `{`...`}`. The lexer
-is not bracket-aware, though -- it tracks indentation without regard to
-open brackets. A continuation line dedented to an outer level emits a
-`Dedent` and closes the enclosing block, so in practice a multi-line call
-inside an indented block only works while every continuation line stays
-more indented than the block. The `?` forms in `slice`
+Call arguments, list elements and dict entries may span lines, and a
+continuation line may be indented at any column: the lexer tracks bracket
+depth and emits no `Indent`/`Dedent` while any `(`, `[` or `{` is open, so
+a continuation line neither opens a block nor dedents its parent. The
+block structure resuming after the closing bracket is exactly what it was
+before the bracket opened. The `?` forms in `slice`
 are all optional, so `a[:]`, `a[1:]`, `a[:3]`, `a[::2]` and `a[1:8:2]`
 all parse through the one form.
 

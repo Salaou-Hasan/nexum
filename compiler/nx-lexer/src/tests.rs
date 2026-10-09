@@ -316,6 +316,25 @@ fn indent_dedent() {
 }
 
 #[test]
+fn no_indent_or_dedent_inside_brackets() {
+    // A bracket left open at a line break used to emit an Indent on the
+    // continuation line, so every multi-line list, call or dict literal
+    // was a parse error. The Indent/Dedent channel is silent while any
+    // bracket is open; an actual block still emits them (see
+    // `indent_dedent`).
+    let k = kinds("a = [\n    1,\n    2,\n]\nprint(a)");
+    assert!(
+        !k.iter()
+            .any(|t| matches!(t, TokenKind::Indent | TokenKind::Dedent)),
+        "Indent/Dedent must not be emitted inside brackets: {k:?}"
+    );
+    assert_eq!(k.first(), Some(&TokenKind::Ident));
+    assert!(k.contains(&TokenKind::LBracket));
+    assert!(k.contains(&TokenKind::RBracket));
+    assert_eq!(k.last(), Some(&TokenKind::Eof));
+}
+
+#[test]
 fn bad_char_errors() {
     assert!(lex("@").is_err());
 }

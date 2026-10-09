@@ -152,6 +152,33 @@ pub fn arith_result(l: &Ty, op: BinOp, r: &Ty) -> Option<Ty> {
         (Unknown, _) | (_, Unknown) => Some(Unknown),
         (Int, Int) => Some(Int),
         (Int, Float) | (Float, Int) | (Float, Float) => Some(Float),
+        // List(List(N)) is how NX writes a 2-D numeric matrix, and `*`
+        // on two of them is the matrix product. Both sides must be lists
+        // of lists of numeric scalars; anything else falls through to the
+        // scalar type error below.
+        (List(_), List(_)) if op == BinOp::Mul => {
+            if matrix_scalar(l).is_some() && matrix_scalar(r).is_some() {
+                Some((*l).clone())
+            } else {
+                Option::None
+            }
+        }
+        _ => Option::None,
+    }
+}
+
+/// If `t` is `List(List(N))` for a numeric `N`, return `N`. NX has no
+/// distinct array type: a 2-D matrix *is* a list of lists, which is exactly
+/// how real code writes one.
+fn matrix_scalar(t: &Ty) -> Option<&Ty> {
+    match t {
+        Ty::List(rows) => match &**rows {
+            Ty::List(cells) => match &**cells {
+                Ty::Int | Ty::Float | Ty::Unknown => Some(&**cells),
+                _ => Option::None,
+            },
+            _ => Option::None,
+        },
         _ => Option::None,
     }
 }

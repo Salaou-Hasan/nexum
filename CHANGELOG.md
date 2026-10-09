@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.4.7
+
+### Correction: v0.4.6's release notes described work that was not in the release
+The v0.4.6 commit message advertises a multi-line bracket fix and matrix
+multiplication. Neither was in the shipped code: the lexer had no bracket
+tracking, `*` on nested lists was still a type error, and there was no
+grammar rule or changelog entry for either. The message was written from
+work that had been validated in the working tree but never actually
+committed. This release contains the real implementations, built fresh on
+the current tree and verified below. The v0.4.6 tag and history are left
+untouched; the correction lives here instead.
+
+### Multi-line bracketed literals compile
+The lexer tracked block indentation without tracking brackets, so a `[`,
+`(` or `{` left open at a line break emitted an `Indent`, and the first
+indented continuation line was a parse error
+(`expected expression, found Indent "<indent>"`). The lexer now counts
+open brackets and emits no `Indent`/`Dedent` while one is open, so a
+continuation line may be indented at any column and the block structure
+resumes exactly after the closing bracket. Pinned by
+`no_indent_or_dedent_inside_brackets` in `nx-lexer`.
+
+### `*` on two 2-D numeric lists is the matrix product
+`a * b` where both are `List(List(Int))` / `List(List(Float))` checks that
+the columns of the left equal the rows of the right and computes the dot
+product, returning a `List(List(...))`. Cell arithmetic reuses the scalar
+paths, so `Int` overflow inside a product still traps and `Float` still
+widens. A ragged literal or a mismatched shape is the runtime error
+`matrix shape mismatch`, which names both shapes
+(`matrix shape mismatch: 2x3 * 2x2`). There is no new `Array` type: a
+matrix is an ordinary 2-D list, which is how real code writes one, and a
+separate type would have broken the existing nested-list tests. Stated as
+grammar rule R7; `*` on two scalar lists remains a compile-time type
+error.
+
 ## v0.4.5
 
 ### Fixed: every `onEnterRules` entry was a silent no-op

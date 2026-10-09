@@ -33,8 +33,8 @@ there is nothing to clean up when you upgrade.
    with the new one and you get the old behaviour with no error anywhere.
    Check `%USERPROFILE%\.vscode\extensions` for `nexum-*` and
    `*.vscode-nexum-*` and remove them.
-3. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.5`
-   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.5\package.json`).
+3. Copy `editors/vscode-nexum` to `%USERPROFILE%\.vscode\extensions\nexum-0.4.7`
+   (result: `%USERPROFILE%\.vscode\extensions\nexum-0.4.7\package.json`).
 4. Reopen VS Code on `C:\nexum`. Open any `.nx` file — bottom-right should say **Nexum**.
 
 ### C. Debug once (no copy)

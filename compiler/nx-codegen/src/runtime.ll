@@ -88,6 +88,135 @@ declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
 @.msg.type = private constant [14 x i8] c"type mismatch\00"
 @.msg.notcall = private constant [13 x i8] c"not callable\00"
 @.msg.noattr = private constant [38 x i8] c"only modules support attribute access\00"
+@.msg.shape = private constant [45 x i8] c"matrix shape mismatch: %lldx%lld * %lldx%lld\00"
+
+define void @nx_panic_shape(i64 %m, i64 %k, i64 %rl, i64 %n) {
+entry:
+  %buf = alloca [96 x i8]
+  %bp = getelementptr [96 x i8], ptr %buf, i64 0, i64 0
+  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %bp, i64 96, ptr @.msg.shape, i64 %m, i64 %k, i64 %rl, i64 %n)
+  call void @nx_panic(ptr %bp)
+  unreachable
+}
+
+;; Every row of `%a` must itself be a list of length `%cols`: `%a` is a
+;; rectangular list of lists. Rejects a ragged literal before it can be
+;; misparsed as a matrix.
+define i1 @nx_rect_rows(%NxVal %a, i64 %rows, i64 %cols) {
+entry:
+  %i = alloca i64
+  store i64 0, ptr %i
+  br label %rloop
+rloop:
+  %iv = load i64, ptr %i
+  %im = icmp slt i64 %iv, %rows
+  br i1 %im, label %rbody, label %rdone
+rbody:
+  %row = call %NxVal @nx_listget(%NxVal %a, i64 %iv)
+  %rt = extractvalue %NxVal %row, 0
+  %islist = icmp eq i64 %rt, 5
+  br i1 %islist, label %rlenck, label %rbad
+rlenck:
+  %rc = extractvalue %NxVal %row, 2
+  %eq = icmp eq i64 %rc, %cols
+  br i1 %eq, label %rok, label %rbad
+rok:
+  %in = add i64 %iv, 1
+  store i64 %in, ptr %i
+  br label %rloop
+rbad:
+  ret i1 false
+rdone:
+  ret i1 true
+}
+
+;; Multiply two numeric matrices stored as lists of lists and return the
+;; resulting matrix. `%l` is m by k, `%r` is k by n, the result is m by n,
+;; and cell [i][j] is the dot product of row i with column j. Cell
+;; arithmetic reuses `nx_mul`/`nx_add`, so Int overflow still traps and
+;; Float still widens, exactly as the scalar operators do.
+define %NxVal @nx_matmul(%NxVal %l, %NxVal %r) {
+entry:
+  ; Allocas live in the entry block: one inside a loop body would take a
+  ; fresh address per iteration and only release it at return.
+  %i = alloca i64
+  %j = alloca i64
+  %p = alloca i64
+  %acc = alloca %NxVal
+  %res_slot = alloca %NxVal
+  %row_slot = alloca %NxVal
+  %m = extractvalue %NxVal %l, 2
+  %lrow0 = call %NxVal @nx_listget(%NxVal %l, i64 0)
+  %k = extractvalue %NxVal %lrow0, 2
+  %rl = extractvalue %NxVal %r, 2
+  %rrow0 = call %NxVal @nx_listget(%NxVal %r, i64 0)
+  %n = extractvalue %NxVal %rrow0, 2
+  %ok = icmp eq i64 %k, %rl
+  br i1 %ok, label %mok_shape, label %mshapeerr
+mok_shape:
+  %rectl = call i1 @nx_rect_rows(%NxVal %l, i64 %m, i64 %k)
+  br i1 %rectl, label %mrectr, label %mshapeerr
+mrectr:
+  %rectr_v = call i1 @nx_rect_rows(%NxVal %r, i64 %rl, i64 %n)
+  br i1 %rectr_v, label %mbuild, label %mshapeerr
+mshapeerr:
+  call void @nx_panic_shape(i64 %m, i64 %k, i64 %rl, i64 %n)
+  unreachable
+mbuild:
+  %res0 = call %NxVal @nx_new_list(i64 %m)
+  store %NxVal %res0, ptr %res_slot
+  store i64 0, ptr %i
+  br label %miloop
+miloop:
+  %iv = load i64, ptr %i
+  %im = icmp slt i64 %iv, %m
+  br i1 %im, label %mibody, label %midone
+mibody:
+  %row_l = call %NxVal @nx_listget(%NxVal %l, i64 %iv)
+  %row0 = call %NxVal @nx_new_list(i64 %n)
+  store %NxVal %row0, ptr %row_slot
+  store i64 0, ptr %j
+  br label %mjloop
+mjloop:
+  %jv = load i64, ptr %j
+  %jn = icmp slt i64 %jv, %n
+  br i1 %jn, label %mjbody, label %mjdone
+mjbody:
+  store i64 0, ptr %p
+  %zeroval = call %NxVal @nx_int(i64 0)
+  store %NxVal %zeroval, ptr %acc
+  br label %mploop
+mploop:
+  %pv = load i64, ptr %p
+  %pk = icmp slt i64 %pv, %k
+  br i1 %pk, label %mpbody, label %mpdone
+mpbody:
+  %a_ip = call %NxVal @nx_listget(%NxVal %row_l, i64 %pv)
+  %b_rowp = call %NxVal @nx_listget(%NxVal %r, i64 %pv)
+  %b_pj = call %NxVal @nx_listget(%NxVal %b_rowp, i64 %jv)
+  %prod = call %NxVal @nx_mul(%NxVal %a_ip, %NxVal %b_pj)
+  %accv = load %NxVal, ptr %acc
+  %acc2 = call %NxVal @nx_add(%NxVal %accv, %NxVal %prod)
+  store %NxVal %acc2, ptr %acc
+  %pn = add i64 %pv, 1
+  store i64 %pn, ptr %p
+  br label %mploop
+mpdone:
+  %cell = load %NxVal, ptr %acc
+  call void @nx_listpush(ptr %row_slot, %NxVal %cell)
+  %jn2 = add i64 %jv, 1
+  store i64 %jn2, ptr %j
+  br label %mjloop
+mjdone:
+  %rowv = load %NxVal, ptr %row_slot
+  call void @nx_listpush(ptr %res_slot, %NxVal %rowv)
+  %in2 = add i64 %iv, 1
+  store i64 %in2, ptr %i
+  br label %miloop
+midone:
+  %resv = load %NxVal, ptr %res_slot
+  ret %NxVal %resv
+}
 @.msg.inf = private constant [4 x i8] c"inf\00"
 @.msg.ninf = private constant [5 x i8] c"-inf\00"
 @.msg.nan = private constant [4 x i8] c"NaN\00"
@@ -1080,10 +1209,40 @@ define %NxVal @nx_mul(%NxVal %l, %NxVal %r) {
 entry:
   %lt = extractvalue %NxVal %l, 0
   %rt = extractvalue %NxVal %r, 0
-  %li = icmp eq i64 %lt, 1
-  %ri = icmp eq i64 %rt, 1
-  %ii = and i1 %li, %ri
-  br i1 %ii, label %ints, label %nums
+  ; Two non-empty lists whose first elements are themselves lists are
+  ; matrices: dispatch to the matrix product. Anything else falls through
+  ; to the scalar paths below (the checker already rejects `*` on scalar
+  ; lists; this is the dynamic backstop for Unknown-typed values).
+  %l_list = icmp eq i64 %lt, 5
+  %r_list = icmp eq i64 %rt, 5
+  %both_lists = and i1 %l_list, %r_list
+  br i1 %both_lists, label %mat1, label %scalar
+mat1:
+  %l_len = extractvalue %NxVal %l, 2
+  %l_ne = icmp ne i64 %l_len, 0
+  br i1 %l_ne, label %mat2, label %scalar
+mat2:
+  %l0 = call %NxVal @nx_listget(%NxVal %l, i64 0)
+  %l0t = extractvalue %NxVal %l0, 0
+  %l0_is_list = icmp eq i64 %l0t, 5
+  br i1 %l0_is_list, label %mat3, label %scalar
+mat3:
+  %r_len = extractvalue %NxVal %r, 2
+  %r_ne = icmp ne i64 %r_len, 0
+  br i1 %r_ne, label %mat4, label %scalar
+mat4:
+  %r0 = call %NxVal @nx_listget(%NxVal %r, i64 0)
+  %r0t = extractvalue %NxVal %r0, 0
+  %r0_is_list = icmp eq i64 %r0t, 5
+  br i1 %r0_is_list, label %mat5, label %scalar
+mat5:
+  %mm = call %NxVal @nx_matmul(%NxVal %l, %NxVal %r)
+  ret %NxVal %mm
+scalar:
+  %li1 = icmp eq i64 %lt, 1
+  %ri1 = icmp eq i64 %rt, 1
+  %ii1 = and i1 %li1, %ri1
+  br i1 %ii1, label %ints, label %nums
 ints:
   %la = extractvalue %NxVal %l, 1
   %ra = extractvalue %NxVal %r, 1

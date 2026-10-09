@@ -47,6 +47,16 @@ impl Lexer {
         let mut tokens = Vec::new();
         let mut indents: Vec<usize> = vec![0];
         let mut at_line_start = true;
+        // Bracket depth: the number of unclosed `(`, `[` and `{` seen so far.
+        // Inside brackets a newline does not terminate an expression and a
+        // change of column does not open or close a block, so no Indent or
+        // Dedent token may be emitted until depth drops back to 0. Without
+        // this, every bracket left open at a line break emitted an Indent
+        // into the token stream and the first indented continuation line
+        // was a parse error: `expected expression, found Indent "<indent>"`.
+        // Strings and comments are consumed whole elsewhere, so a bracket
+        // inside either never reaches this counter.
+        let mut depth = 0usize;
 
         loop {
             if at_line_start {
@@ -93,31 +103,37 @@ impl Lexer {
                         break;
                     }
                     _ => {
-                        let top = *indents.last().unwrap();
-                        if width > top {
-                            indents.push(width);
-                            tokens.push(Token {
-                                kind: TokenKind::Indent,
-                                lexeme: "<indent>".to_string(),
-                                line: self.line,
-                                col: 1,
-                            });
-                        } else if width < top {
-                            while *indents.last().unwrap() > width {
-                                indents.pop();
+                        // Inside brackets the column is free: continuation
+                        // lines neither open a block nor dedent their parent,
+                        // and the indent stack is left untouched so the block
+                        // structure resumes exactly after the closing bracket.
+                        if depth == 0 {
+                            let top = *indents.last().unwrap();
+                            if width > top {
+                                indents.push(width);
                                 tokens.push(Token {
-                                    kind: TokenKind::Dedent,
-                                    lexeme: "<dedent>".to_string(),
+                                    kind: TokenKind::Indent,
+                                    lexeme: "<indent>".to_string(),
                                     line: self.line,
                                     col: 1,
                                 });
-                            }
-                            if *indents.last().unwrap() != width {
-                                return Err(LexError {
-                                    message: "inconsistent indentation".to_string(),
-                                    line: self.line,
-                                    col: 1,
-                                });
+                            } else if width < top {
+                                while *indents.last().unwrap() > width {
+                                    indents.pop();
+                                    tokens.push(Token {
+                                        kind: TokenKind::Dedent,
+                                        lexeme: "<dedent>".to_string(),
+                                        line: self.line,
+                                        col: 1,
+                                    });
+                                }
+                                if *indents.last().unwrap() != width {
+                                    return Err(LexError {
+                                        message: "inconsistent indentation".to_string(),
+                                        line: self.line,
+                                        col: 1,
+                                    });
+                                }
                             }
                         }
                         at_line_start = false;
@@ -197,6 +213,7 @@ impl Lexer {
                         line,
                         col,
                     });
+                    depth += 1;
                 }
                 Some(')') => {
                     self.advance();
@@ -206,6 +223,9 @@ impl Lexer {
                         line,
                         col,
                     });
+                    if depth > 0 {
+                        depth -= 1;
+                    }
                 }
                 Some('[') => {
                     self.advance();
@@ -215,6 +235,7 @@ impl Lexer {
                         line,
                         col,
                     });
+                    depth += 1;
                 }
                 Some(']') => {
                     self.advance();
@@ -224,6 +245,9 @@ impl Lexer {
                         line,
                         col,
                     });
+                    if depth > 0 {
+                        depth -= 1;
+                    }
                 }
                 Some(',') => {
                     self.advance();
@@ -554,6 +578,7 @@ impl Lexer {
                         line,
                         col,
                     });
+                    depth += 1;
                 }
                 Some('}') => {
                     self.advance();
@@ -563,6 +588,9 @@ impl Lexer {
                         line,
                         col,
                     });
+                    if depth > 0 {
+                        depth -= 1;
+                    }
                 }
                 Some('.') => {
                     let next = self.chars.get(self.pos + 1).copied();
