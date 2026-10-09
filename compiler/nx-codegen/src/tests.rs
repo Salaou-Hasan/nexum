@@ -1,4 +1,3 @@
-
 use crate::mangle::{mangle_fn, mangle_global, mangle_method};
 use crate::{compile_entry, compile_opts};
 
