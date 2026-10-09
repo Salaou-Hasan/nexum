@@ -61,9 +61,46 @@ pub(crate) fn latest_tag() -> Result<String, String> {
         .ok_or("could not parse latest release".to_string())
 }
 
+/// Split the internal resume flag off the argument list. `relaunch_elevated`
+/// re-invokes `nx update --from <tmp> <original args>` so the elevated child
+/// reuses the already-downloaded file instead of fetching the same bytes a
+/// second time; anything else parses as usual. A lone `--from` with no value
+/// is not a pair and passes through to fail as a bogus version downstream.
+fn take_from_flag(rest: &[String]) -> (Option<String>, Vec<String>) {
+    if rest.len() >= 2 && rest[0] == "--from" {
+        (Some(rest[1].clone()), rest[2..].to_vec())
+    } else {
+        (None, rest.to_vec())
+    }
+}
+
+/// Whether the `--from` candidate may be installed as-is: the exact file
+/// this update already downloaded (same file name as the wanted asset),
+/// present and non-empty. Anything else falls back to a fresh download
+/// rather than installing the wrong bytes.
+fn reusable_source(expected: &std::path::Path, candidate: &str) -> bool {
+    let p = std::path::Path::new(candidate);
+    p.file_name() == expected.file_name() && matches!(std::fs::metadata(p), Ok(m) if m.len() > 0)
+}
+
+/// Fetch `url` into `dest`. `--progress-bar` instead of `-s`: on a slow
+/// link the transfer must read as slow, not stuck.
+fn download_file(url: &str, dest: &std::path::Path) -> bool {
+    matches!(
+        std::process::Command::new("curl")
+            .args(["-fSL", "--progress-bar", "-o"])
+            .arg(dest)
+            .arg(url)
+            .status(),
+        Ok(s) if s.success()
+    )
+}
+
 pub(crate) fn update_cmd(rest: &[String]) -> ExitCode {
     // nx update | nx update <ver> | nx update --version <ver>
-    let wanted: Option<String> = match rest {
+    // Plus the internal resume flag below, which is never shown in usage.
+    let (from_flag, args) = take_from_flag(rest);
+    let wanted: Option<String> = match args.as_slice() {
         [] => None,
         [v] if v == "--version" => {
             eprintln!("nx update: --version needs a value, e.g. nx update --version 0.0.2");
@@ -94,16 +131,15 @@ pub(crate) fn update_cmd(rest: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let url = download_url(&tag);
-    println!("nx: downloading {url}");
     let tmp = std::env::temp_dir().join(asset_name(&tag));
-    let dl = std::process::Command::new("curl")
-        .args(["-fsSL", "-o"])
-        .arg(&tmp)
-        .arg(&url)
-        .status();
-    match dl {
-        Ok(s) if s.success() => {}
-        _ => {
+    if from_flag
+        .as_deref()
+        .is_some_and(|p| reusable_source(&tmp, p))
+    {
+        println!("nx: using already-downloaded {}", tmp.display());
+    } else {
+        println!("nx: downloading {url}");
+        if !download_file(&url, &tmp) {
             eprintln!(
                 "nx update: download failed (no {tag} build for {}?)",
                 env!("NX_TARGET")
@@ -126,7 +162,12 @@ pub(crate) fn update_cmd(rest: &[String]) -> ExitCode {
             #[cfg(windows)]
             {
                 eprintln!("nx update: administrator rights needed, requesting elevation...");
-                return relaunch_elevated(rest);
+                let code = relaunch_elevated(&args, &tmp);
+                // The elevated child moves tmp into place on success, so a
+                // declined or failed elevation is the only path that leaves
+                // the download behind.
+                let _ = std::fs::remove_file(&tmp);
+                return code;
             }
             #[cfg(unix)]
             eprintln!("nx update: permission denied, re-run with sudo: sudo nx update");
@@ -159,7 +200,7 @@ pub(crate) fn ps_quote(a: &str) -> String {
 }
 
 #[cfg(windows)]
-pub(crate) fn relaunch_elevated(rest: &[String]) -> ExitCode {
+pub(crate) fn relaunch_elevated(rest: &[String], from: &std::path::Path) -> ExitCode {
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
@@ -167,8 +208,12 @@ pub(crate) fn relaunch_elevated(rest: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // Re-run the same update command elevated via UAC prompt.
+    // Re-run the same update command elevated via UAC prompt. `--from`
+    // carries the already-downloaded file so the child does not fetch the
+    // same bytes a second time over a slow link.
     let mut args = vec![ps_quote("update")];
+    args.push(ps_quote("--from"));
+    args.push(ps_quote(&from.display().to_string()));
     args.extend(rest.iter().map(|a| ps_quote(a)));
     let script = format!(
         "Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -Wait",
@@ -228,12 +273,7 @@ pub(crate) fn update_extension(tag: &str) {
     let url = vsix_url(tag);
     let tmp = std::env::temp_dir().join(vsix_name(tag));
     println!("nx: downloading {url}");
-    let dl = std::process::Command::new("curl")
-        .args(["-fsSL", "-o"])
-        .arg(&tmp)
-        .arg(&url)
-        .status();
-    if !matches!(dl, Ok(s) if s.success()) {
+    if !download_file(&url, &tmp) {
         eprintln!("nx update: extension download failed, skipping");
         return;
     }
@@ -286,6 +326,64 @@ mod tests {
     fn vsix_url_shape() {
         let u = super::vsix_url("v0.0.2");
         assert!(u.ends_with("releases/download/v0.0.2/nexum-v0.0.2.vsix"));
+    }
+
+    #[test]
+    fn from_flag_splits_off() {
+        let (f, a) = super::take_from_flag(&[
+            "--from".to_string(),
+            "C:\\t\\nx.exe".to_string(),
+            "0.0.2".to_string(),
+        ]);
+        assert_eq!(f, Some("C:\\t\\nx.exe".to_string()));
+        assert_eq!(a, vec!["0.0.2".to_string()]);
+    }
+
+    #[test]
+    fn from_flag_absent_passes_through() {
+        let (f, a) = super::take_from_flag(&["0.0.2".to_string()]);
+        assert_eq!(f, None);
+        assert_eq!(a, vec!["0.0.2".to_string()]);
+        let (f, a) = super::take_from_flag(&[]);
+        assert_eq!(f, None);
+        assert!(a.is_empty());
+    }
+
+    #[test]
+    fn from_flag_needs_a_value() {
+        // A lone `--from` is not a pair; it passes through to fail as a
+        // bogus version downstream, never as a reused path.
+        let (f, a) = super::take_from_flag(&["--from".to_string()]);
+        assert_eq!(f, None);
+        assert_eq!(a, vec!["--from".to_string()]);
+    }
+
+    #[test]
+    fn reusable_source_accepts_matching_nonempty_file() {
+        let p = std::env::temp_dir().join("nx-v9.9.9-reuse-ok.exe");
+        std::fs::write(&p, b"x").unwrap();
+        let s = p.to_string_lossy().into_owned();
+        assert!(super::reusable_source(&p, &s));
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn reusable_source_rejects_wrong_name_empty_and_missing() {
+        let dir = std::env::temp_dir();
+        let expected = dir.join("nx-v9.9.9-reuse-no.exe");
+        let other = dir.join("something-else.exe");
+        std::fs::write(&other, b"x").unwrap();
+        let s = other.to_string_lossy().into_owned();
+        assert!(!super::reusable_source(&expected, &s));
+        let empty = dir.join("nx-v9.9.9-reuse-empty.exe");
+        std::fs::write(&empty, b"").unwrap();
+        let s = empty.to_string_lossy().into_owned();
+        assert!(!super::reusable_source(&empty, &s));
+        let missing = dir.join("nx-v9.9.9-reuse-gone.exe");
+        let s = missing.to_string_lossy().into_owned();
+        assert!(!super::reusable_source(&missing, &s));
+        let _ = std::fs::remove_file(&other);
+        let _ = std::fs::remove_file(&empty);
     }
 
     #[cfg(windows)]

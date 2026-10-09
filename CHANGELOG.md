@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.4.8
+
+### `nx update` no longer downloads the same file twice, and shows progress
+On a slow link the update took minutes with no visible activity. Measured
+from the reporter's machine: the 2.37 MB asset fetched at 15-34 KB/s, so
+one download alone takes 1-3 minutes -- and the updater performed it
+twice, once before elevation failed and once after in the elevated child,
+both through silent `curl -s`, with the terminal sitting at `nx:
+downloading ...` the whole time.
+
+The elevated child now reuses the already-downloaded file: the parent
+re-invokes it as `nx update --from <tmp> <original args>` (an internal
+flag, not in usage), and the child installs that file when it is the
+expected asset, present and non-empty, falling back to a fresh download
+otherwise. A declined elevation cleans the download up instead of leaving
+it in temp. All downloads use curl's progress bar instead of silent mode,
+so a slow transfer reads as slow rather than stuck.
+
 ## v0.4.7
 
 ### Correction: v0.4.6's release notes described work that was not in the release
