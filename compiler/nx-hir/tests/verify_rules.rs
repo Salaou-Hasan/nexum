@@ -13,27 +13,56 @@ fn sp() -> Span {
 }
 
 fn int_e() -> HExpr {
-    HExpr { span: sp(), diag: DiagInfo::default(), ty: HTy::Int, kind: HExprKind::Int(1) }
+    HExpr {
+        span: sp(),
+        diag: DiagInfo::default(),
+        ty: HTy::Int,
+        kind: HExprKind::Int(1),
+    }
 }
 
 fn bool_e() -> HExpr {
-    HExpr { span: sp(), diag: DiagInfo::default(), ty: HTy::Bool, kind: HExprKind::Bool(true) }
+    HExpr {
+        span: sp(),
+        diag: DiagInfo::default(),
+        ty: HTy::Bool,
+        kind: HExprKind::Bool(true),
+    }
 }
 
 fn str_e() -> HExpr {
-    HExpr { span: sp(), diag: DiagInfo::default(), ty: HTy::Str, kind: HExprKind::Str("x".to_string()) }
+    HExpr {
+        span: sp(),
+        diag: DiagInfo::default(),
+        ty: HTy::Str,
+        kind: HExprKind::Str("x".to_string()),
+    }
 }
 
 fn float_e() -> HExpr {
-    HExpr { span: sp(), diag: DiagInfo::default(), ty: HTy::Float, kind: HExprKind::Float(1.0) }
+    HExpr {
+        span: sp(),
+        diag: DiagInfo::default(),
+        ty: HTy::Float,
+        kind: HExprKind::Float(1.0),
+    }
 }
 
 fn slot_e(s: Slot, ty: HTy) -> HExpr {
-    HExpr { span: sp(), diag: DiagInfo::default(), ty, kind: HExprKind::Place(Place::Slot(s)) }
+    HExpr {
+        span: sp(),
+        diag: DiagInfo::default(),
+        ty,
+        kind: HExprKind::Place(Place::Slot(s)),
+    }
 }
 
 fn ret_stmt(v: HExpr) -> HStmt {
-    HStmt { span: sp(), diag: DiagInfo::default(), kind: HStmtKind::Return { values: vec![v] } }
+    HStmt {
+        span: sp(),
+        diag: DiagInfo::default(),
+        kind: HStmtKind::Return { values: vec![v] },
+    }
 }
 
 /// A minimal program that verifies:
@@ -49,7 +78,10 @@ fn base() -> HProgram {
         span: sp(),
         diag: DiagInfo::default(),
         ty: HTy::Int,
-        kind: HExprKind::Field { base, field: FieldRef::Static(FieldIdx(idx)) },
+        kind: HExprKind::Field {
+            base,
+            field: FieldRef::Static(FieldIdx(idx)),
+        },
     };
     HProgram {
         modules: vec![HModule {
@@ -60,8 +92,16 @@ fn base() -> HProgram {
             top: FuncId(1),
         }],
         types: vec![
-            HType { module: ModuleId(0), fields: vec![HTy::Int, HTy::Int], diag: DiagInfo::named("Point") },
-            HType { module: ModuleId(0), fields: vec![HTy::Int], diag: DiagInfo::named("Bag") },
+            HType {
+                module: ModuleId(0),
+                fields: vec![HTy::Int, HTy::Int],
+                diag: DiagInfo::named("Point"),
+            },
+            HType {
+                module: ModuleId(0),
+                fields: vec![HTy::Int],
+                diag: DiagInfo::named("Bag"),
+            },
         ],
         methods: vec![HMethod {
             type_id: TypeId(0),
@@ -73,7 +113,10 @@ fn base() -> HProgram {
             HFunc {
                 params: vec![(Slot(0), HTy::Record(TypeId(0)))],
                 ret: HTy::Int,
-                body: vec![ret_stmt(field(Box::new(slot_e(Slot(0), HTy::Record(TypeId(0)))), 0))],
+                body: vec![ret_stmt(field(
+                    Box::new(slot_e(Slot(0), HTy::Record(TypeId(0)))),
+                    0,
+                ))],
                 diag: DiagInfo::default(),
             },
             HFunc {
@@ -129,7 +172,10 @@ fn v2_rejects_an_id_outside_its_table() {
         span: sp(),
         diag: DiagInfo::default(),
         ty: HTy::Record(TypeId(99)),
-        kind: HExprKind::Construct { type_id: TypeId(99), args: Vec::new() },
+        kind: HExprKind::Construct {
+            type_id: TypeId(99),
+            args: Vec::new(),
+        },
     })];
     assert_rejects(&p, "V2");
 }
@@ -181,7 +227,10 @@ fn v5_rejects_a_field_index_past_the_layout() {
                 span: sp(),
                 diag: DiagInfo::default(),
                 ty: HTy::Record(TypeId(0)),
-                kind: HExprKind::Construct { type_id: TypeId(0), args: Vec::new() },
+                kind: HExprKind::Construct {
+                    type_id: TypeId(0),
+                    args: Vec::new(),
+                },
             }),
             field: FieldRef::Static(FieldIdx(7)),
         },
@@ -203,7 +252,10 @@ fn v6_rejects_a_method_call_on_another_type() {
                 span: sp(),
                 diag: DiagInfo::default(),
                 ty: HTy::Record(TypeId(1)),
-                kind: HExprKind::Construct { type_id: TypeId(1), args: vec![int_e()] },
+                kind: HExprKind::Construct {
+                    type_id: TypeId(1),
+                    args: vec![int_e()],
+                },
             })),
             args: Vec::new(),
             writeback: None,
@@ -224,7 +276,10 @@ fn v7_rejects_a_partial_constructor() {
             diag: DiagInfo::default(),
             ty: HTy::Record(TypeId(0)),
             // Two fields, one argument.
-            kind: HExprKind::Construct { type_id: TypeId(0), args: vec![int_e()] },
+            kind: HExprKind::Construct {
+                type_id: TypeId(0),
+                args: vec![int_e()],
+            },
         }),
     }];
     assert_rejects(&p, "V7");
@@ -241,7 +296,11 @@ fn v8_rejects_a_return_that_does_not_match() {
 #[test]
 fn v9_rejects_break_outside_a_loop() {
     let mut p = base();
-    p.funcs[1].body = vec![HStmt { span: sp(), diag: DiagInfo::default(), kind: HStmtKind::Break }];
+    p.funcs[1].body = vec![HStmt {
+        span: sp(),
+        diag: DiagInfo::default(),
+        kind: HStmtKind::Break,
+    }];
     assert_rejects(&p, "V9");
 }
 
@@ -351,7 +410,10 @@ fn a_dynamic_base_is_the_only_place_a_runtime_name_may_appear() {
                     span: sp(),
                     diag: DiagInfo::default(),
                     ty: HTy::Record(TypeId(0)),
-                    kind: HExprKind::Construct { type_id: TypeId(0), args: vec![int_e(), int_e()] },
+                    kind: HExprKind::Construct {
+                        type_id: TypeId(0),
+                        args: vec![int_e(), int_e()],
+                    },
                 }),
                 field: FieldRef::Dynamic(StrId(0)),
             },
@@ -370,7 +432,11 @@ fn unary_and_dynamic_rules_are_checked_too() {
         span: sp(),
         diag: DiagInfo::default(),
         ty: HTy::Bool,
-        kind: HExprKind::Unary { op: UnaryOp::Not, rule: UnaryRule::Not, operand: Box::new(int_e()) },
+        kind: HExprKind::Unary {
+            op: UnaryOp::Not,
+            rule: UnaryRule::Not,
+            operand: Box::new(int_e()),
+        },
     })];
     assert_rejects(&p, "V3");
     let _ = bool_e();

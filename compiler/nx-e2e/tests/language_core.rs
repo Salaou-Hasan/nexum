@@ -647,7 +647,12 @@ xs = [1, 2, 3]
 print([x * 10 for x in xs])
 print([x for x in xs if x > 1])
 "#,
-        &["[0, 1, 4, 9, 16]", "[0, 2, 4, 6, 8]", "[10, 20, 30]", "[2, 3]"],
+        &[
+            "[0, 1, 4, 9, 16]",
+            "[0, 2, 4, 6, 8]",
+            "[10, 20, 30]",
+            "[2, 3]",
+        ],
     );
 }
 
@@ -753,13 +758,11 @@ fn a_for_variable_does_not_escape_the_loop() {
     // Note the stage: the type checker's scope table keeps the name, so the
     // refusal comes from the backend and `run` reports exit 102 rather
     // than a type error. `check` alone accepts this program.
-    let o = run(
-        r#"
+    let o = run(r#"
 for i in 0..3:
     print(i)
 print(i)
-"#,
-    );
+"#);
     assert_eq!(o.code, 102, "expected a compile failure, got {:?}", o.out);
     assert!(
         o.out.contains("undefined variable 'i'"),
@@ -772,16 +775,14 @@ print(i)
 fn a_for_variable_does_not_escape_a_loop_inside_a_function() {
     // The same rule on the function's local scope rather than the module's
     // top level -- a different binding path, so it is checked separately.
-    let o = run(
-        r#"
+    let o = run(r#"
 fn f():
     for i in 0..3:
         print(i)
     print(i)
 
 f()
-"#,
-    );
+"#);
     assert_eq!(o.code, 102, "expected a compile failure, got {:?}", o.out);
     assert!(
         o.out.contains("undefined variable 'i'"),
@@ -885,131 +886,137 @@ fn floor_division_and_modulo_do_not_widen_to_float() {
         "operator '%' not supported for Float and Float",
     );
 }
-  // ---------------------------------------------------------------------------
-  // 13. R1 and R2: integer arithmetic has a defined answer or none at all
-  // ---------------------------------------------------------------------------
-  //
-  // Both rules used to hold only on the boxed path. The default build unboxes,
-  // and the unboxed helpers inherited neither rule, so an ordinary program got
-  // a silently wrapped number instead of an answer. Every case below is the
-  // default build.
+// ---------------------------------------------------------------------------
+// 13. R1 and R2: integer arithmetic has a defined answer or none at all
+// ---------------------------------------------------------------------------
+//
+// Both rules used to hold only on the boxed path. The default build unboxes,
+// and the unboxed helpers inherited neither rule, so an ordinary program got
+// a silently wrapped number instead of an answer. Every case below is the
+// default build.
 
-  #[test]
-  fn integer_arithmetic_that_does_not_fit_traps() {
-      assert_runtime_error("print(9223372036854775807 + 1)", "integer overflow");
-      assert_runtime_error("print(-9223372036854775807 - 2)", "integer overflow");
-      assert_runtime_error("print(9223372036854775807 * 2)", "integer overflow");
-      assert_runtime_error("print(-9223372036854775807 * 2)", "integer overflow");
-  }
+#[test]
+fn integer_arithmetic_that_does_not_fit_traps() {
+    assert_runtime_error("print(9223372036854775807 + 1)", "integer overflow");
+    assert_runtime_error("print(-9223372036854775807 - 2)", "integer overflow");
+    assert_runtime_error("print(9223372036854775807 * 2)", "integer overflow");
+    assert_runtime_error("print(-9223372036854775807 * 2)", "integer overflow");
+}
 
-  #[test]
-  fn the_minimum_divided_by_minus_one_traps() {
-      // sdiv i64 INT64_MIN, -1 is poison rather than a wrapped value: the
-      // quotient does not exist. All three division spellings must refuse it,
-      // because each one reaches a different helper.
-      let min = "x = -9223372036854775807 - 1\n";
-      assert_runtime_error(&format!("{min}print(x / -1)"), "integer overflow");
-      assert_runtime_error(&format!("{min}print(x // -1)"), "integer overflow");
-      assert_runtime_error(&format!("{min}print(x % -1)"), "integer overflow");
-  }
+#[test]
+fn the_minimum_divided_by_minus_one_traps() {
+    // sdiv i64 INT64_MIN, -1 is poison rather than a wrapped value: the
+    // quotient does not exist. All three division spellings must refuse it,
+    // because each one reaches a different helper.
+    let min = "x = -9223372036854775807 - 1\n";
+    assert_runtime_error(&format!("{min}print(x / -1)"), "integer overflow");
+    assert_runtime_error(&format!("{min}print(x // -1)"), "integer overflow");
+    assert_runtime_error(&format!("{min}print(x % -1)"), "integer overflow");
+}
 
-  #[test]
-  fn arithmetic_that_fits_is_unaffected() {
-      assert_output("print(2 + 3, 7 - 9, 6 * 7)", &["5 -2 42"]);
-      assert_output("print(7 // 2, -7 // 2, 7 // -2, -7 // -2)", &["3 -4 -4 3"]);
-      assert_output("print(7 % 3, -7 % 3, 7 % -3, -7 % -3)", &["1 2 -2 -1"]);
-      // Float printing trims to 15 significant digits with no trailing `.0`,
-      // so 4.0 prints as `4`. That is the formatting examples/methods.nx and
-      // examples/records.nx already depend on; 4.0 and 4 printing alike is a
-      // real wart, but changing it is a formatting decision, not an
-      // arithmetic one.
-      assert_output("print(1.5 + 2.5, 1.5 * 2.0)", &["4 3"]);
-  }
+#[test]
+fn arithmetic_that_fits_is_unaffected() {
+    assert_output("print(2 + 3, 7 - 9, 6 * 7)", &["5 -2 42"]);
+    assert_output("print(7 // 2, -7 // 2, 7 // -2, -7 // -2)", &["3 -4 -4 3"]);
+    assert_output("print(7 % 3, -7 % 3, 7 % -3, -7 % -3)", &["1 2 -2 -1"]);
+    // Float printing trims to 15 significant digits with no trailing `.0`,
+    // so 4.0 prints as `4`. That is the formatting examples/methods.nx and
+    // examples/records.nx already depend on; 4.0 and 4 printing alike is a
+    // real wart, but changing it is a formatting decision, not an
+    // arithmetic one.
+    assert_output("print(1.5 + 2.5, 1.5 * 2.0)", &["4 3"]);
+}
 
-  #[test]
-  fn a_bounded_accumulator_never_trips_the_overflow_check() {
-      // The check has to be free when it cannot fire. Summing a range and
-      // running a countdown both stay far inside i64 and must not trap.
-      assert_output(
-          "t = 0\nfor i in 1..100001:\n    t = t + i\nprint(t)",
-          &["5000050000"],
-      );
-      assert_output(
-          "n = 100000\nt = 0\nwhile n > 0:\n    t = t + n\n    n = n - 1\nprint(t)",
-          &["5000050000"],
-      );
-  }
+#[test]
+fn a_bounded_accumulator_never_trips_the_overflow_check() {
+    // The check has to be free when it cannot fire. Summing a range and
+    // running a countdown both stay far inside i64 and must not trap.
+    assert_output(
+        "t = 0\nfor i in 1..100001:\n    t = t + i\nprint(t)",
+        &["5000050000"],
+    );
+    assert_output(
+        "n = 100000\nt = 0\nwhile n > 0:\n    t = t + n\n    n = n - 1\nprint(t)",
+        &["5000050000"],
+    );
+}
 
-  #[test]
-  fn an_integer_power_saturates_rather_than_wrapping() {
-      assert_one("print(2 ** 63)", "9223372036854775807");
-      assert_one("print(2 ** 100)", "9223372036854775807");
-      assert_one("print((-2) ** 63)", "-9223372036854775808");
-      assert_one("print(3 ** 62)", "5069619362125685561");
-  }
+#[test]
+fn an_integer_power_saturates_rather_than_wrapping() {
+    assert_one("print(2 ** 63)", "9223372036854775807");
+    assert_one("print(2 ** 100)", "9223372036854775807");
+    assert_one("print((-2) ** 63)", "-9223372036854775808");
+    assert_one("print(3 ** 62)", "5069619362125685561");
+}
 
-  #[test]
-  fn an_integer_power_answers_the_exact_cases_instead_of_saturating() {
-      // 0, 1 and -1 never grow, so clamping them would be a lie.
-      assert_one("print(0 ** 100)", "0");
-      assert_one("print(1 ** 100)", "1");
-      assert_one("print((-1) ** 100)", "1");
-      assert_one("print((-1) ** 101)", "-1");
-      assert_one("print(2 ** 0)", "1");
-      assert_one("print(0 ** 0)", "1");
-  }
+#[test]
+fn an_integer_power_answers_the_exact_cases_instead_of_saturating() {
+    // 0, 1 and -1 never grow, so clamping them would be a lie.
+    assert_one("print(0 ** 100)", "0");
+    assert_one("print(1 ** 100)", "1");
+    assert_one("print((-1) ** 100)", "1");
+    assert_one("print((-1) ** 101)", "-1");
+    assert_one("print(2 ** 0)", "1");
+    assert_one("print(0 ** 0)", "1");
+}
 
-  #[test]
-  fn a_negative_exponent_on_ints_is_rejected() {
-      assert_runtime_error("print(2 ** -1)", "negative exponent");
-      // The Float path asks a different question and still answers it.
-      assert_one("print(2.0 ** -1)", "0.5");
-      assert_one("print(2.0 ** 10)", "1024");
-  }
-  // ---------------------------------------------------------------------------
-  // 14. A target is a name, an element, or a field
-  // ---------------------------------------------------------------------------
-  //
-  // `xs[1:3] = 9` used to be accepted and did nothing. The parser turned any
-  // expression that was not a name, element or field into `Target::Name("")`,
-  // so it assigned to a variable with an empty name: no diagnostic, no effect,
-  // and a program that read as though it had worked. A slice is a value rather
-  // than a place, so there is nothing to store into and the honest answer is a
-  // rejection -- which is what Python and Rust do too.
+#[test]
+fn a_negative_exponent_on_ints_is_rejected() {
+    assert_runtime_error("print(2 ** -1)", "negative exponent");
+    // The Float path asks a different question and still answers it.
+    assert_one("print(2.0 ** -1)", "0.5");
+    assert_one("print(2.0 ** 10)", "1024");
+}
+// ---------------------------------------------------------------------------
+// 14. A target is a name, an element, or a field
+// ---------------------------------------------------------------------------
+//
+// `xs[1:3] = 9` used to be accepted and did nothing. The parser turned any
+// expression that was not a name, element or field into `Target::Name("")`,
+// so it assigned to a variable with an empty name: no diagnostic, no effect,
+// and a program that read as though it had worked. A slice is a value rather
+// than a place, so there is nothing to store into and the honest answer is a
+// rejection -- which is what Python and Rust do too.
 
-  #[test]
-  fn a_slice_is_not_an_assignment_target() {
-      assert_rejected(
-          "xs = [1, 2, 3, 4, 5]\nxs[1:3] = 9\n",
-          "cannot assign to a slice",
-      );
-      assert_rejected("xs = [1, 2, 3]\nxs[::2] = 0\n", "cannot assign to a slice");
-      assert_rejected("xs = [1, 2, 3]\nxs[1:3] += 1\n", "cannot assign to a slice");
-  }
+#[test]
+fn a_slice_is_not_an_assignment_target() {
+    assert_rejected(
+        "xs = [1, 2, 3, 4, 5]\nxs[1:3] = 9\n",
+        "cannot assign to a slice",
+    );
+    assert_rejected("xs = [1, 2, 3]\nxs[::2] = 0\n", "cannot assign to a slice");
+    assert_rejected("xs = [1, 2, 3]\nxs[1:3] += 1\n", "cannot assign to a slice");
+}
 
-  #[test]
-  fn other_non_targets_are_rejected_by_name() {
-      assert_rejected("fn f():\n    return 1\nf() = 2\n", "cannot assign to a call");
-      assert_rejected("1 = 2\n", "expected expression");
-      assert_rejected("[1, 2] = 3\n", "expected expression");
-  }
+#[test]
+fn other_non_targets_are_rejected_by_name() {
+    assert_rejected(
+        "fn f():\n    return 1\nf() = 2\n",
+        "cannot assign to a call",
+    );
+    assert_rejected("1 = 2\n", "expected expression");
+    assert_rejected("[1, 2] = 3\n", "expected expression");
+}
 
-  #[test]
-  fn every_real_target_shape_still_assigns() {
-      assert_one("x = 1\nx = 2\nprint(x)", "2");
-      assert_one("xs = [1, 2, 3]\nxs[1] = 9\nprint(xs)", "[1, 9, 3]");
-      assert_one("xs = [[1, 2], [3, 4]]\nxs[0][1] = 9\nprint(xs)", "[[1, 9], [3, 4]]");
-      assert_one("xs = [1, 2, 3]\nxs[0] += 5\nprint(xs)", "[6, 2, 3]");
-      assert_one("d = {\"a\": 1}\nd[\"a\"] = 9\nprint(d[\"a\"])", "9");
-      assert_output(
-          "type P:\n    x: Int\n\np = P(1)\np.x = 9\nprint(p.x)",
-          &["9"],
-      );
-      assert_output(
-          "type P:\n    x: Int\n\nps = [P(1)]\nps[0].x = 9\nprint(ps[0].x)",
-          &["9"],
-      );
-  }
+#[test]
+fn every_real_target_shape_still_assigns() {
+    assert_one("x = 1\nx = 2\nprint(x)", "2");
+    assert_one("xs = [1, 2, 3]\nxs[1] = 9\nprint(xs)", "[1, 9, 3]");
+    assert_one(
+        "xs = [[1, 2], [3, 4]]\nxs[0][1] = 9\nprint(xs)",
+        "[[1, 9], [3, 4]]",
+    );
+    assert_one("xs = [1, 2, 3]\nxs[0] += 5\nprint(xs)", "[6, 2, 3]");
+    assert_one("d = {\"a\": 1}\nd[\"a\"] = 9\nprint(d[\"a\"])", "9");
+    assert_output(
+        "type P:\n    x: Int\n\np = P(1)\np.x = 9\nprint(p.x)",
+        &["9"],
+    );
+    assert_output(
+        "type P:\n    x: Int\n\nps = [P(1)]\nps[0].x = 9\nprint(ps[0].x)",
+        &["9"],
+    );
+}
 
 // ---------------------------------------------------------------------------
 // input(): prompt, read, echo
@@ -1049,7 +1056,11 @@ fn input_reads_a_line_with_and_without_a_prompt() {
 fn input_empty_line_is_empty_not_eof() {
     // A bare newline reads as "", which is a value. EOF with no
     // characters is the error, tested below.
-    both_ways_with_input("a = input()\nprint(a)\nprint(\"after\")\n", "\n", &["", "after"]);
+    both_ways_with_input(
+        "a = input()\nprint(a)\nprint(\"after\")\n",
+        "\n",
+        &["", "after"],
+    );
 }
 
 #[test]
@@ -1079,7 +1090,10 @@ fn input_at_eof_is_a_runtime_error() {
 #[test]
 fn input_arity_and_prompt_type_are_checked() {
     assert_rejected("x = input(1, 2)\n", "input() expects at most 1 argument");
-    assert_rejected("x = input(true)\n", "input() prompt must be Str, Int or Float");
+    assert_rejected(
+        "x = input(true)\n",
+        "input() prompt must be Str, Int or Float",
+    );
 }
 
 #[test]
@@ -1098,7 +1112,10 @@ fn input_prints_int_and_float_prompts_like_print_does() {
 
 #[test]
 fn int_conversion_truncates_floats_and_parses_strings() {
-    assert_output("print(int(3))\nprint(int(3.9))\nprint(int(-3.9))\nprint(int(\" -42 \"))\n", &["3", "3", "-3", "-42"]);
+    assert_output(
+        "print(int(3))\nprint(int(3.9))\nprint(int(-3.9))\nprint(int(\" -42 \"))\n",
+        &["3", "3", "-3", "-42"],
+    );
 }
 
 #[test]
@@ -1106,20 +1123,35 @@ fn float_conversion_widens_ints_and_parses_strings() {
     // R6: a Float prints like its literal, so float(2) prints "2" --
     // the same thing the literal 2.0 prints. The conversion does not
     // invent a decimal point the printer would not have written.
-    assert_output("print(float(2))\nprint(float(2.5))\nprint(float(\" -0.5 \"))\n", &["2", "2.5", "-0.5"]);
+    assert_output(
+        "print(float(2))\nprint(float(2.5))\nprint(float(\" -0.5 \"))\n",
+        &["2", "2.5", "-0.5"],
+    );
 }
 
 #[test]
 fn int_and_float_error_on_bad_strings_and_bad_types() {
     let o = run_with_input("print(int(\"abc\"))\n", "");
     assert_ne!(o.code, 0, "expected a failure, got {:?}", o.out);
-    assert!(o.out.contains("cannot parse 'abc' as Int"), "got {:?}", o.out);
+    assert!(
+        o.out.contains("cannot parse 'abc' as Int"),
+        "got {:?}",
+        o.out
+    );
     let o = run_with_input("print(float(\"x\"))\n", "");
     assert_ne!(o.code, 0, "expected a failure, got {:?}", o.out);
-    assert!(o.out.contains("cannot parse 'x' as Float"), "got {:?}", o.out);
+    assert!(
+        o.out.contains("cannot parse 'x' as Float"),
+        "got {:?}",
+        o.out
+    );
     let o = run_with_input("print(int(\"1.5\"))\n", "");
     assert_ne!(o.code, 0, "expected a failure, got {:?}", o.out);
-    assert!(o.out.contains("cannot parse '1.5' as Int"), "got {:?}", o.out);
+    assert!(
+        o.out.contains("cannot parse '1.5' as Int"),
+        "got {:?}",
+        o.out
+    );
     // The checker, not the runtime, owns the other failures.
     assert_rejected("print(int(true))\n", "int() needs Int, Float or Str");
     assert_rejected("print(float())\n", "float() expects 1 argument");
@@ -1142,11 +1174,8 @@ fn conversions_do_not_force_a_box_back_through_arithmetic() {
     // checked instruction. This asserts on the program's own function
     // only: the runtime prelude defines @nx_add regardless, so a
     // module-wide search would prove nothing.
-    let ir = nx_codegen::compile_entry(
-        "a = int(\"7\")\nprint(a + 1)\n",
-        std::path::Path::new("."),
-    )
-    .expect("compiles");
+    let ir = nx_codegen::compile_entry("a = int(\"7\")\nprint(a + 1)\n", std::path::Path::new("."))
+        .expect("compiles");
     let body = ir
         .split("define void @nx__init")
         .nth(1)
@@ -1184,7 +1213,10 @@ fn overflows_at_the_edge_trap() {
     // boxed and unboxed paths.
     assert_runtime_error("print(-9223372036854775808 - 1)\n", "integer overflow");
     assert_runtime_error("x = -9223372036854775808\nprint(-x)\n", "integer overflow");
-    let o = run_in("fn neg(n):\n    return -n\nprint(neg(-9223372036854775808))\n", true);
+    let o = run_in(
+        "fn neg(n):\n    return -n\nprint(neg(-9223372036854775808))\n",
+        true,
+    );
     assert_ne!(o.code, 0, "NX_NOUNBOX build must trap too, got {:?}", o.out);
     assert!(o.out.contains("integer overflow"), "got {:?}", o.out);
 }
@@ -1225,8 +1257,6 @@ fn a_short_circuit_operand_that_opens_blocks_still_merges() {
          while j < 3 and xs[j - 1] > xs[j]:\n\
          \x20   print(j)\n\
          \x20   j = j + 1\n",
-        &[
-            "true", "true", "true", "false", "2", "9", "1", "1", "2",
-        ],
+        &["true", "true", "true", "false", "2", "9", "1", "1", "2"],
     );
 }

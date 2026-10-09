@@ -25,18 +25,30 @@ pub struct LowerError {
 
 impl std::fmt::Display for LowerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "lower error at {}:{}: {}", self.line, self.col, self.message)
+        write!(
+            f,
+            "lower error at {}:{}: {}",
+            self.line, self.col, self.message
+        )
     }
 }
 
 type LResult<T> = Result<T, LowerError>;
 
 fn lerr(span: Span, msg: impl Into<String>) -> LowerError {
-    LowerError { message: msg.into(), line: span.line, col: span.col }
+    LowerError {
+        message: msg.into(),
+        line: span.line,
+        col: span.col,
+    }
 }
 
 fn lerr_at(line: u32, col: u32, msg: impl Into<String>) -> LowerError {
-    LowerError { message: msg.into(), line, col }
+    LowerError {
+        message: msg.into(),
+        line,
+        col,
+    }
 }
 
 /// Lower one entry source plus everything it imports.
@@ -83,14 +95,12 @@ impl Loader {
         self.programs.insert(name.clone(), prog);
         self.bases.insert(name.clone(), base.clone());
         for dep in deps {
-            let path = shape::resolve_module_file(&[base.clone()], &dep).ok_or_else(|| {
-                lerr_at(1, 1, format!("cannot find module '{dep}.nx'"))
-            })?;
+            let path = shape::resolve_module_file(&[base.clone()], &dep)
+                .ok_or_else(|| lerr_at(1, 1, format!("cannot find module '{dep}.nx'")))?;
             let src = std::fs::read_to_string(&path)
                 .map_err(|e| lerr_at(1, 1, format!("cannot read module '{dep}': {e}")))?;
             let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or(".".into());
-            let sub = parse(&src)
-                .map_err(|e| lerr_at(1, 1, format!("in module '{dep}': {e}")))?;
+            let sub = parse(&src).map_err(|e| lerr_at(1, 1, format!("in module '{dep}': {e}")))?;
             self.insert(dep, sub, dir)?;
         }
         self.loading.pop();
@@ -99,10 +109,16 @@ impl Loader {
 }
 
 fn parse(source: &str) -> Result<Program, LowerError> {
-    let tokens = nx_lexer::lex(source)
-        .map_err(|e| LowerError { message: e.message, line: e.line, col: e.col })?;
-    nx_parser::parse(tokens)
-        .map_err(|e| LowerError { message: e.message, line: e.line, col: e.col })
+    let tokens = nx_lexer::lex(source).map_err(|e| LowerError {
+        message: e.message,
+        line: e.line,
+        col: e.col,
+    })?;
+    nx_parser::parse(tokens).map_err(|e| LowerError {
+        message: e.message,
+        line: e.line,
+        col: e.col,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +212,10 @@ fn build_tables(programs: &HashMap<String, Program>) -> LResult<Tables> {
                 t.type_decls.push(TypeDecl {
                     module: module.clone(),
                     name: name.clone(),
-                    fields: fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect(),
+                    fields: fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect(),
                 });
             }
         }
@@ -219,9 +238,17 @@ fn build_tables(programs: &HashMap<String, Program>) -> LResult<Tables> {
 fn index_decls(t: &mut Tables, module: &str, stmts: &[Stmt]) -> LResult<()> {
     for s in stmts {
         match s {
-            Stmt::Fn { name, params, body, span } => {
+            Stmt::Fn {
+                name,
+                params,
+                body,
+                span,
+            } => {
                 if t.func_id.contains_key(&(module.to_string(), name.clone())) {
-                    return Err(lerr(*span, format!("internal: duplicate function '{name}'")));
+                    return Err(lerr(
+                        *span,
+                        format!("internal: duplicate function '{name}'"),
+                    ));
                 }
                 let id = FuncId(t.func_decls.len() as u32);
                 t.func_id.insert((module.to_string(), name.clone()), id);
@@ -234,10 +261,20 @@ fn index_decls(t: &mut Tables, module: &str, stmts: &[Stmt]) -> LResult<()> {
                     span: *span,
                 });
             }
-            Stmt::Impl { type_name, methods, span } => {
-                let tid = *t.type_id.get(&(module.to_string(), type_name.clone())).ok_or_else(|| {
-                    lerr(*span, format!("internal: impl of unknown type '{type_name}'"))
-                })?;
+            Stmt::Impl {
+                type_name,
+                methods,
+                span,
+            } => {
+                let tid = *t
+                    .type_id
+                    .get(&(module.to_string(), type_name.clone()))
+                    .ok_or_else(|| {
+                        lerr(
+                            *span,
+                            format!("internal: impl of unknown type '{type_name}'"),
+                        )
+                    })?;
                 for m in methods {
                     let fid = FuncId(t.func_decls.len() as u32);
                     t.func_decls.push(FuncDecl {
@@ -321,11 +358,15 @@ fn index_globals(t: &mut Tables, module: &str, stmts: &[Stmt]) {
 fn index_aliases(t: &mut Tables, module: &str, stmts: &[Stmt]) -> LResult<()> {
     fn walk(t: &mut Tables, module: &str, stmts: &[Stmt]) -> LResult<()> {
         for s in stmts {
-            if let Stmt::FromImport { module: m, names, .. } = s {
+            if let Stmt::FromImport {
+                module: m, names, ..
+            } = s
+            {
                 for (name, alias) in names {
                     let bind = alias.clone().unwrap_or_else(|| name.clone());
                     if t.type_id.contains_key(&(m.clone(), name.clone())) {
-                        t.type_alias.insert((module.to_string(), bind), (m.clone(), name.clone()));
+                        t.type_alias
+                            .insert((module.to_string(), bind), (m.clone(), name.clone()));
                     }
                 }
             }
@@ -363,7 +404,10 @@ fn lower_loaded(
     // `__main__` fix this design depends on).
     let mut inferred: HashMap<(String, String), FnInfo> = HashMap::new();
     for module in programs.keys() {
-        let base = bases.get(module).cloned().unwrap_or_else(|| PathBuf::from("."));
+        let base = bases
+            .get(module)
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("."));
         match nx_types::infer_program_for(&programs[module], &base, module) {
             Ok(m) => {
                 for (k, v) in m {
@@ -455,7 +499,13 @@ fn fn_info(
     inferred
         .get(&(module.to_string(), func.to_string()))
         .cloned()
-        .ok_or_else(|| lerr_at(1, 1, format!("internal: no inference for '{module}.{func}'")))
+        .ok_or_else(|| {
+            lerr_at(
+                1,
+                1,
+                format!("internal: no inference for '{module}.{func}'"),
+            )
+        })
 }
 
 impl<'a> Lower<'a> {
@@ -513,7 +563,11 @@ impl<'a> Lower<'a> {
             for (_, fty) in &decl.fields {
                 fields.push(conv_ty_str(&self.tables, fty, &decl.module)?);
             }
-            self.out.types.push(HType { module: mid, fields, diag: diag(&decl.name) });
+            self.out.types.push(HType {
+                module: mid,
+                fields,
+                diag: diag(&decl.name),
+            });
         }
         for m in self.tables.method_decls.clone() {
             let recv = match m.receiver {
@@ -536,13 +590,23 @@ impl<'a> Lower<'a> {
         for (k, module) in self.tables.modules_sorted.clone().into_iter().enumerate() {
             let mid = self.tables.module_id[&module];
             let mut gids = Vec::new();
-            for name in self.tables.globals.get(&module).cloned().unwrap_or_default() {
+            for name in self
+                .tables
+                .globals
+                .get(&module)
+                .cloned()
+                .unwrap_or_default()
+            {
                 let gid = GlobalId(self.out.globals.len() as u32);
                 let ty = self.top_local_ty(&module, &name)?;
                 self.global_tys.insert(gid, ty);
                 self.global_ids.insert((module.clone(), name.clone()), gid);
-                self.global_names.insert(gid, (module.clone(), name.clone()));
-                self.out.globals.push(HGlobal { module: mid, diag: diag(&name) });
+                self.global_names
+                    .insert(gid, (module.clone(), name.clone()));
+                self.out.globals.push(HGlobal {
+                    module: mid,
+                    diag: diag(&name),
+                });
                 gids.push(gid);
             }
             let fids: Vec<FuncId> = self
@@ -622,16 +686,17 @@ impl<'a> Lower<'a> {
     /// rebound -- the checker erases the name on `del`, exactly as it
     /// does here -- so its storage is dynamic from that point on.
     fn top_local_ty(&self, module: &str, name: &str) -> LResult<HTy> {
-        let info = self.inferred.get(&(module.to_string(), "<top>".to_string())).ok_or_else(|| {
-            lerr_at(1, 1, format!("internal: no top inference for '{module}'"))
-        })?;
+        let info = self
+            .inferred
+            .get(&(module.to_string(), "<top>".to_string()))
+            .ok_or_else(|| lerr_at(1, 1, format!("internal: no top inference for '{module}'")))?;
         match info.locals.get(name) {
             Some(ty) => conv_ty(&self.tables, ty, module, Span { line: 1, col: 1 }),
             None => Ok(HTy::Unknown),
         }
     }
 
-/// Lower one declared function or method body.
+    /// Lower one declared function or method body.
     fn lower_func_decl(&mut self, decl: &FuncDecl) -> LResult<HFunc> {
         // Method bodies are keyed by canonical type: `Point.moved`,
         // exactly like the checker's inferred map.
@@ -648,14 +713,28 @@ impl<'a> Lower<'a> {
         // resolves through the same table (see `tables`).
         let recv = match &decl.receiver {
             Some((tname, kind)) if *kind != nx_ast::ReceiverKind::None => {
-                let tid = resolve_type_name(&self.tables, &decl.module, tname).ok_or_else(|| {
-                    lerr(decl.span, format!("internal: unresolvable receiver type '{tname}'"))
-                })?;
+                let tid =
+                    resolve_type_name(&self.tables, &decl.module, tname).ok_or_else(|| {
+                        lerr(
+                            decl.span,
+                            format!("internal: unresolvable receiver type '{tname}'"),
+                        )
+                    })?;
                 Some(tid)
             }
             _ => None,
         };
-        let Lower { tables, inferred, global_tys, global_ids, visible_types, visible_funcs, strings, string_ids, .. } = self;
+        let Lower {
+            tables,
+            inferred,
+            global_tys,
+            global_ids,
+            visible_types,
+            visible_funcs,
+            strings,
+            string_ids,
+            ..
+        } = self;
         let ctx = Ctx {
             tables,
             inferred,
@@ -682,11 +761,24 @@ impl<'a> Lower<'a> {
     /// Lower a module top: same as a body, with no params and the
     /// `<top>` inference key.
     fn lower_top(&mut self, module: &str) -> LResult<HFunc> {
-        let body = self.programs.get(module).ok_or_else(|| {
-            lerr_at(1, 1, format!("internal: no such module '{module}'"))
-        })?.stmts.clone();
+        let body = self
+            .programs
+            .get(module)
+            .ok_or_else(|| lerr_at(1, 1, format!("internal: no such module '{module}'")))?
+            .stmts
+            .clone();
         let info = fn_info(&self.inferred, module, "<top>")?;
-        let Lower { tables, inferred, global_tys, global_ids, visible_types, visible_funcs, strings, string_ids, .. } = self;
+        let Lower {
+            tables,
+            inferred,
+            global_tys,
+            global_ids,
+            visible_types,
+            visible_funcs,
+            strings,
+            string_ids,
+            ..
+        } = self;
         let ctx = Ctx {
             tables,
             inferred,
@@ -732,9 +824,8 @@ fn conv_ty(tables: &Tables, ty: &Ty, module: &str, span: Span) -> LResult<HTy> {
         Ty::List(t) => Ok(HTy::List(Box::new(conv_ty(tables, t, module, span)?))),
         Ty::Dict(t) => Ok(HTy::Dict(Box::new(conv_ty(tables, t, module, span)?))),
         Ty::Record(name) => {
-            let tid = resolve_type_name(tables, module, name).ok_or_else(|| {
-                lerr(span, format!("internal: unresolvable record '{name}'"))
-            })?;
+            let tid = resolve_type_name(tables, module, name)
+                .ok_or_else(|| lerr(span, format!("internal: unresolvable record '{name}'")))?;
             Ok(HTy::Record(tid))
         }
         Ty::Func(..) => Err(lerr(span, "internal: function value in HIR".to_string())),
@@ -764,12 +855,18 @@ fn conv_ty_str(tables: &Tables, tname: &str, module: &str) -> LResult<HTy> {
 /// else a from-imported name (under alias or canonical spelling),
 /// mirroring the checker's canonicalization.
 fn resolve_type_name(tables: &Tables, module: &str, name: &str) -> Option<TypeId> {
-    if let Some((home, canon)) = tables.type_alias.get(&(module.to_string(), name.to_string())) {
+    if let Some((home, canon)) = tables
+        .type_alias
+        .get(&(module.to_string(), name.to_string()))
+    {
         if let Some(tid) = tables.type_id.get(&(home.clone(), canon.clone())) {
             return Some(*tid);
         }
     }
-    tables.type_id.get(&(module.to_string(), name.to_string())).copied()
+    tables
+        .type_id
+        .get(&(module.to_string(), name.to_string()))
+        .copied()
 }
 
 /// Canonical type name in a module, mirroring the checker's
@@ -820,7 +917,10 @@ fn decide_bin_rule(op: BinOp, l: &HTy, r: &HTy, span: Span) -> LResult<BinRule> 
             (HTy::Int, HTy::Float) | (HTy::Float, HTy::Int) => {
                 Ok(BinRule::Arith(ArithRule::PromoteFloat))
             }
-            _ => Err(lerr(span, format!("internal: no binary rule for '{op:?}' on {l:?} and {r:?}"))),
+            _ => Err(lerr(
+                span,
+                format!("internal: no binary rule for '{op:?}' on {l:?} and {r:?}"),
+            )),
         },
         Pow => match (l, r) {
             (HTy::Int, HTy::Int) => Ok(BinRule::Pow(PowRule::Saturate)),
@@ -828,13 +928,22 @@ fn decide_bin_rule(op: BinOp, l: &HTy, r: &HTy, span: Span) -> LResult<BinRule> 
             (HTy::Int, HTy::Float) | (HTy::Float, HTy::Int) => {
                 Ok(BinRule::Arith(ArithRule::PromoteFloat))
             }
-            _ => Err(lerr(span, format!("internal: no binary rule for '{op:?}' on {l:?} and {r:?}"))),
+            _ => Err(lerr(
+                span,
+                format!("internal: no binary rule for '{op:?}' on {l:?} and {r:?}"),
+            )),
         },
         BitAnd | BitOr | BitXor | Shl | Shr => match (l, r) {
             (HTy::Int, HTy::Int) => Ok(BinRule::Bitwise),
-            _ => Err(lerr(span, format!("internal: no binary rule for '{op:?}' on {l:?} and {r:?}"))),
+            _ => Err(lerr(
+                span,
+                format!("internal: no binary rule for '{op:?}' on {l:?} and {r:?}"),
+            )),
         },
-        _ => Err(lerr(span, format!("internal: '{op:?}' is not an arithmetic operator"))),
+        _ => Err(lerr(
+            span,
+            format!("internal: '{op:?}' is not an arithmetic operator"),
+        )),
     }
 }
 
@@ -884,7 +993,12 @@ fn lower_fn_body<'a>(
     for s in body {
         fx.lower_stmt(s, &mut hbody)?;
     }
-    Ok(HFunc { params: hparams, ret, body: hbody, diag: diag(diag_name) })
+    Ok(HFunc {
+        params: hparams,
+        ret,
+        body: hbody,
+        diag: diag(diag_name),
+    })
 }
 
 struct FnLower<'a> {
@@ -923,8 +1037,7 @@ impl<'a> FnLower<'a> {
                 debug_assert!(
                     false,
                     "internal: '{name}' has no inferred type at {}:{}",
-                    span.line,
-                    span.col
+                    span.line, span.col
                 );
                 return Ok(HTy::Unknown);
             }
@@ -962,7 +1075,11 @@ impl<'a> FnLower<'a> {
 
     fn lower_stmt(&mut self, s: &Stmt, out: &mut Vec<HStmt>) -> LResult<()> {
         match s {
-            Stmt::Assign { targets, values, span } => {
+            Stmt::Assign {
+                targets,
+                values,
+                span,
+            } => {
                 // All right-hand sides evaluate before any store (so
                 // `a, b = b, a` swaps), exactly like the backend.
                 let mut hvalues = Vec::with_capacity(values.len());
@@ -976,19 +1093,26 @@ impl<'a> FnLower<'a> {
                         htargets.push(self.lower_assign_target(t, *span)?);
                     }
                     let rules = vec![copy_rule(&hvalues[0].ty)];
-                    out.push(self.stmt(*span, None, HStmtKind::Assign {
-                        targets: htargets,
-                        values: hvalues,
-                        rules,
-                    }));
+                    out.push(self.stmt(
+                        *span,
+                        None,
+                        HStmtKind::Assign {
+                            targets: htargets,
+                            values: hvalues,
+                            rules,
+                        },
+                    ));
                     return Ok(());
                 }
                 if targets.len() != values.len() {
-                    return Err(lerr(*span, format!(
-                        "internal: {} targets but {} values",
-                        targets.len(),
-                        values.len()
-                    )));
+                    return Err(lerr(
+                        *span,
+                        format!(
+                            "internal: {} targets but {} values",
+                            targets.len(),
+                            values.len()
+                        ),
+                    ));
                 }
                 let mut htargets = Vec::with_capacity(targets.len());
                 let mut rules = Vec::with_capacity(values.len());
@@ -996,14 +1120,23 @@ impl<'a> FnLower<'a> {
                     htargets.push(self.lower_assign_target(t, *span)?);
                     rules.push(copy_rule(&v.ty));
                 }
-                out.push(self.stmt(*span, None, HStmtKind::Assign {
-                    targets: htargets,
-                    values: hvalues,
-                    rules,
-                }));
+                out.push(self.stmt(
+                    *span,
+                    None,
+                    HStmtKind::Assign {
+                        targets: htargets,
+                        values: hvalues,
+                        rules,
+                    },
+                ));
                 Ok(())
             }
-            Stmt::AssignOp { target, op, value, span } => {
+            Stmt::AssignOp {
+                target,
+                op,
+                value,
+                span,
+            } => {
                 // Name targets keep the dedicated path; element and field
                 // targets stash their evaluated parts first (see
                 // `stash_target`), so the target runs before the value
@@ -1013,12 +1146,16 @@ impl<'a> FnLower<'a> {
                         let (t, cur_ty) = self.assign_name_target(name, *span)?;
                         let v = self.lower_expr(value)?;
                         let rule = decide_bin_rule(*op, &cur_ty, &v.ty, *span)?;
-                        out.push(self.stmt(*span, None, HStmtKind::AssignOp {
-                            target: t,
-                            op: *op,
-                            rule,
-                            value: v,
-                        }));
+                        out.push(self.stmt(
+                            *span,
+                            None,
+                            HStmtKind::AssignOp {
+                                target: t,
+                                op: *op,
+                                rule,
+                                value: v,
+                            },
+                        ));
                         Ok(())
                     }
                     _ => {
@@ -1026,12 +1163,16 @@ impl<'a> FnLower<'a> {
                         let v = self.lower_expr(value)?;
                         let cur = self.read_target(&rebuilt, *span)?;
                         let rule = decide_bin_rule(*op, &cur.ty, &v.ty, *span)?;
-                        out.push(self.stmt(*span, None, HStmtKind::AssignOp {
-                            target: rebuilt,
-                            op: *op,
-                            rule,
-                            value: v,
-                        }));
+                        out.push(self.stmt(
+                            *span,
+                            None,
+                            HStmtKind::AssignOp {
+                                target: rebuilt,
+                                op: *op,
+                                rule,
+                                value: v,
+                            },
+                        ));
                         Ok(())
                     }
                 }
@@ -1044,7 +1185,13 @@ impl<'a> FnLower<'a> {
                 out.push(self.stmt(*span, None, HStmtKind::Print { values: vs }));
                 Ok(())
             }
-            Stmt::If { cond, then_body, elifs, else_body, span } => {
+            Stmt::If {
+                cond,
+                then_body,
+                elifs,
+                else_body,
+                span,
+            } => {
                 let c = self.lower_expr(cond)?;
                 let mut then_b = Vec::new();
                 self.lower_block(then_body, &mut then_b)?;
@@ -1063,12 +1210,16 @@ impl<'a> FnLower<'a> {
                     }
                     None => None,
                 };
-                out.push(self.stmt(*span, None, HStmtKind::If {
-                    cond: c,
-                    then_body: then_b,
-                    elifs: helifs,
-                    else_body: hel,
-                }));
+                out.push(self.stmt(
+                    *span,
+                    None,
+                    HStmtKind::If {
+                        cond: c,
+                        then_body: then_b,
+                        elifs: helifs,
+                        else_body: hel,
+                    },
+                ));
                 Ok(())
             }
             Stmt::While { cond, body, span } => {
@@ -1078,43 +1229,54 @@ impl<'a> FnLower<'a> {
                 out.push(self.stmt(*span, None, HStmtKind::While { cond: c, body: hb }));
                 Ok(())
             }
-            Stmt::For { var, iter, body, span } => {
-                match iter {
-                    nx_ast::ForIter::Range { start, end } => {
-                        let s = self.lower_expr(start)?;
-                        let e = self.lower_expr(end)?;
-                        let slot = self.alloc_slot(HTy::Int);
-                        let saved = self.env.insert(var.clone(), NameRef::Slot(slot));
-                        let mut hb = Vec::new();
-                        self.lower_block(body, &mut hb)?;
-                        self.restore_env(var, saved);
-                        out.push(self.stmt(*span, Some(var), HStmtKind::ForRange {
+            Stmt::For {
+                var,
+                iter,
+                body,
+                span,
+            } => match iter {
+                nx_ast::ForIter::Range { start, end } => {
+                    let s = self.lower_expr(start)?;
+                    let e = self.lower_expr(end)?;
+                    let slot = self.alloc_slot(HTy::Int);
+                    let saved = self.env.insert(var.clone(), NameRef::Slot(slot));
+                    let mut hb = Vec::new();
+                    self.lower_block(body, &mut hb)?;
+                    self.restore_env(var, saved);
+                    out.push(self.stmt(
+                        *span,
+                        Some(var),
+                        HStmtKind::ForRange {
                             var: slot,
                             start: s,
                             end: e,
                             body: hb,
-                        }));
-                        Ok(())
-                    }
-                    nx_ast::ForIter::Each(e) => {
-                        let it = self.lower_expr(e)?;
-                        let rule = self.iter_rule(&it.ty, *span)?;
-                        let ety = self.iter_elem_ty(&it.ty, *span)?;
-                        let slot = self.alloc_slot(ety);
-                        let saved = self.env.insert(var.clone(), NameRef::Slot(slot));
-                        let mut hb = Vec::new();
-                        self.lower_block(body, &mut hb)?;
-                        self.restore_env(var, saved);
-                        out.push(self.stmt(*span, Some(var), HStmtKind::ForEach {
+                        },
+                    ));
+                    Ok(())
+                }
+                nx_ast::ForIter::Each(e) => {
+                    let it = self.lower_expr(e)?;
+                    let rule = self.iter_rule(&it.ty, *span)?;
+                    let ety = self.iter_elem_ty(&it.ty, *span)?;
+                    let slot = self.alloc_slot(ety);
+                    let saved = self.env.insert(var.clone(), NameRef::Slot(slot));
+                    let mut hb = Vec::new();
+                    self.lower_block(body, &mut hb)?;
+                    self.restore_env(var, saved);
+                    out.push(self.stmt(
+                        *span,
+                        Some(var),
+                        HStmtKind::ForEach {
                             var: slot,
                             iter: it,
                             rule,
                             body: hb,
-                        }));
-                        Ok(())
-                    }
+                        },
+                    ));
+                    Ok(())
                 }
-            }
+            },
             Stmt::Return { values, span } => {
                 let mut vs = Vec::with_capacity(values.len());
                 for v in values {
@@ -1141,13 +1303,24 @@ impl<'a> FnLower<'a> {
                 out.push(self.stmt(*span, None, HStmtKind::Del { targets: hs }));
                 Ok(())
             }
-            Stmt::Assert { cond, message, span } => {
+            Stmt::Assert {
+                cond,
+                message,
+                span,
+            } => {
                 let c = self.lower_expr(cond)?;
                 let m = match message {
                     Some(e) => Some(self.lower_expr(e)?),
                     None => None,
                 };
-                out.push(self.stmt(*span, None, HStmtKind::Assert { cond: c, message: m }));
+                out.push(self.stmt(
+                    *span,
+                    None,
+                    HStmtKind::Assert {
+                        cond: c,
+                        message: m,
+                    },
+                ));
                 Ok(())
             }
             Stmt::Expr(e) => {
@@ -1158,14 +1331,22 @@ impl<'a> FnLower<'a> {
             // Declarations leave no nodes: types, methods and functions
             // were indexed in phase 1 and lower separately.
             Stmt::TypeDecl { .. } | Stmt::Fn { .. } | Stmt::Impl { .. } => Ok(()),
-            Stmt::Import { module, alias, span } => {
+            Stmt::Import {
+                module,
+                alias,
+                span,
+            } => {
                 let mid = self.module_id(module, *span)?;
                 let bind = alias.clone().unwrap_or_else(|| module.clone());
                 self.env.insert(bind.clone(), NameRef::Module(mid));
                 out.push(self.stmt(*span, Some(&bind), HStmtKind::EnsureInit { module: mid }));
                 Ok(())
             }
-            Stmt::FromImport { module, names, span } => {
+            Stmt::FromImport {
+                module,
+                names,
+                span,
+            } => {
                 let mid = self.module_id(module, *span)?;
                 out.push(self.stmt(*span, Some(module), HStmtKind::EnsureInit { module: mid }));
                 for (name, alias) in names {
@@ -1188,12 +1369,19 @@ impl<'a> FnLower<'a> {
                 let b = self.lower_expr(base)?;
                 let ix = self.lower_expr(index)?;
                 let rule = self.index_rule(&b.ty, span)?;
-                Ok(HTarget::Index { base: Box::new(b), index: Box::new(ix), rule })
+                Ok(HTarget::Index {
+                    base: Box::new(b),
+                    index: Box::new(ix),
+                    rule,
+                })
             }
             Target::Attr { base, field, .. } => {
                 let b = self.lower_expr(base)?;
                 let fr = self.field_ref(&b.ty, field, span)?;
-                Ok(HTarget::Field { base: Box::new(b), field: fr })
+                Ok(HTarget::Field {
+                    base: Box::new(b),
+                    field: fr,
+                })
             }
         }
     }
@@ -1226,9 +1414,16 @@ impl<'a> FnLower<'a> {
     /// A global by name in the current module (reads only; writes go
     /// through `assign_name_target`).
     fn global_id(&self, name: &str, span: Span) -> LResult<GlobalId> {
-        self.ctx.global_ids.get(&(self.module.clone(), name.to_string())).copied().ok_or_else(|| {
-            lerr(span, format!("internal: global '{name}' was never declared"))
-        })
+        self.ctx
+            .global_ids
+            .get(&(self.module.clone(), name.to_string()))
+            .copied()
+            .ok_or_else(|| {
+                lerr(
+                    span,
+                    format!("internal: global '{name}' was never declared"),
+                )
+            })
     }
 
     /// Read a write position back as a value (compound assignment and
@@ -1246,18 +1441,28 @@ impl<'a> FnLower<'a> {
             }
             HTarget::Index { base, index, rule } => {
                 let ty = self.index_elem_ty(&base.ty, span)?;
-                Ok(self.expr(span, None, ty, HExprKind::Index {
-                    base: base.clone(),
-                    index: index.clone(),
-                    rule: *rule,
-                }))
+                Ok(self.expr(
+                    span,
+                    None,
+                    ty,
+                    HExprKind::Index {
+                        base: base.clone(),
+                        index: index.clone(),
+                        rule: *rule,
+                    },
+                ))
             }
             HTarget::Field { base, field } => {
                 let ty = self.field_ty_of(&base.ty, *field, span)?;
-                Ok(self.expr(span, None, ty, HExprKind::Field {
-                    base: base.clone(),
-                    field: *field,
-                }))
+                Ok(self.expr(
+                    span,
+                    None,
+                    ty,
+                    HExprKind::Field {
+                        base: base.clone(),
+                        field: *field,
+                    },
+                ))
             }
         }
     }
@@ -1292,7 +1497,10 @@ impl<'a> FnLower<'a> {
         if let Some(mid) = self.ctx.tables.module_id.get(name) {
             return Ok(*mid);
         }
-        Err(lerr(span, format!("internal: module '{name}' is not imported here")))
+        Err(lerr(
+            span,
+            format!("internal: module '{name}' is not imported here"),
+        ))
     }
 
     /// Bind one from-imported name: module refs, functions and types
@@ -1309,29 +1517,56 @@ impl<'a> FnLower<'a> {
         out: &mut Vec<HStmt>,
     ) -> LResult<()> {
         let home = &self.ctx.tables.modules_sorted[mid.0 as usize];
-        if self.ctx.tables.type_id.contains_key(&(home.clone(), name.to_string())) {
+        if self
+            .ctx
+            .tables
+            .type_id
+            .contains_key(&(home.clone(), name.to_string()))
+        {
             let tid = resolve_type_name(self.ctx.tables, home, name).ok_or_else(|| {
                 lerr(span, format!("internal: unresolvable import type '{name}'"))
             })?;
             self.env.insert(bind.to_string(), NameRef::Type(tid));
             return Ok(());
         }
-        if let Some(fid) = self.ctx.tables.func_id.get(&(home.clone(), name.to_string())) {
+        if let Some(fid) = self
+            .ctx
+            .tables
+            .func_id
+            .get(&(home.clone(), name.to_string()))
+        {
             self.env.insert(bind.to_string(), NameRef::Func(*fid));
             return Ok(());
         }
-        let gid = self.ctx.global_ids.get(&(home.clone(), name.to_string())).copied().ok_or_else(|| {
-            lerr(span, format!("internal: '{module}.{name}' is not an importable value"))
-        })?;
+        let gid = self
+            .ctx
+            .global_ids
+            .get(&(home.clone(), name.to_string()))
+            .copied()
+            .ok_or_else(|| {
+                lerr(
+                    span,
+                    format!("internal: '{module}.{name}' is not an importable value"),
+                )
+            })?;
         let ty = self.global_ty(gid);
         let s = self.alloc_slot(ty.clone());
         self.env.insert(bind.to_string(), NameRef::Slot(s));
-        let read = self.expr(span, Some(name), ty.clone(), HExprKind::Place(Place::Global(gid)));
-        out.push(self.stmt(span, Some(bind), HStmtKind::Assign {
-            targets: vec![HTarget::Slot(s)],
-            values: vec![read],
-            rules: vec![copy_rule(&ty)],
-        }));
+        let read = self.expr(
+            span,
+            Some(name),
+            ty.clone(),
+            HExprKind::Place(Place::Global(gid)),
+        );
+        out.push(self.stmt(
+            span,
+            Some(bind),
+            HStmtKind::Assign {
+                targets: vec![HTarget::Slot(s)],
+                values: vec![read],
+                rules: vec![copy_rule(&ty)],
+            },
+        ));
         Ok(())
     }
 
@@ -1340,11 +1575,17 @@ impl<'a> FnLower<'a> {
             Target::Name(n) => match self.env.get(n).cloned() {
                 Some(NameRef::Slot(s)) => {
                     self.env.remove(n);
-                    Ok(Some(HDelTarget { target: HTarget::Slot(s), rule: DelRule::Unbind }))
+                    Ok(Some(HDelTarget {
+                        target: HTarget::Slot(s),
+                        rule: DelRule::Unbind,
+                    }))
                 }
                 Some(NameRef::Global(g)) => {
                     self.env.remove(n);
-                    Ok(Some(HDelTarget { target: HTarget::Global(g), rule: DelRule::Unbind }))
+                    Ok(Some(HDelTarget {
+                        target: HTarget::Global(g),
+                        rule: DelRule::Unbind,
+                    }))
                 }
                 // Module, function and type aliases hold no storage: the
                 // checker proved any later use undefined, so forgetting
@@ -1363,7 +1604,10 @@ impl<'a> FnLower<'a> {
                     HTy::Dict(_) => DelRule::DictRemove,
                     HTy::Unknown => DelRule::Dynamic,
                     other => {
-                        return Err(lerr(span, format!("internal: cannot delete into {other:?}")));
+                        return Err(lerr(
+                            span,
+                            format!("internal: cannot delete into {other:?}"),
+                        ));
                     }
                 };
                 let index_rule = match rule {
@@ -1386,18 +1630,27 @@ impl<'a> FnLower<'a> {
                     HTy::Record(_) => {
                         let fr = self.field_ref(&b.ty, field, span)?;
                         Ok(Some(HDelTarget {
-                            target: HTarget::Field { base: Box::new(b), field: fr },
+                            target: HTarget::Field {
+                                base: Box::new(b),
+                                field: fr,
+                            },
                             rule: DelRule::RecordBlank,
                         }))
                     }
                     HTy::Unknown => {
                         let fr = self.field_ref(&b.ty, field, span)?;
                         Ok(Some(HDelTarget {
-                            target: HTarget::Field { base: Box::new(b), field: fr },
+                            target: HTarget::Field {
+                                base: Box::new(b),
+                                field: fr,
+                            },
                             rule: DelRule::Dynamic,
                         }))
                     }
-                    other => Err(lerr(span, format!("internal: cannot delete a field of {other:?}"))),
+                    other => Err(lerr(
+                        span,
+                        format!("internal: cannot delete a field of {other:?}"),
+                    )),
                 }
             }
         }
@@ -1419,7 +1672,8 @@ impl<'a> FnLower<'a> {
     fn field_ref(&mut self, base: &HTy, field: &str, span: Span) -> LResult<FieldRef> {
         match base {
             HTy::Record(tid) => {
-                let names: Vec<String> = self.ctx
+                let names: Vec<String> = self
+                    .ctx
                     .tables
                     .type_decls
                     .get(tid.0 as usize)
@@ -1449,11 +1703,17 @@ impl<'a> FnLower<'a> {
     }
 
     fn lower_field_ty(&self, tid: TypeId, idx: FieldIdx, span: Span) -> LResult<HTy> {
-        let decl = self.ctx.tables.type_decls.get(tid.0 as usize).ok_or_else(|| {
-            lerr(span, format!("internal: no such type id {}", tid.0))
-        })?;
+        let decl = self
+            .ctx
+            .tables
+            .type_decls
+            .get(tid.0 as usize)
+            .ok_or_else(|| lerr(span, format!("internal: no such type id {}", tid.0)))?;
         let (_, spelling) = decl.fields.get(idx.0).ok_or_else(|| {
-            lerr(span, format!("internal: field index {} out of range", idx.0))
+            lerr(
+                span,
+                format!("internal: field index {} out of range", idx.0),
+            )
         })?;
         conv_ty_str(self.ctx.tables, spelling, &decl.module.clone())
     }
@@ -1493,7 +1753,10 @@ impl<'a> FnLower<'a> {
             HTy::Str => Ok(IterRule::StrChars),
             HTy::Dict(_) => Ok(IterRule::DictKeys),
             HTy::Unknown => Ok(IterRule::Dynamic),
-            other => Err(lerr(span, format!("internal: cannot iterate over {other:?}"))),
+            other => Err(lerr(
+                span,
+                format!("internal: cannot iterate over {other:?}"),
+            )),
         }
     }
 
@@ -1502,7 +1765,10 @@ impl<'a> FnLower<'a> {
             HTy::List(t) => Ok((**t).clone()),
             HTy::Str => Ok(HTy::Str),
             HTy::Dict(_) | HTy::Unknown => Ok(HTy::Unknown),
-            other => Err(lerr(span, format!("internal: cannot iterate over {other:?}"))),
+            other => Err(lerr(
+                span,
+                format!("internal: cannot iterate over {other:?}"),
+            )),
         }
     }
 
@@ -1512,7 +1778,10 @@ impl<'a> FnLower<'a> {
             HTy::Str => Ok(MemberRule::StrSub),
             HTy::Dict(_) => Ok(MemberRule::DictKey),
             HTy::Unknown => Ok(MemberRule::Dynamic),
-            other => Err(lerr(span, format!("internal: cannot test membership in {other:?}"))),
+            other => Err(lerr(
+                span,
+                format!("internal: cannot test membership in {other:?}"),
+            )),
         }
     }
 
@@ -1529,7 +1798,10 @@ impl<'a> FnLower<'a> {
             | (HTy::Dict(_), HTy::Dict(_))
             | (HTy::Record(_), HTy::Record(_)) => Ok(EqRule::Structural),
             (HTy::None, HTy::None) => Ok(EqRule::IdentityNone),
-            _ => Err(lerr(span, format!("internal: cannot compare {l:?} and {r:?}"))),
+            _ => Err(lerr(
+                span,
+                format!("internal: cannot compare {l:?} and {r:?}"),
+            )),
         }
     }
 
@@ -1542,7 +1814,10 @@ impl<'a> FnLower<'a> {
         }
         match (l, r) {
             (HTy::Str, HTy::Str) => Ok(CmpRule::StrOrder),
-            _ => Err(lerr(span, format!("internal: cannot order {l:?} and {r:?}"))),
+            _ => Err(lerr(
+                span,
+                format!("internal: cannot order {l:?} and {r:?}"),
+            )),
         }
     }
 
@@ -1554,7 +1829,10 @@ impl<'a> FnLower<'a> {
             (UnaryOp::BitNot, HTy::Int) => Ok(UnaryRule::BitNot),
             (UnaryOp::Pos, HTy::Int) | (UnaryOp::Pos, HTy::Float) => Ok(UnaryRule::Pos),
             (_, HTy::Unknown) => Ok(UnaryRule::Dynamic),
-            _ => Err(lerr(span, format!("internal: '{op:?}' not supported for {operand:?}"))),
+            _ => Err(lerr(
+                span,
+                format!("internal: '{op:?}' not supported for {operand:?}"),
+            )),
         }
     }
 
@@ -1574,7 +1852,10 @@ impl<'a> FnLower<'a> {
         if matches!(e, HTy::None) {
             return Ok(t.clone());
         }
-        Err(lerr(span, format!("internal: branches disagree: {t:?} vs {e:?}")))
+        Err(lerr(
+            span,
+            format!("internal: branches disagree: {t:?} vs {e:?}"),
+        ))
     }
 
     /// A bare variable read. Resolution mirrors the checker's
@@ -1600,7 +1881,11 @@ impl<'a> FnLower<'a> {
         }
         // Globals bound before any use in this body are pre-declared;
         // anything else never reaches lowering through checked code.
-        if let Some(g) = self.ctx.global_ids.get(&(self.module.clone(), name.to_string())) {
+        if let Some(g) = self
+            .ctx
+            .global_ids
+            .get(&(self.module.clone(), name.to_string()))
+        {
             let ty = self.global_ty(*g);
             self.env.insert(name.to_string(), NameRef::Global(*g));
             return Ok(self.expr(span, Some(name), ty, HExprKind::Place(Place::Global(*g))));
@@ -1613,9 +1898,12 @@ impl<'a> FnLower<'a> {
     /// from-imported types too -- their declarations traveled with them.
     /// Anything missing was rejected by the checker.
     fn resolve_method(&self, tid: TypeId, method: &str, span: Span) -> LResult<MethodId> {
-        self.ctx.tables.method_id.get(&(tid, method.to_string())).copied().ok_or_else(|| {
-            lerr(span, format!("internal: no such method '{method}'"))
-        })
+        self.ctx
+            .tables
+            .method_id
+            .get(&(tid, method.to_string()))
+            .copied()
+            .ok_or_else(|| lerr(span, format!("internal: no such method '{method}'")))
     }
 
     /// An [`HTy`] back to the checker's spelling, so operator result
@@ -1711,11 +1999,16 @@ impl<'a> FnLower<'a> {
                 let s = self.lower_expr(start)?;
                 let t = self.lower_expr(end)?;
                 let ty = HTy::List(Box::new(HTy::Int));
-                Ok(self.expr(*span, None, ty, HExprKind::Range {
-                    start: Box::new(s),
-                    end: Box::new(t),
-                    rule: RangeRule::AscendingOrEmpty,
-                }))
+                Ok(self.expr(
+                    *span,
+                    None,
+                    ty,
+                    HExprKind::Range {
+                        start: Box::new(s),
+                        end: Box::new(t),
+                        rule: RangeRule::AscendingOrEmpty,
+                    },
+                ))
             }
             Expr::Dict(pairs, sp) => {
                 let mut hp = Vec::with_capacity(pairs.len());
@@ -1738,28 +2031,48 @@ impl<'a> FnLower<'a> {
                 let ix = self.lower_expr(index)?;
                 let rule = self.index_rule(&b.ty, *span)?;
                 let ty = self.index_elem_ty(&b.ty, *span)?;
-                Ok(self.expr(*span, None, ty, HExprKind::Index {
-                    base: Box::new(b),
-                    index: Box::new(ix),
-                    rule,
-                }))
+                Ok(self.expr(
+                    *span,
+                    None,
+                    ty,
+                    HExprKind::Index {
+                        base: Box::new(b),
+                        index: Box::new(ix),
+                        rule,
+                    },
+                ))
             }
-            Expr::Slice { base, from, to, step, span } => {
+            Expr::Slice {
+                base,
+                from,
+                to,
+                step,
+                span,
+            } => {
                 let b = self.lower_expr(base)?;
                 let rule = self.slice_rule(&b.ty, *span)?;
                 let ty = self.slice_ty(&b.ty, *span)?;
                 let hf = self.opt_expr(from)?;
                 let ht = self.opt_expr(to)?;
                 let hs = self.opt_expr(step)?;
-                Ok(self.expr(*span, None, ty, HExprKind::Slice {
-                    base: Box::new(b),
-                    from: hf,
-                    to: ht,
-                    step: hs,
-                    rule,
-                }))
+                Ok(self.expr(
+                    *span,
+                    None,
+                    ty,
+                    HExprKind::Slice {
+                        base: Box::new(b),
+                        from: hf,
+                        to: ht,
+                        step: hs,
+                        rule,
+                    },
+                ))
             }
-            Expr::Unary { op, expr: operand, span } => {
+            Expr::Unary {
+                op,
+                expr: operand,
+                span,
+            } => {
                 let h = self.lower_expr(operand)?;
                 let rule = self.unary_rule(*op, &h.ty, *span)?;
                 // Mirrors the checker: `not` answers Bool on a known Bool
@@ -1769,25 +2082,51 @@ impl<'a> FnLower<'a> {
                     (UnaryOp::Not, _) => HTy::Bool,
                     _ => h.ty.clone(),
                 };
-                Ok(self.expr(*span, None, ty, HExprKind::Unary {
-                    op: *op,
-                    rule,
-                    operand: Box::new(h),
-                }))
+                Ok(self.expr(
+                    *span,
+                    None,
+                    ty,
+                    HExprKind::Unary {
+                        op: *op,
+                        rule,
+                        operand: Box::new(h),
+                    },
+                ))
             }
-            Expr::Binary { left, op, right, span } => self.lower_binary(left, *op, right, *span),
-            Expr::IfExpr { cond, then_value, else_value, span } => {
+            Expr::Binary {
+                left,
+                op,
+                right,
+                span,
+            } => self.lower_binary(left, *op, right, *span),
+            Expr::IfExpr {
+                cond,
+                then_value,
+                else_value,
+                span,
+            } => {
                 let c = self.lower_expr(cond)?;
                 let t = self.lower_expr(then_value)?;
                 let f = self.lower_expr(else_value)?;
                 let ty = self.join_ty(&t.ty, &f.ty, *span)?;
-                Ok(self.expr(*span, None, ty, HExprKind::Select {
-                    cond: Box::new(c),
-                    then_value: Box::new(t),
-                    else_value: Box::new(f),
-                }))
+                Ok(self.expr(
+                    *span,
+                    None,
+                    ty,
+                    HExprKind::Select {
+                        cond: Box::new(c),
+                        then_value: Box::new(t),
+                        else_value: Box::new(f),
+                    },
+                ))
             }
-            Expr::Comprehension { element, var, iter, cond, span } => {
+            Expr::Comprehension {
+                element,
+                var,
+                iter,
+                cond,
+                span,
+            } => {
                 let it = self.lower_expr(iter)?;
                 let rule = self.iter_rule(&it.ty, *span)?;
                 let ety = self.iter_elem_ty(&it.ty, *span)?;
@@ -1805,13 +2144,18 @@ impl<'a> FnLower<'a> {
                     (HTy::Dict(_), IterRule::DictKeys) => HTy::List(Box::new(HTy::Unknown)),
                     _ => HTy::List(Box::new(el.ty.clone())),
                 };
-                Ok(self.expr(*span, Some(var), ty, HExprKind::Compr {
-                    element: Box::new(el),
-                    var: slot,
-                    iter: Box::new(it),
-                    rule,
-                    cond: hc,
-                }))
+                Ok(self.expr(
+                    *span,
+                    Some(var),
+                    ty,
+                    HExprKind::Compr {
+                        element: Box::new(el),
+                        var: slot,
+                        iter: Box::new(it),
+                        rule,
+                        cond: hc,
+                    },
+                ))
             }
             Expr::Call { callee, args, span } => self.lower_call(callee, args, *span),
         }
@@ -1821,13 +2165,7 @@ impl<'a> FnLower<'a> {
     /// relations answer different questions with different rules:
     /// `and`/`or` short-circuit, `==`/`!=` compare structurally,
     /// orderings order, `in`/`not in` test membership.
-    fn lower_binary(
-        &mut self,
-        left: &Expr,
-        op: BinOp,
-        right: &Expr,
-        span: Span,
-    ) -> LResult<HExpr> {
+    fn lower_binary(&mut self, left: &Expr, op: BinOp, right: &Expr, span: Span) -> LResult<HExpr> {
         use BinOp::*;
         let l = self.lower_expr(left)?;
         let r = self.lower_expr(right)?;
@@ -1839,11 +2177,21 @@ impl<'a> FnLower<'a> {
             },
             Eq | NotEq => {
                 let rule = self.eq_rule(&l.ty, &r.ty, span)?;
-                HExprKind::Equal { left: Box::new(l), op, rule, right: Box::new(r) }
+                HExprKind::Equal {
+                    left: Box::new(l),
+                    op,
+                    rule,
+                    right: Box::new(r),
+                }
             }
             Lt | LtEq | Gt | GtEq => {
                 let rule = self.cmp_rule(&l.ty, &r.ty, span)?;
-                HExprKind::Compare { left: Box::new(l), op, rule, right: Box::new(r) }
+                HExprKind::Compare {
+                    left: Box::new(l),
+                    op,
+                    rule,
+                    right: Box::new(r),
+                }
             }
             In | NotIn => {
                 let rule = self.member_rule(&r.ty, span)?;
@@ -1857,12 +2205,17 @@ impl<'a> FnLower<'a> {
             _ => {
                 let rule = decide_bin_rule(op, &l.ty, &r.ty, span)?;
                 let ty = self.bin_result_ty(op, &l.ty, &r.ty, span)?;
-                return Ok(self.expr(span, None, ty, HExprKind::Binary {
-                    left: Box::new(l),
-                    op,
-                    rule,
-                    right: Box::new(r),
-                }));
+                return Ok(self.expr(
+                    span,
+                    None,
+                    ty,
+                    HExprKind::Binary {
+                        left: Box::new(l),
+                        op,
+                        rule,
+                        right: Box::new(r),
+                    },
+                ));
             }
         };
         Ok(self.expr(span, None, HTy::Bool, kind))
@@ -1875,7 +2228,8 @@ impl<'a> FnLower<'a> {
     fn lower_attr(&mut self, base: &Expr, attr: &str, span: Span) -> LResult<HExpr> {
         if let Some(mid) = self.module_base(base)? {
             let home = self.ctx.tables.modules_sorted[mid.0 as usize].clone();
-            let gid = self.ctx
+            let gid = self
+                .ctx
                 .global_ids
                 .get(&(home.clone(), attr.to_string()))
                 .copied()
@@ -1886,12 +2240,22 @@ impl<'a> FnLower<'a> {
         let b = self.lower_expr(base)?;
         let field = self.field_ref(&b.ty, attr, span)?;
         let ty = self.field_ty_of(&b.ty, field, span)?;
-        Ok(self.expr(span, Some(attr), ty, HExprKind::Field { base: Box::new(b), field }))
+        Ok(self.expr(
+            span,
+            Some(attr),
+            ty,
+            HExprKind::Field {
+                base: Box::new(b),
+                field,
+            },
+        ))
     }
 
     /// The module a bare name refers to, if any.
     fn module_base(&self, base: &Expr) -> LResult<Option<ModuleId>> {
-        let Expr::Var(name, span) = base else { return Ok(None) };
+        let Expr::Var(name, span) = base else {
+            return Ok(None);
+        };
         if let Some(NameRef::Module(mid)) = self.env.get(name) {
             return Ok(Some(*mid));
         }
@@ -1929,9 +2293,12 @@ impl<'a> FnLower<'a> {
     /// The declared return type of a function body, from the checker's
     /// inference for its key.
     fn func_ret(&self, fid: FuncId, span: Span) -> LResult<HTy> {
-        let decl = self.ctx.tables.func_decls.get(fid.0 as usize).ok_or_else(|| {
-            lerr(span, format!("internal: no such function id {}", fid.0))
-        })?;
+        let decl = self
+            .ctx
+            .tables
+            .func_decls
+            .get(fid.0 as usize)
+            .ok_or_else(|| lerr(span, format!("internal: no such function id {}", fid.0)))?;
         let info = self.ctx.fn_info(&decl.module, &decl.name)?;
         conv_ty(self.ctx.tables, &info.ret, &decl.module, decl.span)
     }
@@ -1947,14 +2314,21 @@ impl<'a> FnLower<'a> {
             .method_decls
             .get(mid.0 as usize)
             .ok_or_else(|| lerr(span, format!("internal: no such method id {}", mid.0)))?;
-        let body = self.ctx.tables.func_decls.get(decl.func.0 as usize).ok_or_else(|| {
-            lerr(span, format!("internal: no such function id {}", decl.func.0))
-        })?;
+        let body = self
+            .ctx
+            .tables
+            .func_decls
+            .get(decl.func.0 as usize)
+            .ok_or_else(|| {
+                lerr(
+                    span,
+                    format!("internal: no such function id {}", decl.func.0),
+                )
+            })?;
         let canon = self.type_name(decl.type_id);
-        let info = self.ctx.fn_info(
-            &body.module,
-            &nx_ast::shape::method_key(&canon, &decl.name),
-        )?;
+        let info = self
+            .ctx
+            .fn_info(&body.module, &nx_ast::shape::method_key(&canon, &decl.name))?;
         conv_ty(self.ctx.tables, &info.ret, &body.module, span)
     }
 
@@ -1969,10 +2343,15 @@ impl<'a> FnLower<'a> {
         if let Expr::Var(name, _) = callee {
             if let Some(tid) = self.visible_type(name) {
                 let hs = self.lower_args(args)?;
-                return Ok(self.expr(span, Some(name), HTy::Record(tid), HExprKind::Construct {
-                    type_id: tid,
-                    args: hs,
-                }));
+                return Ok(self.expr(
+                    span,
+                    Some(name),
+                    HTy::Record(tid),
+                    HExprKind::Construct {
+                        type_id: tid,
+                        args: hs,
+                    },
+                ));
             }
         }
         if let Expr::Attr { base, attr, .. } = callee {
@@ -1980,14 +2359,22 @@ impl<'a> FnLower<'a> {
             // resolved against the module's own declarations.
             if let Some(mid) = self.module_base(base)? {
                 let home = self.ctx.tables.modules_sorted[mid.0 as usize].clone();
-                if let Some(tid) = self.ctx.tables.type_id.get(&(home.clone(), attr.clone())).copied()
+                if let Some(tid) = self
+                    .ctx
+                    .tables
+                    .type_id
+                    .get(&(home.clone(), attr.clone()))
+                    .copied()
                 {
                     let hs = self.lower_args(args)?;
                     return Ok(self.expr(
                         span,
                         Some(attr),
                         HTy::Record(tid),
-                        HExprKind::Construct { type_id: tid, args: hs },
+                        HExprKind::Construct {
+                            type_id: tid,
+                            args: hs,
+                        },
                     ));
                 }
             }
@@ -1998,26 +2385,42 @@ impl<'a> FnLower<'a> {
                     let mid = self.resolve_method(tid, attr, span)?;
                     let ret = self.method_ret(mid, span)?;
                     let hs = self.lower_args(args)?;
-                    return Ok(self.expr(span, Some(attr), ret, HExprKind::CallMethod {
-                        method: mid,
-                        receiver: None,
-                        args: hs,
-                        writeback: None,
-                    }));
+                    return Ok(self.expr(
+                        span,
+                        Some(attr),
+                        ret,
+                        HExprKind::CallMethod {
+                            method: mid,
+                            receiver: None,
+                            args: hs,
+                            writeback: None,
+                        },
+                    ));
                 }
             }
             // `m.f(...)`: a module function. Modules are not values, so
             // the base contributes nothing.
             if let Some(mid) = self.module_base(base)? {
                 let home = self.ctx.tables.modules_sorted[mid.0 as usize].clone();
-                let fid = *self.ctx
+                let fid = *self
+                    .ctx
                     .tables
                     .func_id
                     .get(&(home.clone(), attr.clone()))
-                    .ok_or_else(|| lerr(span, format!("internal: '{home}' has no function '{attr}'")))?;
+                    .ok_or_else(|| {
+                        lerr(span, format!("internal: '{home}' has no function '{attr}'"))
+                    })?;
                 let ret = self.func_ret(fid, span)?;
                 let hs = self.lower_args(args)?;
-                return Ok(self.expr(span, Some(attr), ret, HExprKind::CallFn { func: fid, args: hs }));
+                return Ok(self.expr(
+                    span,
+                    Some(attr),
+                    ret,
+                    HExprKind::CallFn {
+                        func: fid,
+                        args: hs,
+                    },
+                ));
             }
             // `v.m(...)`: an impl method on a known record, else builtin
             // sugar. The base evaluates exactly once either way.
@@ -2036,7 +2439,10 @@ impl<'a> FnLower<'a> {
                 let ty = builtin_ret(op);
                 return Ok(self.expr(span, Some(attr), ty, HExprKind::Builtin { op, args: hs }));
             }
-            return Err(lerr(span, format!("internal: cannot resolve method '{attr}'")));
+            return Err(lerr(
+                span,
+                format!("internal: cannot resolve method '{attr}'"),
+            ));
         }
         // `f(...)`: an ambient builtin or a visible function.
         if let Expr::Var(name, _) = callee {
@@ -2049,7 +2455,15 @@ impl<'a> FnLower<'a> {
             if let Some(fid) = self.visible_func(name) {
                 let ret = self.func_ret(fid, span)?;
                 let hs = self.lower_args(args)?;
-                return Ok(self.expr(span, Some(name), ret, HExprKind::CallFn { func: fid, args: hs }));
+                return Ok(self.expr(
+                    span,
+                    Some(name),
+                    ret,
+                    HExprKind::CallFn {
+                        func: fid,
+                        args: hs,
+                    },
+                ));
             }
         }
         Err(lerr(span, "internal: not a call"))
@@ -2077,7 +2491,8 @@ impl<'a> FnLower<'a> {
         args: &[Expr],
         span: Span,
     ) -> LResult<HExpr> {
-        let is_mut = self.ctx
+        let is_mut = self
+            .ctx
             .tables
             .method_decls
             .get(mid.0 as usize)
@@ -2085,13 +2500,22 @@ impl<'a> FnLower<'a> {
             .unwrap_or(false);
         let ret = self.method_ret(mid, span)?;
         let hs = self.lower_args(args)?;
-        let writeback = if is_mut { self.writeback_target(&receiver) } else { None };
-        Ok(self.expr(span, Some(attr), ret, HExprKind::CallMethod {
-            method: mid,
-            receiver: Some(Box::new(receiver)),
-            args: hs,
-            writeback,
-        }))
+        let writeback = if is_mut {
+            self.writeback_target(&receiver)
+        } else {
+            None
+        };
+        Ok(self.expr(
+            span,
+            Some(attr),
+            ret,
+            HExprKind::CallMethod {
+                method: mid,
+                receiver: Some(Box::new(receiver)),
+                args: hs,
+                writeback,
+            },
+        ))
     }
 
     /// The write position a `mut self` receiver denotes, if it has
@@ -2106,9 +2530,10 @@ impl<'a> FnLower<'a> {
                 index: index.clone(),
                 rule: *rule,
             }),
-            HExprKind::Field { base, field } => {
-                Some(HTarget::Field { base: base.clone(), field: *field })
-            }
+            HExprKind::Field { base, field } => Some(HTarget::Field {
+                base: base.clone(),
+                field: *field,
+            }),
             _ => None,
         }
     }

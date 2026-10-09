@@ -157,7 +157,11 @@ pub struct LexError {
 
 impl std::fmt::Display for LexError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "lex error at {}:{}: {}", self.line, self.col, self.message)
+        write!(
+            f,
+            "lex error at {}:{}: {}",
+            self.line, self.col, self.message
+        )
     }
 }
 
@@ -227,7 +231,10 @@ impl Lexer {
                     Some('\n') => {
                         self.advance();
                         // Avoid duplicate Newlines for consecutive blanks.
-                        if !matches!(tokens.last().map(|t: &Token| &t.kind), Some(TokenKind::Newline)) {
+                        if !matches!(
+                            tokens.last().map(|t: &Token| &t.kind),
+                            Some(TokenKind::Newline)
+                        ) {
                             tokens.push(Token {
                                 kind: TokenKind::Newline,
                                 lexeme: "\n".to_string(),
@@ -302,7 +309,10 @@ impl Lexer {
                 Some('\n') => {
                     self.advance();
                     // Collapse consecutive newlines.
-                    if !matches!(tokens.last().map(|t: &Token| &t.kind), Some(TokenKind::Newline)) {
+                    if !matches!(
+                        tokens.last().map(|t: &Token| &t.kind),
+                        Some(TokenKind::Newline)
+                    ) {
                         tokens.push(Token {
                             kind: TokenKind::Newline,
                             lexeme: "\n".to_string(),
@@ -315,56 +325,121 @@ impl Lexer {
                 Some(c) if c.is_ascii_alphabetic() || c == '_' => {
                     let lexeme = self.lex_ident();
                     let kind = keyword_kind(&lexeme).unwrap_or(TokenKind::Ident);
-                    tokens.push(Token { kind, lexeme, line, col });
+                    tokens.push(Token {
+                        kind,
+                        lexeme,
+                        line,
+                        col,
+                    });
                 }
                 Some(c) if c.is_ascii_digit() => {
                     let (lexeme, kind) = self.lex_number();
-                    tokens.push(Token { kind, lexeme, line, col });
+                    tokens.push(Token {
+                        kind,
+                        lexeme,
+                        line,
+                        col,
+                    });
                 }
                 Some('"') => {
                     let lexeme = self.lex_string()?;
-                    tokens.push(Token { kind: TokenKind::String, lexeme, line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::String,
+                        lexeme,
+                        line,
+                        col,
+                    });
                 }
                 Some('(') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::LParen, lexeme: "(".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::LParen,
+                        lexeme: "(".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some(')') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::RParen, lexeme: ")".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::RParen,
+                        lexeme: ")".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some('[') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::LBracket, lexeme: "[".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::LBracket,
+                        lexeme: "[".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some(']') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::RBracket, lexeme: "]".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::RBracket,
+                        lexeme: "]".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some(',') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::Comma, lexeme: ",".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::Comma,
+                        lexeme: ",".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some(':') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::Colon, lexeme: ":".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::Colon,
+                        lexeme: ":".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some('+') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::PlusEq, lexeme: "+=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::PlusEq,
+                            lexeme: "+=".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Plus, lexeme: "+".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Plus,
+                            lexeme: "+".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('-') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::MinusEq, lexeme: "-=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::MinusEq,
+                            lexeme: "-=".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Minus, lexeme: "-".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Minus,
+                            lexeme: "-".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('*') => {
@@ -372,7 +447,12 @@ impl Lexer {
                     match self.peek() {
                         Some('=') => {
                             self.advance();
-                            tokens.push(Token { kind: TokenKind::StarEq, lexeme: "*=".to_string(), line, col });
+                            tokens.push(Token {
+                                kind: TokenKind::StarEq,
+                                lexeme: "*=".to_string(),
+                                line,
+                                col,
+                            });
                         }
                         Some('*') => {
                             self.advance();
@@ -393,7 +473,12 @@ impl Lexer {
                                 });
                             }
                         }
-                        _ => tokens.push(Token { kind: TokenKind::Star, lexeme: "*".to_string(), line, col }),
+                        _ => tokens.push(Token {
+                            kind: TokenKind::Star,
+                            lexeme: "*".to_string(),
+                            line,
+                            col,
+                        }),
                     }
                 }
                 Some('/') => {
@@ -401,7 +486,12 @@ impl Lexer {
                     match self.peek() {
                         Some('=') => {
                             self.advance();
-                            tokens.push(Token { kind: TokenKind::SlashEq, lexeme: "/=".to_string(), line, col });
+                            tokens.push(Token {
+                                kind: TokenKind::SlashEq,
+                                lexeme: "/=".to_string(),
+                                line,
+                                col,
+                            });
                         }
                         // `//` is floor division. A comment is `#`, so there
                         // is no ambiguity with a line comment here.
@@ -424,56 +514,116 @@ impl Lexer {
                                 });
                             }
                         }
-                        _ => tokens.push(Token { kind: TokenKind::Slash, lexeme: "/".to_string(), line, col }),
+                        _ => tokens.push(Token {
+                            kind: TokenKind::Slash,
+                            lexeme: "/".to_string(),
+                            line,
+                            col,
+                        }),
                     }
                 }
                 Some('%') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::PercentEq, lexeme: "%=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::PercentEq,
+                            lexeme: "%=".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Percent, lexeme: "%".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Percent,
+                            lexeme: "%".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('&') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::AmpEq, lexeme: "&=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::AmpEq,
+                            lexeme: "&=".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Amp, lexeme: "&".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Amp,
+                            lexeme: "&".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('|') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::PipeEq, lexeme: "|=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::PipeEq,
+                            lexeme: "|=".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Pipe, lexeme: "|".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Pipe,
+                            lexeme: "|".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('^') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::CaretEq, lexeme: "^=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::CaretEq,
+                            lexeme: "^=".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Caret, lexeme: "^".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Caret,
+                            lexeme: "^".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('~') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::Tilde, lexeme: "~".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::Tilde,
+                        lexeme: "~".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some('!') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::NotEq, lexeme: "!=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::NotEq,
+                            lexeme: "!=".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Bang, lexeme: "!".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Bang,
+                            lexeme: "!".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('<') => {
@@ -484,7 +634,12 @@ impl Lexer {
                     match self.peek() {
                         Some('=') => {
                             self.advance();
-                            tokens.push(Token { kind: TokenKind::LtEq, lexeme: "<=".to_string(), line, col });
+                            tokens.push(Token {
+                                kind: TokenKind::LtEq,
+                                lexeme: "<=".to_string(),
+                                line,
+                                col,
+                            });
                         }
                         Some('<') => {
                             self.advance();
@@ -497,10 +652,20 @@ impl Lexer {
                                     col,
                                 });
                             } else {
-                                tokens.push(Token { kind: TokenKind::Shl, lexeme: "<<".to_string(), line, col });
+                                tokens.push(Token {
+                                    kind: TokenKind::Shl,
+                                    lexeme: "<<".to_string(),
+                                    line,
+                                    col,
+                                });
                             }
                         }
-                        _ => tokens.push(Token { kind: TokenKind::Lt, lexeme: "<".to_string(), line, col }),
+                        _ => tokens.push(Token {
+                            kind: TokenKind::Lt,
+                            lexeme: "<".to_string(),
+                            line,
+                            col,
+                        }),
                     }
                 }
                 Some('>') => {
@@ -508,7 +673,12 @@ impl Lexer {
                     match self.peek() {
                         Some('=') => {
                             self.advance();
-                            tokens.push(Token { kind: TokenKind::GtEq, lexeme: ">=".to_string(), line, col });
+                            tokens.push(Token {
+                                kind: TokenKind::GtEq,
+                                lexeme: ">=".to_string(),
+                                line,
+                                col,
+                            });
                         }
                         Some('>') => {
                             self.advance();
@@ -521,38 +691,78 @@ impl Lexer {
                                     col,
                                 });
                             } else {
-                                tokens.push(Token { kind: TokenKind::Shr, lexeme: ">>".to_string(), line, col });
+                                tokens.push(Token {
+                                    kind: TokenKind::Shr,
+                                    lexeme: ">>".to_string(),
+                                    line,
+                                    col,
+                                });
                             }
                         }
-                        _ => tokens.push(Token { kind: TokenKind::Gt, lexeme: ">".to_string(), line, col }),
+                        _ => tokens.push(Token {
+                            kind: TokenKind::Gt,
+                            lexeme: ">".to_string(),
+                            line,
+                            col,
+                        }),
                     }
                 }
                 Some('{') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::LBrace, lexeme: "{".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::LBrace,
+                        lexeme: "{".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some('}') => {
                     self.advance();
-                    tokens.push(Token { kind: TokenKind::RBrace, lexeme: "}".to_string(), line, col });
+                    tokens.push(Token {
+                        kind: TokenKind::RBrace,
+                        lexeme: "}".to_string(),
+                        line,
+                        col,
+                    });
                 }
                 Some('.') => {
                     let next = self.chars.get(self.pos + 1).copied();
                     if next == Some('.') {
                         self.advance();
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::DotDot, lexeme: "..".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::DotDot,
+                            lexeme: "..".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::Dot, lexeme: ".".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Dot,
+                            lexeme: ".".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some('=') => {
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
-                        tokens.push(Token { kind: TokenKind::EqEq, lexeme: "==".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::EqEq,
+                            lexeme: "==".to_string(),
+                            line,
+                            col,
+                        });
                     } else {
-                        tokens.push(Token { kind: TokenKind::Equals, lexeme: "=".to_string(), line, col });
+                        tokens.push(Token {
+                            kind: TokenKind::Equals,
+                            lexeme: "=".to_string(),
+                            line,
+                            col,
+                        });
                     }
                 }
                 Some(c) => {
@@ -691,7 +901,14 @@ impl Lexer {
                 }
             }
         }
-        (s, if is_float { TokenKind::Float } else { TokenKind::Int })
+        (
+            s,
+            if is_float {
+                TokenKind::Float
+            } else {
+                TokenKind::Int
+            },
+        )
     }
 
     /// Read the digits of a unicode escape: four hex digits for \u, eight
@@ -785,9 +1002,7 @@ impl Lexer {
                             Some(c) => s.push(c),
                             None => {
                                 return Err(LexError {
-                                    message: format!(
-                                        "\\u{cp:x} is not a Unicode scalar value"
-                                    ),
+                                    message: format!("\\u{cp:x} is not a Unicode scalar value"),
                                     line: start_line,
                                     col: start_col,
                                 });
@@ -884,7 +1099,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn hello_world() {
         assert_eq!(
@@ -930,7 +1144,9 @@ mod tests {
         // what matters is that no Indent or Dedent escapes the comment.
         let toks = lex("# only a comment\n").unwrap();
         assert!(
-            !toks.iter().any(|t| matches!(t.kind, TokenKind::Indent | TokenKind::Dedent)),
+            !toks
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Indent | TokenKind::Dedent)),
             "comment-only file must not shift indentation: {toks:?}"
         );
     }
@@ -957,7 +1173,8 @@ mod tests {
         // The String token keeps its quotes, so match the whole literal.
         let toks = lex("x = \"a#b\"").unwrap();
         assert!(
-            toks.iter().any(|t| t.kind == TokenKind::String && t.lexeme == "\"a#b\""),
+            toks.iter()
+                .any(|t| t.kind == TokenKind::String && t.lexeme == "\"a#b\""),
             "string contents must survive: {toks:?}"
         );
     }
@@ -966,7 +1183,10 @@ mod tests {
     fn comment_may_contain_quotes_and_hashes() {
         let toks = lex("x = 1 # it's a \"test\" ###").unwrap();
         assert!(toks.iter().any(|t| t.lexeme == "x"));
-        assert_eq!(toks.iter().filter(|t| t.kind == TokenKind::Ident).count(), 1);
+        assert_eq!(
+            toks.iter().filter(|t| t.kind == TokenKind::Ident).count(),
+            1
+        );
     }
 
     /// Every operator must lex as exactly one token. A two-character form
@@ -1058,7 +1278,10 @@ mod tests {
         for (src, want) in [
             ("0x8000000000000000", "0x8000000000000000"),
             ("0o1000000000000000000000", "0o1000000000000000000000"),
-            ("0b1000000000000000000000000000000000000000000000000000000000000000", "0b1000000000000000000000000000000000000000000000000000000000000000"),
+            (
+                "0b1000000000000000000000000000000000000000000000000000000000000000",
+                "0b1000000000000000000000000000000000000000000000000000000000000000",
+            ),
         ] {
             let toks = lex(&format!("x = {src}")).unwrap();
             let lit = toks.iter().find(|t| t.kind == TokenKind::Int).unwrap();

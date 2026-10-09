@@ -13,7 +13,10 @@ fn repo_dir() -> PathBuf {
 }
 
 fn nx_files_under(dir: PathBuf, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(&dir).expect("corpus root is readable").filter_map(|e| e.ok()) {
+    for entry in std::fs::read_dir(&dir)
+        .expect("corpus root is readable")
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
         if path.is_dir() {
             nx_files_under(path, out);
@@ -44,11 +47,20 @@ fn dump_of(path: &Path) -> String {
 #[test]
 fn two_lowerings_dump_identically() {
     let files = corpus();
-    assert!(files.len() >= 30, "expected the shipped corpus, saw {}", files.len());
+    assert!(
+        files.len() >= 30,
+        "expected the shipped corpus, saw {}",
+        files.len()
+    );
     for path in &files {
         let a = dump_of(path);
         let b = dump_of(path);
-        assert_eq!(a, b, "{} dumps differently on a second lowering", path.display());
+        assert_eq!(
+            a,
+            b,
+            "{} dumps differently on a second lowering",
+            path.display()
+        );
         assert!(!a.is_empty(), "{} dumped nothing", path.display());
     }
 }
@@ -59,10 +71,16 @@ fn a_dump_names_modules_and_never_paths() {
         let text = dump_of(&path);
         let mut modules = 0;
         for line in text.lines() {
-            let Some(rest) = line.strip_prefix("(module ") else { continue };
+            let Some(rest) = line.strip_prefix("(module ") else {
+                continue;
+            };
             modules += 1;
             let name = rest.split_whitespace().next().unwrap_or("");
-            assert!(!name.is_empty(), "{}: a module printed without a name", path.display());
+            assert!(
+                !name.is_empty(),
+                "{}: a module printed without a name",
+                path.display()
+            );
             // A module name is an identifier from the source; a path
             // separator or drive letter in one would mean the dump was
             // printing file locations.

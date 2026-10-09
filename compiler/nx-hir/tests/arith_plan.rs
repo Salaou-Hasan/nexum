@@ -21,9 +21,18 @@ use nx_hir::{arith_plan, ArithPlan, ArithRule, BinRule, PowRule};
 #[test]
 fn trapping_int_arithmetic_selects_the_checked_intrinsics() {
     use ArithPlan::Checked;
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Add), Checked("llvm.sadd.with.overflow.i64"));
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Sub), Checked("llvm.ssub.with.overflow.i64"));
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Mul), Checked("llvm.smul.with.overflow.i64"));
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Add),
+        Checked("llvm.sadd.with.overflow.i64")
+    );
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Sub),
+        Checked("llvm.ssub.with.overflow.i64")
+    );
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Mul),
+        Checked("llvm.smul.with.overflow.i64")
+    );
 }
 
 #[test]
@@ -32,9 +41,18 @@ fn trapping_division_and_remainder_keep_their_panicking_helpers() {
     // panic lives in the runtime helper, exactly as the backend emits
     // today.
     use ArithPlan::IntCall;
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Div), IntCall("nx_div_i64"));
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::FloorDiv), IntCall("nx_floordiv_i64"));
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Mod), IntCall("nx_mod_i64"));
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Div),
+        IntCall("nx_div_i64")
+    );
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::FloorDiv),
+        IntCall("nx_floordiv_i64")
+    );
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Mod),
+        IntCall("nx_mod_i64")
+    );
 }
 
 #[test]
@@ -81,7 +99,11 @@ fn dynamic_rules_have_no_unboxed_form() {
         BinRule::Dynamic,
     ] {
         for op in [BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Pow] {
-            assert_eq!(arith_plan(rule, op), ArithPlan::Dispatch, "{rule:?} on {op:?}");
+            assert_eq!(
+                arith_plan(rule, op),
+                ArithPlan::Dispatch,
+                "{rule:?} on {op:?}"
+            );
         }
     }
 }
@@ -91,8 +113,17 @@ fn mismatched_rule_operator_pairs_dispatch_rather_than_miscompile() {
     // Unreachable through checked code (the checker rejects `7 % 2.0`
     // before lowering decides anything), but a malformed node must not
     // take the compiler down mid-emission.
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Float), BinOp::Mod), ArithPlan::Dispatch);
-    assert_eq!(arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Pow), ArithPlan::Dispatch);
-    assert_eq!(arith_plan(BinRule::Bitwise, BinOp::Add), ArithPlan::Dispatch);
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Float), BinOp::Mod),
+        ArithPlan::Dispatch
+    );
+    assert_eq!(
+        arith_plan(BinRule::Arith(ArithRule::Trap), BinOp::Pow),
+        ArithPlan::Dispatch
+    );
+    assert_eq!(
+        arith_plan(BinRule::Bitwise, BinOp::Add),
+        ArithPlan::Dispatch
+    );
     assert_eq!(arith_plan(BinRule::Concat, BinOp::Add), ArithPlan::Dispatch);
 }

@@ -18,8 +18,8 @@
 //! cross-module inference beyond direct same-module calls (unknown
 //! callees retain).
 
-use std::collections::{HashMap, HashSet};
 use nx_ast::{Expr, Program, Stmt};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Alloc {
@@ -84,7 +84,12 @@ pub fn plan(
                 // root escapes if it is a param/alias, or passed to retainer.
                 match root {
                     Root::Var(v) => {
-                        if params.contains(v) || aliases.get(v).map(|s| s.iter().any(|a| params.contains(a))).unwrap_or(false) {
+                        if params.contains(v)
+                            || aliases
+                                .get(v)
+                                .map(|s| s.iter().any(|a| params.contains(a)))
+                                .unwrap_or(false)
+                        {
                             hit = true;
                             break 'outer;
                         }
@@ -122,7 +127,10 @@ pub fn plan(
         }
     }
     // Per-binding plans.
-    let mut plan = Plan { locals: HashMap::new(), retains: retains.clone() };
+    let mut plan = Plan {
+        locals: HashMap::new(),
+        retains: retains.clone(),
+    };
     for ((module, name), (params, body)) in &fns {
         let aliases = aliases_in(body, params);
         let mut esc_vars: HashSet<String> = HashSet::new();
@@ -198,16 +206,15 @@ pub fn plan(
             } else {
                 Alloc::Unique
             };
-            plan.locals.insert((module.clone(), name.clone(), var), alloc);
+            plan.locals
+                .insert((module.clone(), name.clone(), var), alloc);
         }
         // for-each loop vars alias list elements: always Shared.
         for s in body {
             if let Stmt::For { var, iter, .. } = s {
                 if matches!(iter, nx_ast::ForIter::Each(_)) {
-                    plan.locals.insert(
-                        (module.clone(), name.clone(), var.clone()),
-                        Alloc::Shared,
-                    );
+                    plan.locals
+                        .insert((module.clone(), name.clone(), var.clone()), Alloc::Shared);
                 }
             }
         }
@@ -222,14 +229,21 @@ fn index_fns(
 ) {
     for s in stmts {
         match s {
-            Stmt::Fn { name, params, body, .. } => {
-                out.insert((module.to_string(), name.clone()), (params.clone(), body.clone()));
+            Stmt::Fn {
+                name, params, body, ..
+            } => {
+                out.insert(
+                    (module.to_string(), name.clone()),
+                    (params.clone(), body.clone()),
+                );
                 index_fns(module, body, out);
             }
             // Methods plan like functions under `Type.method` keys. `self`
             // is a real parameter (it may be retained by `return self`),
             // so it joins the param list; associated functions have none.
-            Stmt::Impl { type_name, methods, .. } => {
+            Stmt::Impl {
+                type_name, methods, ..
+            } => {
                 for m in methods {
                     let key = (
                         module.to_string(),
@@ -312,11 +326,14 @@ fn aliases_in(body: &[Stmt], params: &[String]) -> HashMap<String, HashSet<Strin
 fn collect_alias_pairs(body: &[Stmt], map: &mut HashMap<String, HashSet<String>>) {
     for s in body {
         match s {
-            Stmt::Assign { targets, values, .. } => {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
                 // `x = y` aliases; `a[i] = y` writes into a container and
                 // does not rebind a name, so it creates no alias.
                 if targets.len() == 1 && values.len() == 1 {
-                    if let (nx_ast::Target::Name(name), Expr::Var(y, _)) = (&targets[0], &values[0]) {
+                    if let (nx_ast::Target::Name(name), Expr::Var(y, _)) = (&targets[0], &values[0])
+                    {
                         map.entry(name.clone()).or_default().insert(y.clone());
                         map.entry(y.clone()).or_default().insert(name.clone());
                     }
@@ -343,7 +360,9 @@ fn escaping_roots(body: &[Stmt], out: &mut HashSet<Root>) {
                     }
                 }
             }
-            Stmt::Assign { targets, values, .. } => {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
                 // A multiple assignment reads every source, so any of them
                 // can reach the caller through a returned tuple.
                 for e in values {
@@ -407,9 +426,7 @@ fn expr_roots(e: &Expr, out: &mut HashSet<Root>) {
                 // is owned by `nx_ast::shape`; `print` is not one of them
                 // (it is a statement, never a call callee) and stays a
                 // local exemption.
-                Expr::Var(n, _)
-                    if nx_ast::shape::builtin_arity(n).is_some() || n == "print" =>
-                {
+                Expr::Var(n, _) if nx_ast::shape::builtin_arity(n).is_some() || n == "print" => {
                     None
                 }
                 Expr::Var(n, _) => Some(Callee::Same(n.clone())),
@@ -431,7 +448,10 @@ fn expr_roots(e: &Expr, out: &mut HashSet<Root>) {
             if let Some(c) = c {
                 for a in args {
                     for v in vars_in(a) {
-                        out.insert(Root::ArgTo { callee: c.clone(), var: v });
+                        out.insert(Root::ArgTo {
+                            callee: c.clone(),
+                            var: v,
+                        });
                     }
                 }
             }
@@ -459,18 +479,34 @@ fn expr_roots(e: &Expr, out: &mut HashSet<Root>) {
                 expr_roots(v, out);
             }
         }
-        Expr::Slice { base, from, to, step, .. } => {
+        Expr::Slice {
+            base,
+            from,
+            to,
+            step,
+            ..
+        } => {
             expr_roots(base, out);
             for bound in [from, to, step].into_iter().flatten() {
                 expr_roots(bound, out);
             }
         }
-        Expr::IfExpr { cond, then_value, else_value, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
             expr_roots(cond, out);
             expr_roots(then_value, out);
             expr_roots(else_value, out);
         }
-        Expr::Comprehension { element, iter, cond, .. } => {
+        Expr::Comprehension {
+            element,
+            iter,
+            cond,
+            ..
+        } => {
             // The loop variable is not filtered here: an extra root only
             // pushes toward Shared, which is the safe direction.
             expr_roots(element, out);
@@ -514,14 +550,25 @@ fn vars_in(e: &Expr) -> Vec<String> {
             .iter()
             .flat_map(|(k, v)| vars_in(k).into_iter().chain(vars_in(v)))
             .collect(),
-        Expr::Slice { base, from, to, step, .. } => {
+        Expr::Slice {
+            base,
+            from,
+            to,
+            step,
+            ..
+        } => {
             let mut v = vars_in(base);
             for bound in [from, to, step].into_iter().flatten() {
                 v.extend(vars_in(bound));
             }
             v
         }
-        Expr::IfExpr { cond, then_value, else_value, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
             let mut v = vars_in(cond);
             v.extend(vars_in(then_value));
             v.extend(vars_in(else_value));
@@ -529,7 +576,12 @@ fn vars_in(e: &Expr) -> Vec<String> {
         }
         // The loop variable is not filtered: keeping it only pushes
         // toward Shared, which is the safe direction.
-        Expr::Comprehension { element, iter, cond, .. } => {
+        Expr::Comprehension {
+            element,
+            iter,
+            cond,
+            ..
+        } => {
             let mut v = vars_in(element);
             v.extend(vars_in(iter));
             if let Some(c) = cond {

@@ -134,7 +134,10 @@ print(xs)
 fn list_push_rejects_bad_receivers_and_type_mismatches() {
     // Pushing into a temporary would drop the result, so it is a type error
     // rather than a silent no-op.
-    assert_rejected("push([1], 2)", "push() first argument must be a list variable");
+    assert_rejected(
+        "push([1], 2)",
+        "push() first argument must be a list variable",
+    );
     assert_rejected(
         r#"
 xs = [1, 2]
@@ -231,9 +234,18 @@ print("abc"[3])
 
 #[test]
 fn list_index_must_be_an_int() {
-    assert_rejected("xs = [1, 2]\nprint(xs[\"k\"])", "index must be Int, found Str");
-    assert_rejected("xs = [1, 2]\nprint(xs[true])", "index must be Int, found Bool");
-    assert_rejected("xs = [1, 2]\nprint(xs[1.5])", "index must be Int, found Float");
+    assert_rejected(
+        "xs = [1, 2]\nprint(xs[\"k\"])",
+        "index must be Int, found Str",
+    );
+    assert_rejected(
+        "xs = [1, 2]\nprint(xs[true])",
+        "index must be Int, found Bool",
+    );
+    assert_rejected(
+        "xs = [1, 2]\nprint(xs[1.5])",
+        "index must be Int, found Float",
+    );
 }
 
 // --- list delete ------------------------------------------------------
@@ -269,7 +281,10 @@ print(xs)
 #[test]
 fn list_delete_out_of_range_fails() {
     assert_runtime_error("xs = [1, 2, 3]\ndel xs[5]", "index 5 out of range (len 3)");
-    assert_runtime_error("xs = [1, 2, 3]\ndel xs[-4]", "index -4 out of range (len 3)");
+    assert_runtime_error(
+        "xs = [1, 2, 3]\ndel xs[-4]",
+        "index -4 out of range (len 3)",
+    );
     assert_runtime_error("xs = []\ndel xs[0]", "index 0 out of range (len 0)");
 }
 
@@ -569,8 +584,14 @@ print(xs[4:2:1])
 #[test]
 fn slice_step_zero_is_a_runtime_error() {
     // The checker cannot see it: the step is usually only known at runtime.
-    assert_runtime_error("xs = [0, 1, 2, 3]\nprint(xs[::0])", "slice step must be positive");
-    assert_runtime_error("xs = [0, 1, 2, 3]\nprint(xs[::-1])", "slice step must be positive");
+    assert_runtime_error(
+        "xs = [0, 1, 2, 3]\nprint(xs[::0])",
+        "slice step must be positive",
+    );
+    assert_runtime_error(
+        "xs = [0, 1, 2, 3]\nprint(xs[::-1])",
+        "slice step must be positive",
+    );
 }
 
 #[test]
@@ -739,8 +760,14 @@ print(s, len(s))
 fn string_concatenation_with_a_non_string_is_rejected() {
     // There is no implicit conversion, so a mistake here is a static error
     // rather than a runtime surprise.
-    assert_rejected("print(\"n=\" + 5)", "operator '+' not supported for Str and Int");
-    assert_rejected("print(\"n=\" + true)", "operator '+' not supported for Str and Bool");
+    assert_rejected(
+        "print(\"n=\" + 5)",
+        "operator '+' not supported for Str and Int",
+    );
+    assert_rejected(
+        "print(\"n=\" + true)",
+        "operator '+' not supported for Str and Bool",
+    );
 }
 
 // --- membership --------------------------------------------------------
@@ -843,8 +870,14 @@ print("zz" not in "hello")
 
 #[test]
 fn membership_needs_a_container_on_the_right() {
-    assert_rejected("print(1 in 5)", "'in' needs a list, string or dict on the right");
-    assert_rejected("print(\"a\" in 5)", "'in' needs a list, string or dict on the right");
+    assert_rejected(
+        "print(1 in 5)",
+        "'in' needs a list, string or dict on the right",
+    );
+    assert_rejected(
+        "print(\"a\" in 5)",
+        "'in' needs a list, string or dict on the right",
+    );
 }
 
 // --- for loops ---------------------------------------------------------
@@ -1124,19 +1157,34 @@ fn string_operations_count_characters_not_bytes() {
     assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[0] == \"\\u65e5\")", "true");
     assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[1] == \"\\u672c\")", "true");
     assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[2] == \"\\u8a9e\")", "true");
-    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[-1] == \"\\u8a9e\")", "true");
+    assert_one(
+        "print(\"\\u65e5\\u672c\\u8a9e\"[-1] == \"\\u8a9e\")",
+        "true",
+    );
     assert_one("print(\"h\\u00e9llo\"[1] == \"\\u00e9\")", "true");
     assert_one("print(\"a\\u{1f389}b\"[1] == \"\\u{1f389}\")", "true");
     assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\"[2]))", "1");
 
     // Slice bounds are characters too.
-    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[1:3] == \"\\u672c\\u8a9e\")", "true");
-    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[-2:] == \"\\u672c\\u8a9e\")", "true");
+    assert_one(
+        "print(\"\\u65e5\\u672c\\u8a9e\"[1:3] == \"\\u672c\\u8a9e\")",
+        "true",
+    );
+    assert_one(
+        "print(\"\\u65e5\\u672c\\u8a9e\"[-2:] == \"\\u672c\\u8a9e\")",
+        "true",
+    );
     assert_one("print(\"h\\u00e9llo\"[1:3] == \"\\u00e9l\")", "true");
-    assert_one("print(\"\\u65e5\\u672c\\u8a9e\"[:] == \"\\u65e5\\u672c\\u8a9e\")", "true");
+    assert_one(
+        "print(\"\\u65e5\\u672c\\u8a9e\"[:] == \"\\u65e5\\u672c\\u8a9e\")",
+        "true",
+    );
     assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\"[1:99]))", "2");
     // A step selects whole characters: indices 0, 2 and 4 of five.
-    assert_one("print(len(\"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\"[::2]))", "3");
+    assert_one(
+        "print(len(\"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\"[::2]))",
+        "3",
+    );
     assert_one(
         "print(\"\\u65e5\\u672c\\u8a9e\\u6587\\u5b57\"[::2] == \"\\u65e5\\u8a9e\\u5b57\")",
         "true",
@@ -1158,7 +1206,10 @@ fn string_operations_count_characters_not_bytes() {
     );
 
     // Out of range reports the CHARACTER length, not the byte length.
-    assert_runtime_error("print(\"\\u65e5\\u672c\\u8a9e\"[9])", "out of range (len 3)");
+    assert_runtime_error(
+        "print(\"\\u65e5\\u672c\\u8a9e\"[9])",
+        "out of range (len 3)",
+    );
 }
 
 #[test]

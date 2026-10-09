@@ -196,24 +196,24 @@ pub fn run_in_dir_with_input(src: &str, nounbox: bool, dir: &Path, input: Option
     match input {
         Some(text) => run_piped(&out, text),
         None => match Command::new(&out).output() {
-        Ok(o) => {
-            let mut text = String::from_utf8_lossy(&o.stdout).to_string();
-            let err = String::from_utf8_lossy(&o.stderr).to_string();
-            if !err.trim().is_empty() {
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
+            Ok(o) => {
+                let mut text = String::from_utf8_lossy(&o.stdout).to_string();
+                let err = String::from_utf8_lossy(&o.stderr).to_string();
+                if !err.trim().is_empty() {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&err);
                 }
-                text.push_str(&err);
+                Outcome {
+                    code: o.status.code().unwrap_or(-1),
+                    out: normalize(&text),
+                }
             }
-            Outcome {
-                code: o.status.code().unwrap_or(-1),
-                out: normalize(&text),
-            }
-        }
-        Err(e) => Outcome {
-            code: 105,
-            out: format!("cannot run built program: {e}"),
-        },
+            Err(e) => Outcome {
+                code: 105,
+                out: format!("cannot run built program: {e}"),
+            },
         },
     }
 }
@@ -330,7 +330,8 @@ pub fn assert_rejected(src: &str, needle: &str) {
 pub fn assert_runtime_error(src: &str, needle: &str) {
     let o = run(src);
     assert_ne!(
-        o.code, 0,
+        o.code,
+        0,
         "expected a runtime failure, but it exited 0 with {:?}\n  source:\n{}",
         o.out,
         indent(src)

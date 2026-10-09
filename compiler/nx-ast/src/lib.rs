@@ -34,10 +34,22 @@ pub enum Stmt {
     /// One or more targets and one or more values. A single pair is the
     /// ordinary `a = 1`; several is either multiple assignment
     /// (`a, b = 1, 2`) or destructuring of a tuple return (`a, b = f()`).
-    Assign { targets: Vec<Target>, values: Vec<Expr>, span: Span },
+    Assign {
+        targets: Vec<Target>,
+        values: Vec<Expr>,
+        span: Span,
+    },
     /// `target op= value`, for a target that can be both read and written.
-    AssignOp { target: Target, op: BinOp, value: Expr, span: Span },
-    Print { values: Vec<Expr>, span: Span },
+    AssignOp {
+        target: Target,
+        op: BinOp,
+        value: Expr,
+        span: Span,
+    },
+    Print {
+        values: Vec<Expr>,
+        span: Span,
+    },
     If {
         cond: Expr,
         then_body: Vec<Stmt>,
@@ -68,8 +80,12 @@ pub enum Stmt {
         values: Vec<Expr>,
         span: Span,
     },
-    Break { span: Span },
-    Continue { span: Span },
+    Break {
+        span: Span,
+    },
+    Continue {
+        span: Span,
+    },
     /// `type Point:` followed by an indented list of `name: Type` fields.
     ///
     /// Module-level only. A declaration is a compile-time fact, so it
@@ -89,12 +105,27 @@ pub enum Stmt {
         methods: Vec<Method>,
         span: Span,
     },
-    Import { module: String, alias: Option<String>, span: Span },
-    FromImport { module: String, names: Vec<(String, Option<String>)>, span: Span },
+    Import {
+        module: String,
+        alias: Option<String>,
+        span: Span,
+    },
+    FromImport {
+        module: String,
+        names: Vec<(String, Option<String>)>,
+        span: Span,
+    },
     /// `del a`, `del a[i]`, `del p.x`
-    Del { targets: Vec<Target>, span: Span },
+    Del {
+        targets: Vec<Target>,
+        span: Span,
+    },
     /// `assert cond` / `assert cond, "message"`
-    Assert { cond: Expr, message: Option<Expr>, span: Span },
+    Assert {
+        cond: Expr,
+        message: Option<Expr>,
+        span: Span,
+    },
     Expr(Expr),
 }
 
@@ -173,7 +204,11 @@ pub enum Expr {
     /// `for`-only syntax so a range can be iterated, sliced and passed
     /// like any other list, which is what makes it useful as a
     /// comprehension's source (`[i * i for i in 0..5]`).
-    Range { start: Box<Expr>, end: Box<Expr>, span: Span },
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        span: Span,
+    },
     /// `{k: v, ...}`. Order is preserved so iteration is deterministic.
     Dict(Vec<(Expr, Expr)>, Span),
     Var(String, Span),
@@ -342,10 +377,7 @@ impl BinOp {
     /// Anything that yields a Bool. `in` and `not in` are comparisons for
     /// the purpose of the checker's operand rules.
     pub fn is_comparison(self) -> bool {
-        matches!(
-            self,
-            BinOp::Eq | BinOp::NotEq | BinOp::In | BinOp::NotIn
-        )
+        matches!(self, BinOp::Eq | BinOp::NotEq | BinOp::In | BinOp::NotIn)
     }
 
     /// The subset that orders rather than tests equality.
@@ -416,12 +448,16 @@ impl Target {
     pub fn as_expr(&self, span: Span) -> Expr {
         match self {
             Target::Name(n) => Expr::Var(n.clone(), span),
-            Target::Index { base, index } => {
-                Expr::Index { base: base.clone(), index: index.clone(), span }
-            }
-            Target::Attr { base, field } => {
-                Expr::Attr { base: base.clone(), attr: field.clone(), span }
-            }
+            Target::Index { base, index } => Expr::Index {
+                base: base.clone(),
+                index: index.clone(),
+                span,
+            },
+            Target::Attr { base, field } => Expr::Attr {
+                base: base.clone(),
+                attr: field.clone(),
+                span,
+            },
         }
     }
 }
@@ -482,7 +518,10 @@ mod layout {
     /// assignment in the program.
     #[test]
     fn a_target_is_a_box_and_a_string() {
-        assert_eq!(size_of::<Target>(), size_of::<Box<u8>>() + size_of::<String>());
+        assert_eq!(
+            size_of::<Target>(),
+            size_of::<Box<u8>>() + size_of::<String>()
+        );
     }
 
     /// Boxing `Expr::Comprehension`'s `var` would take `Expr` from 56 to 48,

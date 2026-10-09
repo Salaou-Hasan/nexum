@@ -286,7 +286,10 @@ fn build_stamp() -> String {
 
 fn stamp_path(out: &str) -> std::path::PathBuf {
     let mut p = std::path::PathBuf::from(out);
-    let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     p.set_file_name(format!("{name}.nxstamp"));
     p
 }
@@ -310,7 +313,10 @@ fn up_to_date(file: &str, out: &str) -> bool {
         Err(_) => return false,
     };
     let entry = std::path::Path::new(file);
-    let base = entry.parent().map(|p| p.to_path_buf()).unwrap_or(".".into());
+    let base = entry
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or(".".into());
     let mut inputs = match nx_codegen::dependencies(entry, &base) {
         Ok(v) => v,
         Err(_) => return false,
@@ -357,7 +363,10 @@ fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
     if let Some(dir) = std::path::Path::new(out).parent() {
         if !dir.as_os_str().is_empty() && !dir.exists() {
             if let Err(e) = std::fs::create_dir_all(dir) {
-                eprintln!("nx: cannot create output directory '{}': {e}", dir.display());
+                eprintln!(
+                    "nx: cannot create output directory '{}': {e}",
+                    dir.display()
+                );
                 return Err(ExitCode::from(1));
             }
         }
@@ -369,7 +378,11 @@ fn build_exe(file: &str, out: &str) -> Result<(), ExitCode> {
         return Err(ExitCode::from(1));
     }
     // Probe clang first for a helpful error.
-    if std::process::Command::new("clang").arg("--version").output().is_err() {
+    if std::process::Command::new("clang")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         eprintln!("nx: clang not found — install LLVM: winget install LLVM.LLVM");
         return Err(ExitCode::from(1));
     }
@@ -407,7 +420,11 @@ fn default_exe_name(file: &str) -> String {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or(".".into());
-    let name = if cfg!(windows) { format!("{stem}.exe") } else { stem };
+    let name = if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem
+    };
     dir.join(name).to_string_lossy().to_string()
 }
 
@@ -557,7 +574,10 @@ fn update_cmd(rest: &[String]) -> ExitCode {
     match dl {
         Ok(s) if s.success() => {}
         _ => {
-            eprintln!("nx update: download failed (no {tag} build for {}?)", env!("NX_TARGET"));
+            eprintln!(
+                "nx update: download failed (no {tag} build for {}?)",
+                env!("NX_TARGET")
+            );
             return ExitCode::from(1);
         }
     }
@@ -594,7 +614,10 @@ fn update_cmd(rest: &[String]) -> ExitCode {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
     }
-    println!("nx: updated to {tag} (previous kept at {})", backup.display());
+    println!(
+        "nx: updated to {tag} (previous kept at {})",
+        backup.display()
+    );
     update_extension(&tag);
     println!("nx: restart your terminal to use it");
     ExitCode::SUCCESS
@@ -623,7 +646,13 @@ fn relaunch_elevated(rest: &[String]) -> ExitCode {
         args.join(",")
     );
     match std::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
         .status()
     {
         Ok(s) if s.success() => {
@@ -669,7 +698,9 @@ const NX_SVG: &str = include_str!("../../../editors/vscode-nexum/icons/file_type
 
 fn vscode_extensions_dir() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
-    let home = std::env::var("USERPROFILE").ok().map(std::path::PathBuf::from)?;
+    let home = std::env::var("USERPROFILE")
+        .ok()
+        .map(std::path::PathBuf::from)?;
     #[cfg(not(windows))]
     let home = std::env::var("HOME").ok().map(std::path::PathBuf::from)?;
     Some(home.join(".vscode/extensions"))
@@ -677,29 +708,33 @@ fn vscode_extensions_dir() -> Option<std::path::PathBuf> {
 
 fn vscode_settings_path() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
-    let base = std::env::var("APPDATA").ok().map(std::path::PathBuf::from)?;
+    let base = std::env::var("APPDATA")
+        .ok()
+        .map(std::path::PathBuf::from)?;
     #[cfg(target_os = "macos")]
-    let base = std::env::var("HOME").ok().map(|h| {
-        std::path::PathBuf::from(h).join("Library/Application Support")
-    })?;
+    let base = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support"))?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    let base = std::env::var("HOME").ok().map(|h| {
-        std::path::PathBuf::from(h).join(".config")
-    })?;
+    let base = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".config"))?;
     Some(base.join("Code/User/settings.json"))
 }
 
 fn nx_data_icons() -> Option<std::path::PathBuf> {
     #[cfg(windows)]
-    let base = std::env::var("APPDATA").ok().map(std::path::PathBuf::from)?;
+    let base = std::env::var("APPDATA")
+        .ok()
+        .map(std::path::PathBuf::from)?;
     #[cfg(target_os = "macos")]
-    let base = std::env::var("HOME").ok().map(|h| {
-        std::path::PathBuf::from(h).join("Library/Application Support/Nexum")
-    })?;
+    let base = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/Nexum"))?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    let base = std::env::var("HOME").ok().map(|h| {
-        std::path::PathBuf::from(h).join(".local/share/Nexum")
-    })?;
+    let base = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".local/share/Nexum"))?;
     #[cfg(windows)]
     return Some(base.join("Nexum/icons"));
     #[cfg(not(windows))]
@@ -725,7 +760,11 @@ fn json_insert_key(text: &str, key: &str, value: &str) -> (String, bool) {
         Some(i) => i,
         None => return (text.to_string(), false),
     };
-    let before: String = text[..close].chars().rev().take_while(|c| c.is_whitespace()).collect();
+    let before: String = text[..close]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_whitespace())
+        .collect();
     let trimmed = text[..close].trim_end();
     // Empty object -> no comma; existing trailing comma -> don't double it.
     let need_comma = !trimmed.ends_with('{') && !trimmed.ends_with(',');
@@ -822,8 +861,7 @@ fn json_object_set(text: &str, top: &str, inner: &str, value_json: &str) -> (Str
     // Insert new entry before the closing brace.
     let mut out = String::new();
     out.push_str(text[..obj_end].trim_end());
-    if !text[obj_start + 1..obj_end].trim().is_empty()
-        && !text[..obj_end].trim_end().ends_with(',')
+    if !text[obj_start + 1..obj_end].trim().is_empty() && !text[..obj_end].trim_end().ends_with(',')
     {
         out.push(',');
     }
@@ -836,11 +874,15 @@ fn json_object_set(text: &str, top: &str, inner: &str, value_json: &str) -> (Str
 fn match_brace(text: &str, open: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     let n = bytes.len();
-    let (mut depth, opener, closer) = (0i32, bytes[open] as char, match bytes[open] as char {
-        '{' => '}',
-        '[' => ']',
-        _ => return None,
-    });
+    let (mut depth, opener, closer) = (
+        0i32,
+        bytes[open] as char,
+        match bytes[open] as char {
+            '{' => '}',
+            '[' => ']',
+            _ => return None,
+        },
+    );
     let _ = opener;
     let mut i = open;
     let mut in_str = false;
@@ -940,7 +982,14 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
         }
     };
     let theme = settings_theme(&text).unwrap_or_default();
-    log(&format!("nx setup: icon theme is '{}'", if theme.is_empty() { "(default)" } else { &theme }));
+    log(&format!(
+        "nx setup: icon theme is '{}'",
+        if theme.is_empty() {
+            "(default)"
+        } else {
+            &theme
+        }
+    ));
 
     if theme.contains("vsicons") {
         // vscode-icons: point it at our N icon, add the .nx mapping.
@@ -966,7 +1015,11 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
             println!("nx setup: re-run with --apply to write it (a .bak backup is kept)");
             return ExitCode::SUCCESS;
         }
-        let (t2, _) = json_insert_key(&text, "vsicons.customIconFolderPath", &format!("\"{folder}\""));
+        let (t2, _) = json_insert_key(
+            &text,
+            "vsicons.customIconFolderPath",
+            &format!("\"{folder}\""),
+        );
         // Merge the nx entry into the associations array when present.
         let mut t3 = t2.clone();
         if t3.contains("\"vsicons.associations.files\"") {
@@ -994,7 +1047,11 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
         let _ = std::fs::copy(&settings, &bak);
         match std::fs::write(&settings, t3) {
             Ok(_) => {
-                log(&format!("nx setup: updated {} (backup at {})", settings.display(), bak.display()));
+                log(&format!(
+                    "nx setup: updated {} (backup at {})",
+                    settings.display(),
+                    bak.display()
+                ));
                 log("nx setup: reload VS Code window to see the N icon");
                 ExitCode::SUCCESS
             }
@@ -1023,7 +1080,10 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
         }
         const WANT: &str = "\"../../icons/nx\"";
         if !apply {
-            println!("nx setup: icon written to {}", icons.join("nx.svg").display());
+            println!(
+                "nx setup: icon written to {}",
+                icons.join("nx.svg").display()
+            );
             println!("nx setup: would set \"material-icon-theme.files.associations\": {{ \"*.nx\": {WANT} }}");
             println!("nx setup: re-run with --apply to write it (a .bak backup is kept)");
             return ExitCode::SUCCESS;
@@ -1054,7 +1114,9 @@ fn setup_cmd(rest: &[String]) -> ExitCode {
         // Policy: only vscode-icons and Material Icon Theme accept custom
         // SVGs (verified; Catppuccin explicitly refuses, the rest have no
         // API). Never borrow another pack's icon — leave the theme alone.
-        log(&format!("nx setup: '{theme}' has no custom-icon support, leaving it untouched"));
+        log(&format!(
+            "nx setup: '{theme}' has no custom-icon support, leaving it untouched"
+        ));
         log("nx setup: to see the N logo, select the 'Nexum Icons' file icon theme");
         log("nx setup: Preferences -> File Icon Theme -> Nexum Icons (ships in the vsix)");
         ExitCode::SUCCESS
@@ -1080,7 +1142,10 @@ fn update_extension(tag: &str) {
         Some(c) => c,
         None => {
             eprintln!("nx update: `code` CLI not found, extension not updated");
-            eprintln!("nx update: install it manually: code --install-extension {}", tmp.display());
+            eprintln!(
+                "nx update: install it manually: code --install-extension {}",
+                tmp.display()
+            );
             return;
         }
     };
@@ -1131,15 +1196,30 @@ mod tests {
 
     #[test]
     fn json_object_set_inserts_and_replaces() {
-        let (t, c) = super::json_object_set("{\n    \"a\": 1\n}", "material-icon-theme.files.associations", "*.nx", "\"../../icons/nx\"");
+        let (t, c) = super::json_object_set(
+            "{\n    \"a\": 1\n}",
+            "material-icon-theme.files.associations",
+            "*.nx",
+            "\"../../icons/nx\"",
+        );
         assert!(c);
         assert!(t.contains("\"*.nx\": \"../../icons/nx\""));
         // Idempotent.
-        let (t2, c2) = super::json_object_set(&t, "material-icon-theme.files.associations", "*.nx", "\"../../icons/nx\"");
+        let (t2, c2) = super::json_object_set(
+            &t,
+            "material-icon-theme.files.associations",
+            "*.nx",
+            "\"../../icons/nx\"",
+        );
         assert!(!c2);
         assert_eq!(t, t2);
         // Replace python mapping with the custom icon.
-        let (t3, c3) = super::json_object_set("{\"material-icon-theme.files.associations\": {\"*.nx\": \"python\"}}", "material-icon-theme.files.associations", "*.nx", "\"../../icons/nx\"");
+        let (t3, c3) = super::json_object_set(
+            "{\"material-icon-theme.files.associations\": {\"*.nx\": \"python\"}}",
+            "material-icon-theme.files.associations",
+            "*.nx",
+            "\"../../icons/nx\"",
+        );
         assert!(c3);
         assert!(t3.contains("\"*.nx\": \"../../icons/nx\""));
         assert!(!t3.contains("python"));
@@ -1153,7 +1233,11 @@ mod tests {
         assert!(rel.is_absolute());
         assert_eq!(rel.file_name().unwrap(), "main.exe");
         // Absolute `-o` paths pass through unchanged.
-        let abs = if cfg!(windows) { "C:\\out\\main.exe" } else { "/tmp/out/main" };
+        let abs = if cfg!(windows) {
+            "C:\\out\\main.exe"
+        } else {
+            "/tmp/out/main"
+        };
         assert_eq!(super::resolve_exe(abs), std::path::PathBuf::from(abs));
     }
 }

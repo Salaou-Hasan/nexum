@@ -63,7 +63,12 @@ pub fn resolve_module_file(base_dirs: &[PathBuf], name: &str) -> Option<PathBuf>
 /// this covers the pure body recursion.
 pub fn child_bodies(stmt: &Stmt) -> Vec<&[Stmt]> {
     match stmt {
-        Stmt::If { then_body, elifs, else_body, .. } => {
+        Stmt::If {
+            then_body,
+            elifs,
+            else_body,
+            ..
+        } => {
             let mut out = Vec::with_capacity(2 + elifs.len());
             out.push(then_body.as_slice());
             for (_, b) in elifs {
@@ -166,8 +171,13 @@ pub fn split_method_key(key: &str) -> Option<(&str, &str)> {
 /// "unknown builtin" rather than silent agreement. `input` takes an
 /// optional prompt, so it is the only builtin with a range. `int` and
 /// `float` convert one value (sugar `x.int()` works like `xs.push(1)`).
-pub const BUILTINS: &[(&str, usize, usize)] =
-    &[("len", 1, 1), ("push", 2, 2), ("input", 0, 1), ("int", 1, 1), ("float", 1, 1)];
+pub const BUILTINS: &[(&str, usize, usize)] = &[
+    ("len", 1, 1),
+    ("push", 2, 2),
+    ("input", 0, 1),
+    ("int", 1, 1),
+    ("float", 1, 1),
+];
 
 /// Arity range of an ambient builtin, if `name` is one.
 pub fn builtin_arity(name: &str) -> Option<(usize, usize)> {
@@ -193,10 +203,7 @@ mod tests {
 
     fn scratch_dir(tag: &str) -> PathBuf {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "nxshape-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nxshape-{tag}-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
     }

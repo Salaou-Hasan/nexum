@@ -15,8 +15,7 @@ fn top(source: &str) -> HProgram {
 }
 
 fn lower(source: &str) -> Result<HProgram, String> {
-    nx_hir::lower::lower_source(source, std::path::Path::new("."))
-        .map_err(|e| e.to_string())
+    nx_hir::lower::lower_source(source, std::path::Path::new(".")).map_err(|e| e.to_string())
 }
 
 /// The `<top>` body of a program that has no declared functions.
@@ -33,7 +32,10 @@ fn stmts_of(source: &str) -> Vec<HStmt> {
 fn only_printed(source: &str) -> HExpr {
     let body = stmts_of(source);
     match body.as_slice() {
-        [HStmt { kind: HStmtKind::Print { values }, .. }] => values[0].clone(),
+        [HStmt {
+            kind: HStmtKind::Print { values },
+            ..
+        }] => values[0].clone(),
         other => panic!("expected one print statement, got {other:?}"),
     }
 }
@@ -48,9 +50,13 @@ fn int_arithmetic_records_trapping() {
     // between `add i64` and the overflow intrinsic by re-deriving what
     // the checker knows. Lowering records the answer instead.
     let body = stmts_of("print(1 + 2)");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
-        HExprKind::Binary { rule, left, right, .. } => {
+        HExprKind::Binary {
+            rule, left, right, ..
+        } => {
             assert_eq!(*rule, BinRule::Arith(ArithRule::Trap));
             assert_eq!(left.ty, HTy::Int);
             assert_eq!(right.ty, HTy::Int);
@@ -63,7 +69,9 @@ fn int_arithmetic_records_trapping() {
 #[test]
 fn a_mixed_float_operand_records_promotion() {
     let body = stmts_of("print(1.0 + 2)");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Binary { rule, .. } => {
             assert_eq!(*rule, BinRule::Arith(ArithRule::PromoteFloat))
@@ -76,7 +84,9 @@ fn a_mixed_float_operand_records_promotion() {
 #[test]
 fn two_floats_record_plain_float_arithmetic() {
     let body = stmts_of("print(1.0 + 2.0)");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Binary { rule, .. } => assert_eq!(*rule, BinRule::Arith(ArithRule::Float)),
         other => panic!("expected an addition, got {other:?}"),
@@ -86,7 +96,9 @@ fn two_floats_record_plain_float_arithmetic() {
 #[test]
 fn integer_power_records_saturation_not_trapping() {
     let body = stmts_of("print(2 ** 8)");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Binary { rule, .. } => assert_eq!(*rule, BinRule::Pow(PowRule::Saturate)),
         other => panic!("expected a power, got {other:?}"),
@@ -96,7 +108,9 @@ fn integer_power_records_saturation_not_trapping() {
 #[test]
 fn string_concatenation_is_its_own_rule() {
     let body = stmts_of("print(\"a\" + \"b\")");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Binary { rule, .. } => assert_eq!(*rule, BinRule::Concat),
         other => panic!("expected a concatenation, got {other:?}"),
@@ -114,7 +128,9 @@ fn membership_is_decided_from_the_right_hand_side() {
         ("print(1 in {\"a\": 1})", MemberRule::DictKey),
     ] {
         let body = stmts_of(src);
-        let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print in {src}") };
+        let HStmtKind::Print { values } = &body[0].kind else {
+            panic!("expected a print in {src}")
+        };
         match &values[0].kind {
             HExprKind::Contains { rule, .. } => assert_eq!(*rule, want, "in {src}"),
             other => panic!("expected a membership test in {src}, got {other:?}"),
@@ -125,7 +141,9 @@ fn membership_is_decided_from_the_right_hand_side() {
 #[test]
 fn indexing_a_string_records_the_character_rule() {
     let body = stmts_of("print(\"abc\"[0])");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Index { rule, .. } => assert_eq!(*rule, IndexRule::StrChar),
         other => panic!("expected an index, got {other:?}"),
@@ -136,12 +154,16 @@ fn indexing_a_string_records_the_character_rule() {
 #[test]
 fn equality_and_ordering_are_separate_relations() {
     let body = stmts_of("print(1 == 2)\nprint(\"a\" < \"b\")");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Equal { rule, .. } => assert_eq!(*rule, EqRule::Numeric),
         other => panic!("expected an equality, got {other:?}"),
     }
-    let HStmtKind::Print { values } = &body[1].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[1].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Compare { rule, .. } => assert_eq!(*rule, CmpRule::StrOrder),
         other => panic!("expected a comparison, got {other:?}"),
@@ -151,7 +173,9 @@ fn equality_and_ordering_are_separate_relations() {
 #[test]
 fn and_or_are_short_circuit_nodes() {
     let body = stmts_of("print(true and false)");
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     assert!(matches!(values[0].kind, HExprKind::Logic { .. }));
 }
 
@@ -174,7 +198,11 @@ fn slots_are_parameters_first_then_first_bind_order() {
     collect_slots(&f.body, &mut seen);
     // `c` binds before `d`, so the locals read as 2 then 3 -- after the
     // two parameters.
-    assert_eq!(seen, vec![2, 3, 3], "locals follow source order of first binding");
+    assert_eq!(
+        seen,
+        vec![2, 3, 3],
+        "locals follow source order of first binding"
+    );
 }
 
 fn collect_slots(b: &Block, out: &mut Vec<u32>) {
@@ -187,7 +215,10 @@ fn collect_slots(b: &Block, out: &mut Vec<u32>) {
                     }
                 }
             }
-            HStmtKind::AssignOp { target: HTarget::Slot(slot), .. } => out.push(slot.0),
+            HStmtKind::AssignOp {
+                target: HTarget::Slot(slot),
+                ..
+            } => out.push(slot.0),
             HStmtKind::Return { values } => {
                 for v in values {
                     walk_slots_expr(v, out);
@@ -228,11 +259,20 @@ fn self_is_slot_zero_of_a_method() {
 
 #[test]
 fn an_associated_function_takes_no_receiver_slot() {
-    let p = top("type P:\n    x: Int\n\nimpl P:\n    fn make(v):\n        return P(v)\n\nprint(P.make(3))");
+    let p = top(
+        "type P:\n    x: Int\n\nimpl P:\n    fn make(v):\n        return P(v)\n\nprint(P.make(3))",
+    );
     let method = &p.methods[0];
-    assert_eq!(method.receiver, None, "an associated function has no receiver");
+    assert_eq!(
+        method.receiver, None,
+        "an associated function has no receiver"
+    );
     let body = &p.funcs[method.func.0 as usize];
-    assert_eq!(body.params[0].0, Slot(0), "`v` is slot 0 -- there is no `self` slot");
+    assert_eq!(
+        body.params[0].0,
+        Slot(0),
+        "`v` is slot 0 -- there is no `self` slot"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -243,10 +283,17 @@ fn an_associated_function_takes_no_receiver_slot() {
 fn module_level_names_are_globals_and_function_locals_are_slots() {
     let p = top("g = 7\nfn f():\n    l = 1\n    return l\nprint(f())");
     let entry = &p.modules[p.entry.0 as usize];
-    assert_eq!(entry.globals.len(), 1, "only the top-level name is a global");
+    assert_eq!(
+        entry.globals.len(),
+        1,
+        "only the top-level name is a global"
+    );
     assert_eq!(
         entry.globals[0].0 as usize,
-        p.globals.iter().position(|g| g.diag.name.as_deref() == Some("g")).expect("g"),
+        p.globals
+            .iter()
+            .position(|g| g.diag.name.as_deref() == Some("g"))
+            .expect("g"),
     );
     let f = &p.funcs[entry.funcs[0].0 as usize];
     assert_eq!(f.params.len(), 0);
@@ -286,7 +333,12 @@ fn del_records_the_rule_for_each_target_shape() {
         .collect();
     assert_eq!(
         rules,
-        vec![DelRule::ListRemove, DelRule::DictRemove, DelRule::RecordBlank, DelRule::Unbind]
+        vec![
+            DelRule::ListRemove,
+            DelRule::DictRemove,
+            DelRule::RecordBlank,
+            DelRule::Unbind
+        ]
     );
 }
 
@@ -317,9 +369,13 @@ fn mut_self_writes_back_only_where_the_receiver_has_storage() {
 
 #[test]
 fn an_associated_call_has_no_receiver_to_evaluate() {
-    let p = top("type P:\n    x: Int\n\nimpl P:\n    fn make(v):\n        return P(v)\n\nprint(P.make(3))");
+    let p = top(
+        "type P:\n    x: Int\n\nimpl P:\n    fn make(v):\n        return P(v)\n\nprint(P.make(3))",
+    );
     let body = top_body(&p);
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::CallMethod { receiver, .. } => {
             assert!(receiver.is_none(), "a type name is not a value to evaluate")
@@ -339,7 +395,12 @@ fn every_right_hand_side_evaluates_before_any_store() {
     let p = top("a = 1\nb = 2\na, b = b, a");
     let body = top_body(&p);
     let last = body.last().expect("a statement");
-    let HStmtKind::Assign { targets, values, .. } = &last.kind else { panic!("expected an assign") };
+    let HStmtKind::Assign {
+        targets, values, ..
+    } = &last.kind
+    else {
+        panic!("expected an assign")
+    };
     assert_eq!(targets.len(), 2);
     assert_eq!(values.len(), 2);
     assert!(matches!(values[0].kind, HExprKind::Place(_)));
@@ -358,8 +419,14 @@ fn a_from_imported_value_becomes_an_eager_assignment() {
     let p = nx_hir::lower::lower_source("from utils import VERSION as v\nprint(v)", &base)
         .expect("the imported value lowers");
     let body = top_body(&p);
-    let HStmtKind::Assign { targets, values, .. } = &body[1].kind else {
-        panic!("expected the import to materialize an assign, got {:?}", body[1])
+    let HStmtKind::Assign {
+        targets, values, ..
+    } = &body[1].kind
+    else {
+        panic!(
+            "expected the import to materialize an assign, got {:?}",
+            body[1]
+        )
     };
     assert!(matches!(values[0].kind, HExprKind::Place(Place::Global(_))));
     assert!(matches!(targets[0], HTarget::Slot(_)));
@@ -399,7 +466,9 @@ fn a_range_in_value_position_is_an_ascending_list() {
 fn builtin_sugar_becomes_the_direct_call() {
     let p = top("xs = [1]\nprint(len(xs))");
     let body = top_body(&p);
-    let HStmtKind::Print { values } = &body[1].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[1].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Builtin { op, .. } => assert_eq!(*op, BuiltinOp::Len),
         other => panic!("expected a builtin, got {other:?}"),
@@ -409,12 +478,17 @@ fn builtin_sugar_becomes_the_direct_call() {
     // first argument of the same node.
     let p = top("xs = [1]\nxs.push(2)");
     let body = top_body(&p);
-    let HStmtKind::Expr(e) = &body[1].kind else { panic!("expected an expression") };
+    let HStmtKind::Expr(e) = &body[1].kind else {
+        panic!("expected an expression")
+    };
     match &e.kind {
         HExprKind::Builtin { op, args } => {
             assert_eq!(*op, BuiltinOp::Push);
             assert_eq!(args.len(), 2);
-            assert!(matches!(args[0].kind, HExprKind::Place(_)), "push targets the variable");
+            assert!(
+                matches!(args[0].kind, HExprKind::Place(_)),
+                "push targets the variable"
+            );
         }
         other => panic!("expected a builtin, got {other:?}"),
     }
@@ -426,7 +500,9 @@ fn int_and_float_lower_to_conversion_builtins() {
     // operation and its answer type.
     let p = top("print(int(\"42\"))\nprint(float(2))\n");
     let body = top_body(&p);
-    let HStmtKind::Print { values } = &body[0].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[0].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Builtin { op, args } => {
             assert_eq!(*op, BuiltinOp::ToInt);
@@ -435,7 +511,9 @@ fn int_and_float_lower_to_conversion_builtins() {
         other => panic!("expected a builtin, got {other:?}"),
     }
     assert_eq!(values[0].ty, HTy::Int);
-    let HStmtKind::Print { values } = &body[1].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[1].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Builtin { op, args } => {
             assert_eq!(*op, BuiltinOp::ToFloat);
@@ -450,7 +528,9 @@ fn int_and_float_lower_to_conversion_builtins() {
 fn a_field_of_a_known_record_is_a_constant_offset() {
     let p = top("type P:\n    x: Int\n    y: Int\nq = P(1, 2)\nprint(q.y)");
     let body = top_body(&p);
-    let HStmtKind::Print { values } = &body[1].kind else { panic!("expected a print") };
+    let HStmtKind::Print { values } = &body[1].kind else {
+        panic!("expected a print")
+    };
     match &values[0].kind {
         HExprKind::Field { field, .. } => assert_eq!(*field, FieldRef::Static(FieldIdx(1))),
         other => panic!("expected a field read, got {other:?}"),
@@ -463,13 +543,17 @@ fn an_unknown_base_keeps_an_interned_runtime_name() {
     let e = {
         let entry = &p.modules[p.entry.0 as usize];
         let f = &p.funcs[entry.funcs[0].0 as usize];
-        let HStmtKind::Return { values } = &f.body[0].kind else { panic!("expected a return") };
+        let HStmtKind::Return { values } = &f.body[0].kind else {
+            panic!("expected a return")
+        };
         values[0].clone()
     };
     match &e.kind {
         HExprKind::Field { field, base, .. } => {
             assert_eq!(base.ty, HTy::Unknown, "an unannotated parameter is unknown");
-            let FieldRef::Dynamic(id) = field else { panic!("expected a runtime name") };
+            let FieldRef::Dynamic(id) = field else {
+                panic!("expected a runtime name")
+            };
             assert_eq!(p.strings[id.0 as usize], "x");
         }
         other => panic!("expected a field read, got {other:?}"),
@@ -481,7 +565,9 @@ fn dynamic_field_names_are_interned_once_for_the_program() {
     let p = top("fn f(q):\n    return q.x + q.x\n");
     let entry = &p.modules[p.entry.0 as usize];
     let f = &p.funcs[entry.funcs[0].0 as usize];
-    let HStmtKind::Return { values } = &f.body[0].kind else { panic!("expected a return") };
+    let HStmtKind::Return { values } = &f.body[0].kind else {
+        panic!("expected a return")
+    };
     let mut names = Vec::new();
     collect_dynamic_names(&values[0], &mut names);
     assert_eq!(names.len(), 2, "both reads are interned");

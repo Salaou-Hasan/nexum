@@ -41,7 +41,11 @@ fn corpus() -> Vec<PathBuf> {
 #[test]
 fn every_shipped_program_lowers() {
     let files = corpus();
-    assert!(files.len() >= 30, "expected the shipped corpus, saw {}", files.len());
+    assert!(
+        files.len() >= 30,
+        "expected the shipped corpus, saw {}",
+        files.len()
+    );
     let mut failures = Vec::new();
     for path in &files {
         let src = match std::fs::read_to_string(path) {
@@ -55,11 +59,18 @@ fn every_shipped_program_lowers() {
         match nx_hir::lower::lower_source(&src, base) {
             Ok(h) => {
                 if h.modules.is_empty() {
-                    failures.push(format!("{}: lowered to a program with no modules", path.display()));
+                    failures.push(format!(
+                        "{}: lowered to a program with no modules",
+                        path.display()
+                    ));
                 }
             }
             Err(e) => failures.push(format!("{}: {e}", path.display())),
         }
     }
-    assert!(failures.is_empty(), "lowering failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "lowering failed:\n{}",
+        failures.join("\n")
+    );
 }

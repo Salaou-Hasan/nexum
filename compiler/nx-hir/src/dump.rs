@@ -44,12 +44,22 @@ fn module(out: &mut String, p: &HProgram, m: &HModule, id: ModuleId) {
         if id == p.entry { " (entry)" } else { "" }
     ));
     for gid in &m.globals {
-        let Some(g) = p.globals.get(gid.0 as usize) else { continue };
-        out.push_str(&format!("  (global {})\n", name(&g.diag, format!("g{}", gid.0))));
+        let Some(g) = p.globals.get(gid.0 as usize) else {
+            continue;
+        };
+        out.push_str(&format!(
+            "  (global {})\n",
+            name(&g.diag, format!("g{}", gid.0))
+        ));
     }
     for tid in &m.types {
-        let Some(t) = p.types.get(tid.0 as usize) else { continue };
-        out.push_str(&format!("  (type {} (layout", name(&t.diag, format!("t{}", tid.0))));
+        let Some(t) = p.types.get(tid.0 as usize) else {
+            continue;
+        };
+        out.push_str(&format!(
+            "  (type {} (layout",
+            name(&t.diag, format!("t{}", tid.0))
+        ));
         for (i, f) in t.fields.iter().enumerate() {
             out.push_str(&format!(" (field {i}: {f})"));
         }
@@ -59,7 +69,9 @@ fn module(out: &mut String, p: &HProgram, m: &HModule, id: ModuleId) {
     // method table points at them, and the receiver is slot 0 of the
     // params, so printing them as functions loses nothing.
     for fid in &m.funcs {
-        let Some(f) = p.funcs.get(fid.0 as usize) else { continue };
+        let Some(f) = p.funcs.get(fid.0 as usize) else {
+            continue;
+        };
         let label = name(&f.diag, format!("f{}", fid.0));
         out.push_str(&format!("  (fn {label}"));
         for (slot, ty) in &f.params {
@@ -93,7 +105,12 @@ fn block(out: &mut String, p: &HProgram, b: &[HStmt], indent: usize) {
 fn bodies(s: &HStmt) -> Vec<&[HStmt]> {
     let mut out: Vec<&[HStmt]> = Vec::new();
     match &s.kind {
-        HStmtKind::If { then_body, elifs, else_body, .. } => {
+        HStmtKind::If {
+            then_body,
+            elifs,
+            else_body,
+            ..
+        } => {
             out.push(then_body);
             for (_, b) in elifs {
                 out.push(b);
@@ -113,19 +130,41 @@ fn bodies(s: &HStmt) -> Vec<&[HStmt]> {
 fn stmt(_p: &HProgram, s: &HStmt) -> String {
     let list = |v: &[HExpr]| v.iter().map(expr).collect::<Vec<_>>().join(" ");
     match &s.kind {
-        HStmtKind::Assign { targets, values, rules } => {
-            let t = targets.iter().map(|t| target(t)).collect::<Vec<_>>().join(" ");
-            let r = rules.iter().map(|r| format!("{r:?}")).collect::<Vec<_>>().join(" ");
+        HStmtKind::Assign {
+            targets,
+            values,
+            rules,
+        } => {
+            let t = targets
+                .iter()
+                .map(|t| target(t))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let r = rules
+                .iter()
+                .map(|r| format!("{r:?}"))
+                .collect::<Vec<_>>()
+                .join(" ");
             format!("(assign {t} <- {} [{r}])", list(values))
         }
-        HStmtKind::AssignOp { target: t, op, rule, value } => {
+        HStmtKind::AssignOp {
+            target: t,
+            op,
+            rule,
+            value,
+        } => {
             format!("(assign-op {} {op:?} {rule:?} {})", target(t), expr(value))
         }
         HStmtKind::Print { values } => format!("(print {})", list(values)),
         HStmtKind::EnsureInit { module } => format!("(ensure-init m{})", module.0),
         // Nested bodies print below this line, so only their sizes are
         // summarized here.
-        HStmtKind::If { cond, then_body, elifs, else_body } => {
+        HStmtKind::If {
+            cond,
+            then_body,
+            elifs,
+            else_body,
+        } => {
             let mut s = format!("(if {} (then ({} stmts))", expr(cond), then_body.len());
             for (c, b) in elifs {
                 s.push_str(&format!(" (elif {} ({} stmts))", expr(c), b.len()));
@@ -140,14 +179,24 @@ fn stmt(_p: &HProgram, s: &HStmt) -> String {
         HStmtKind::While { cond, body } => {
             format!("(while {} ({} stmts))", expr(cond), body.len())
         }
-        HStmtKind::ForRange { var, start, end, body } => format!(
+        HStmtKind::ForRange {
+            var,
+            start,
+            end,
+            body,
+        } => format!(
             "(for-range ${} {}..{} ({} stmts))",
             var.0,
             expr(start),
             expr(end),
             body.len()
         ),
-        HStmtKind::ForEach { var, iter, rule, body } => format!(
+        HStmtKind::ForEach {
+            var,
+            iter,
+            rule,
+            body,
+        } => format!(
             "(for-each ${} {} {rule:?} ({} stmts))",
             var.0,
             expr(iter),
@@ -215,7 +264,10 @@ fn shape(e: &HExpr) -> String {
         HExprKind::Str(v) => format!("str {v:?}"),
         HExprKind::None => "none".to_string(),
         HExprKind::List(items) => {
-            format!("list [{}]", items.iter().map(expr).collect::<Vec<_>>().join(" "))
+            format!(
+                "list [{}]",
+                items.iter().map(expr).collect::<Vec<_>>().join(" ")
+            )
         }
         HExprKind::Range { start, end, rule } => {
             format!("range {}..{} {rule:?}", expr(start), expr(end))
@@ -234,7 +286,13 @@ fn shape(e: &HExpr) -> String {
         HExprKind::Index { base, index, rule } => {
             format!("index {} {} {rule:?}", expr(base), expr(index))
         }
-        HExprKind::Slice { base, from, to, step, rule } => {
+        HExprKind::Slice {
+            base,
+            from,
+            to,
+            step,
+            rule,
+        } => {
             let bound = |o: &Option<Box<HExpr>>| match o {
                 Some(e) => expr(e),
                 None => String::new(),
@@ -248,22 +306,46 @@ fn shape(e: &HExpr) -> String {
             )
         }
         HExprKind::Unary { op, rule, operand } => format!("{op:?} {} {rule:?}", expr(operand)),
-        HExprKind::Binary { left, op, rule, right } => {
+        HExprKind::Binary {
+            left,
+            op,
+            rule,
+            right,
+        } => {
             format!("{} {op:?} {} {rule:?}", expr(left), expr(right))
         }
-        HExprKind::Equal { left, op, rule, right } => {
+        HExprKind::Equal {
+            left,
+            op,
+            rule,
+            right,
+        } => {
             format!("{} {op:?} {} {rule:?}", expr(left), expr(right))
         }
-        HExprKind::Compare { left, op, rule, right } => {
+        HExprKind::Compare {
+            left,
+            op,
+            rule,
+            right,
+        } => {
             format!("{} {op:?} {} {rule:?}", expr(left), expr(right))
         }
-        HExprKind::Contains { needle, hay, rule, negated } => format!(
+        HExprKind::Contains {
+            needle,
+            hay,
+            rule,
+            negated,
+        } => format!(
             "{} {}in {} {rule:?}",
             expr(needle),
             if *negated { "not " } else { "" },
             expr(hay)
         ),
-        HExprKind::Select { cond, then_value, else_value } => format!(
+        HExprKind::Select {
+            cond,
+            then_value,
+            else_value,
+        } => format!(
             "{} if {} else {}",
             expr(then_value),
             expr(cond),
@@ -272,7 +354,13 @@ fn shape(e: &HExpr) -> String {
         HExprKind::Logic { op, left, right } => {
             format!("{} {op:?} {}", expr(left), expr(right))
         }
-        HExprKind::Compr { element, var, iter, rule, cond } => format!(
+        HExprKind::Compr {
+            element,
+            var,
+            iter,
+            rule,
+            cond,
+        } => format!(
             "compr [{} for ${} in {} {rule:?}{}]",
             expr(element),
             var.0,
@@ -283,7 +371,12 @@ fn shape(e: &HExpr) -> String {
             }
         ),
         HExprKind::CallFn { func, args: a } => format!("call f{}{}", func.0, args(a)),
-        HExprKind::CallMethod { method, receiver, args: a, writeback } => {
+        HExprKind::CallMethod {
+            method,
+            receiver,
+            args: a,
+            writeback,
+        } => {
             let recv = match receiver {
                 Some(r) => format!("on {}", expr(r)),
                 None => "on <type>".to_string(),
@@ -292,13 +385,20 @@ fn shape(e: &HExpr) -> String {
                 Some(w) => format!(" write-back {}", target(w)),
                 None => String::new(),
             };
-            format!("method m{} {recv}({}){wb}", method.0, a.iter().map(expr).collect::<Vec<_>>().join(" "))
+            format!(
+                "method m{} {recv}({}){wb}",
+                method.0,
+                a.iter().map(expr).collect::<Vec<_>>().join(" ")
+            )
         }
         HExprKind::Construct { type_id, args: a } => {
             format!("construct t{}{}", type_id.0, args(a))
         }
         HExprKind::Builtin { op, args: a } => {
-            format!("builtin {op:?}({})", a.iter().map(expr).collect::<Vec<_>>().join(" "))
+            format!(
+                "builtin {op:?}({})",
+                a.iter().map(expr).collect::<Vec<_>>().join(" ")
+            )
         }
     }
 }

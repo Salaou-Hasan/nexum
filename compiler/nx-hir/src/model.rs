@@ -111,7 +111,9 @@ pub struct DiagInfo {
 
 impl DiagInfo {
     pub fn named(name: &str) -> Self {
-        DiagInfo { name: Some(name.to_string()) }
+        DiagInfo {
+            name: Some(name.to_string()),
+        }
     }
 }
 
@@ -150,8 +152,8 @@ pub enum ArithPlan {
 pub fn arith_plan(rule: BinRule, op: nx_ast::BinOp) -> ArithPlan {
     // Fully qualified rather than glob-imported: `Float` and `Bitwise`
     // each name both a `BinRule` variant and an `ArithPlan` variant.
-    use ArithPlan::{Bitwise as Plan, Checked, Dispatch, FloatCall, FloatMnem, IntCall};
     use nx_ast::BinOp as Op;
+    use ArithPlan::{Bitwise as Plan, Checked, Dispatch, FloatCall, FloatMnem, IntCall};
     match rule {
         BinRule::Arith(ArithRule::Trap) => match op {
             Op::Add => Checked("llvm.sadd.with.overflow.i64"),
@@ -374,8 +376,15 @@ pub enum Place {
 pub enum HTarget {
     Slot(Slot),
     Global(GlobalId),
-    Index { base: Box<HExpr>, index: Box<HExpr>, rule: IndexRule },
-    Field { base: Box<HExpr>, field: FieldRef },
+    Index {
+        base: Box<HExpr>,
+        index: Box<HExpr>,
+        rule: IndexRule,
+    },
+    Field {
+        base: Box<HExpr>,
+        field: FieldRef,
+    },
 }
 
 /// A typed expression: the type and the decided rule travel with the
@@ -396,12 +405,23 @@ pub enum HExprKind {
     Str(String),
     None,
     List(Vec<HExpr>),
-    Range { start: Box<HExpr>, end: Box<HExpr>, rule: RangeRule },
+    Range {
+        start: Box<HExpr>,
+        end: Box<HExpr>,
+        rule: RangeRule,
+    },
     Dict(Vec<(HExpr, HExpr)>),
     /// A slot or global read.
     Place(Place),
-    Field { base: Box<HExpr>, field: FieldRef },
-    Index { base: Box<HExpr>, index: Box<HExpr>, rule: IndexRule },
+    Field {
+        base: Box<HExpr>,
+        field: FieldRef,
+    },
+    Index {
+        base: Box<HExpr>,
+        index: Box<HExpr>,
+        rule: IndexRule,
+    },
     Slice {
         base: Box<HExpr>,
         from: Option<Box<HExpr>>,
@@ -409,19 +429,51 @@ pub enum HExprKind {
         step: Option<Box<HExpr>>,
         rule: SliceRule,
     },
-    Unary { op: nx_ast::UnaryOp, rule: UnaryRule, operand: Box<HExpr> },
+    Unary {
+        op: nx_ast::UnaryOp,
+        rule: UnaryRule,
+        operand: Box<HExpr>,
+    },
     /// Arithmetic, power and bitwise operators. Comparisons, equality
     /// and membership are separate nodes below: they answer `Bool`
     /// through different relations, and sharing one rule field would
     /// let an ordering relation sit on an addition.
-    Binary { left: Box<HExpr>, op: nx_ast::BinOp, rule: BinRule, right: Box<HExpr> },
-    Equal { left: Box<HExpr>, op: nx_ast::BinOp, rule: EqRule, right: Box<HExpr> },
-    Compare { left: Box<HExpr>, op: nx_ast::BinOp, rule: CmpRule, right: Box<HExpr> },
-    Contains { needle: Box<HExpr>, hay: Box<HExpr>, rule: MemberRule, negated: bool },
+    Binary {
+        left: Box<HExpr>,
+        op: nx_ast::BinOp,
+        rule: BinRule,
+        right: Box<HExpr>,
+    },
+    Equal {
+        left: Box<HExpr>,
+        op: nx_ast::BinOp,
+        rule: EqRule,
+        right: Box<HExpr>,
+    },
+    Compare {
+        left: Box<HExpr>,
+        op: nx_ast::BinOp,
+        rule: CmpRule,
+        right: Box<HExpr>,
+    },
+    Contains {
+        needle: Box<HExpr>,
+        hay: Box<HExpr>,
+        rule: MemberRule,
+        negated: bool,
+    },
     /// `a if c else b`, with the joined type on the node.
-    Select { cond: Box<HExpr>, then_value: Box<HExpr>, else_value: Box<HExpr> },
+    Select {
+        cond: Box<HExpr>,
+        then_value: Box<HExpr>,
+        else_value: Box<HExpr>,
+    },
     /// Short-circuit `and` / `or`. Structure only; MIR builds the diamond.
-    Logic { op: nx_ast::BinOp, left: Box<HExpr>, right: Box<HExpr> },
+    Logic {
+        op: nx_ast::BinOp,
+        left: Box<HExpr>,
+        right: Box<HExpr>,
+    },
     Compr {
         element: Box<HExpr>,
         var: Slot,
@@ -429,7 +481,10 @@ pub enum HExprKind {
         rule: IterRule,
         cond: Option<Box<HExpr>>,
     },
-    CallFn { func: FuncId, args: Vec<HExpr> },
+    CallFn {
+        func: FuncId,
+        args: Vec<HExpr>,
+    },
     /// A method call. `receiver` is `None` only for `T.m(...)` through a
     /// type name (types are not values, so nothing evaluates); a value
     /// base always evaluates, even for associated functions (its effects
@@ -441,8 +496,14 @@ pub enum HExprKind {
         args: Vec<HExpr>,
         writeback: Option<HTarget>,
     },
-    Construct { type_id: TypeId, args: Vec<HExpr> },
-    Builtin { op: BuiltinOp, args: Vec<HExpr> },
+    Construct {
+        type_id: TypeId,
+        args: Vec<HExpr>,
+    },
+    Builtin {
+        op: BuiltinOp,
+        args: Vec<HExpr>,
+    },
 }
 
 /// A statement with its source position and inert original spellings.
@@ -462,34 +523,67 @@ pub enum HStmtKind {
     /// Positional assignment; several targets against one value is
     /// destructuring, exactly as the AST means it. One rule per value:
     /// the rule is a property of how each value binds.
-    Assign { targets: Vec<HTarget>, values: Vec<HExpr>, rules: Vec<CopyRule> },
+    Assign {
+        targets: Vec<HTarget>,
+        values: Vec<HExpr>,
+        rules: Vec<CopyRule>,
+    },
     /// Target-first, evaluated-once order is structural intent here;
     /// MIR makes the temporaries explicit.
-    AssignOp { target: HTarget, op: nx_ast::BinOp, rule: BinRule, value: HExpr },
-    Print { values: Vec<HExpr> },
+    AssignOp {
+        target: HTarget,
+        op: nx_ast::BinOp,
+        rule: BinRule,
+        value: HExpr,
+    },
+    Print {
+        values: Vec<HExpr>,
+    },
     /// Ensure a module is initialized, at the position of the `import`
     /// or `from ... import` statement that needs it -- including inside
     /// function bodies, where the import executes when reached. Repeat
     /// initialization is a no-op downstream. Top-level imports produce
     /// these nodes too: initialization follows statement order, not
     /// module-table order.
-    EnsureInit { module: ModuleId },
+    EnsureInit {
+        module: ModuleId,
+    },
     If {
         cond: HExpr,
         then_body: Vec<HStmt>,
         elifs: Vec<(HExpr, Vec<HStmt>)>,
         else_body: Option<Vec<HStmt>>,
     },
-    While { cond: HExpr, body: Vec<HStmt> },
+    While {
+        cond: HExpr,
+        body: Vec<HStmt>,
+    },
     /// Counted loop over a range. Direction stays dynamic (the backend
     /// emits the up/down select as today); bounds are `Int`.
-    ForRange { var: Slot, start: HExpr, end: HExpr, body: Vec<HStmt> },
-    ForEach { var: Slot, iter: HExpr, rule: IterRule, body: Vec<HStmt> },
-    Return { values: Vec<HExpr> },
+    ForRange {
+        var: Slot,
+        start: HExpr,
+        end: HExpr,
+        body: Vec<HStmt>,
+    },
+    ForEach {
+        var: Slot,
+        iter: HExpr,
+        rule: IterRule,
+        body: Vec<HStmt>,
+    },
+    Return {
+        values: Vec<HExpr>,
+    },
     Break,
     Continue,
-    Del { targets: Vec<HDelTarget> },
-    Assert { cond: HExpr, message: Option<HExpr> },
+    Del {
+        targets: Vec<HDelTarget>,
+    },
+    Assert {
+        cond: HExpr,
+        message: Option<HExpr>,
+    },
     Expr(HExpr),
 }
 

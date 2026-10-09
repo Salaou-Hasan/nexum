@@ -5,8 +5,8 @@
 //! Unknown/dynamic targets go `opaque` (may touch everything) —
 //! never silently Pure. Consumed by nx-codegen's memoization decision.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
 use nx_ast::{Expr, Program, Stmt};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A module-global place: (module, name).
 pub type Place = (String, String);
@@ -42,8 +42,7 @@ impl Summary {
 impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let show = |s: &BTreeSet<Place>| {
-            let mut v: Vec<String> =
-                s.iter().map(|(m, n)| format!("{m}.{n}")).collect();
+            let mut v: Vec<String> = s.iter().map(|(m, n)| format!("{m}.{n}")).collect();
             v.sort();
             format!("{{{}}}", v.join(", "))
         };
@@ -126,10 +125,21 @@ pub fn analyze_map(programs: HashMap<String, Program>) -> Result<Ir, IrError> {
     loop {
         let mut fresh = Vec::new();
         {
-            let cx = Cx { bodies: &bodies, sums: &sums };
+            let cx = Cx {
+                bodies: &bodies,
+                sums: &sums,
+            };
             for (key, body) in &bodies {
                 let mut s = Summary::default();
-                summarize(&programs, &key.0, body, params[key].as_slice(), &menvs[&key.0], &cx, &mut s);
+                summarize(
+                    &programs,
+                    &key.0,
+                    body,
+                    params[key].as_slice(),
+                    &menvs[&key.0],
+                    &cx,
+                    &mut s,
+                );
                 fresh.push((key.clone(), s));
             }
         }
@@ -147,7 +157,10 @@ pub fn analyze_map(programs: HashMap<String, Program>) -> Result<Ir, IrError> {
     for (key, summary) in sums {
         ir.funcs.insert(
             key.clone(),
-            FuncIr { params: params[&key].clone(), summary },
+            FuncIr {
+                params: params[&key].clone(),
+                summary,
+            },
         );
     }
     Ok(ir)
@@ -168,10 +181,15 @@ impl Env {
         let mut env = Env::default();
         for s in body {
             match s {
-                Stmt::Import { module: m, alias, .. } => {
-                    env.mods.insert(alias.clone().unwrap_or_else(|| m.clone()), m.clone());
+                Stmt::Import {
+                    module: m, alias, ..
+                } => {
+                    env.mods
+                        .insert(alias.clone().unwrap_or_else(|| m.clone()), m.clone());
                 }
-                Stmt::FromImport { module: m, names, .. } => {
+                Stmt::FromImport {
+                    module: m, names, ..
+                } => {
                     for (n, a) in names {
                         env.aliases.insert(
                             a.clone().unwrap_or_else(|| n.clone()),
@@ -201,7 +219,12 @@ fn index_fns(
 ) {
     for s in stmts {
         match s {
-            Stmt::Fn { name, params: ps, body, .. } => {
+            Stmt::Fn {
+                name,
+                params: ps,
+                body,
+                ..
+            } => {
                 params.insert((module.to_string(), name.clone()), ps.clone());
                 bodies.insert((module.to_string(), name.clone()), body.clone());
                 index_fns(module, body, params, bodies);
@@ -210,7 +233,9 @@ fn index_fns(
             // they never collide with plain functions. `self` is seeded as
             // a local (it always reads the receiver); nested functions
             // inside a body are indexed the same as anywhere else.
-            Stmt::Impl { type_name, methods, .. } => {
+            Stmt::Impl {
+                type_name, methods, ..
+            } => {
                 for m in methods {
                     let key = (
                         module.to_string(),
@@ -318,7 +343,9 @@ fn stmts(scope: &Scope, body: &[Stmt], out: &mut Summary) {
 fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
     let module = scope.module;
     match s {
-        Stmt::Assign { targets, values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
             // Every value is evaluated, whichever target it lands in.
             for v in values {
                 expr(scope, v, out);
@@ -391,7 +418,13 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
                 expr(scope, v, out);
             }
         }
-        Stmt::If { cond, then_body, elifs, else_body, .. } => {
+        Stmt::If {
+            cond,
+            then_body,
+            elifs,
+            else_body,
+            ..
+        } => {
             expr(scope, cond, out);
             stmts(scope, then_body, out);
             for (c, b) in elifs {
@@ -406,7 +439,9 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
             expr(scope, cond, out);
             stmts(scope, body, out);
         }
-        Stmt::For { var, iter, body, .. } => {
+        Stmt::For {
+            var, iter, body, ..
+        } => {
             match iter {
                 nx_ast::ForIter::Range { start, end } => {
                     expr(scope, start, out);
@@ -461,17 +496,11 @@ fn stmt(scope: &Scope, s: &Stmt, out: &mut Summary) {
     }
 }
 
-
-
 /// Memoizable: provably independent of mutable state — no shared
 /// reads or writes, no printing, no heap traffic, no opaque calls.
 /// Results depend only on arguments, so caching them preserves semantics.
 pub fn memoizable(sum: &Summary) -> bool {
-    sum.reads.is_empty()
-        && sum.writes.is_empty()
-        && !sum.prints
-        && !sum.heap
-        && !sum.opaque
+    sum.reads.is_empty() && sum.writes.is_empty() && !sum.prints && !sum.heap && !sum.opaque
 }
 
 fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
@@ -482,7 +511,11 @@ fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
                 return;
             }
             // A bare function name is a reference, not a data read.
-            if scope.cx.bodies.contains_key(&(module.to_string(), name.clone())) {
+            if scope
+                .cx
+                .bodies
+                .contains_key(&(module.to_string(), name.clone()))
+            {
                 return;
             }
             if scope.is_shared(name) {
@@ -535,18 +568,35 @@ fn expr(scope: &Scope, e: &Expr, out: &mut Summary) {
                 expr(scope, v, out);
             }
         }
-        Expr::Slice { base, from, to, step, .. } => {
+        Expr::Slice {
+            base,
+            from,
+            to,
+            step,
+            ..
+        } => {
             expr(scope, base, out);
             for bound in [from, to, step].into_iter().flatten() {
                 expr(scope, bound, out);
             }
         }
-        Expr::IfExpr { cond, then_value, else_value, .. } => {
+        Expr::IfExpr {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
             expr(scope, cond, out);
             expr(scope, then_value, out);
             expr(scope, else_value, out);
         }
-        Expr::Comprehension { element, var, iter, cond, .. } => {
+        Expr::Comprehension {
+            element,
+            var,
+            iter,
+            cond,
+            ..
+        } => {
             expr(scope, iter, out);
             // The loop variable shadows any shared name inside the
             // element and the filter, so those are walked with it
@@ -658,7 +708,9 @@ impl Loader {
             return Ok(());
         }
         if self.loading.contains(&name) {
-            return Err(IrError { message: format!("circular import of '{name}'") });
+            return Err(IrError {
+                message: format!("circular import of '{name}'"),
+            });
         }
         let prog = parse(source)?;
         self.loading.push(name.clone());
@@ -690,9 +742,12 @@ impl Loader {
 }
 
 fn parse(source: &str) -> Result<Program, IrError> {
-    let tokens = nx_lexer::lex(source)
-        .map_err(|e| IrError { message: e.to_string() })?;
-    nx_parser::parse(tokens).map_err(|e| IrError { message: e.to_string() })
+    let tokens = nx_lexer::lex(source).map_err(|e| IrError {
+        message: e.to_string(),
+    })?;
+    nx_parser::parse(tokens).map_err(|e| IrError {
+        message: e.to_string(),
+    })
 }
 
 fn collect_imports(prog: &Program, out: &mut Vec<String>) {
@@ -799,5 +854,4 @@ mod tests {
         assert!(s.reads.is_empty());
         assert!(memoizable(s));
     }
-
 }
