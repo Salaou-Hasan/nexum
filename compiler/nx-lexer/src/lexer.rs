@@ -461,6 +461,25 @@ impl Lexer {
                         });
                     }
                 }
+                Some('@') => {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        tokens.push(Token {
+                            kind: TokenKind::AtEq,
+                            lexeme: "@=".to_string(),
+                            line,
+                            col,
+                        });
+                    } else {
+                        tokens.push(Token {
+                            kind: TokenKind::At,
+                            lexeme: "@".to_string(),
+                            line,
+                            col,
+                        });
+                    }
+                }
                 Some('~') => {
                     self.advance();
                     tokens.push(Token {

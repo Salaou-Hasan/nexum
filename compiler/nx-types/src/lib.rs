@@ -139,6 +139,20 @@ pub fn arith_result(l: &Ty, op: BinOp, r: &Ty) -> Option<Ty> {
             return Some(Str);
         }
     }
+    // `@` only multiplies matrices: a scalar operand is a type error,
+    // not an Int or Float result. Without this, the (Int, Int) arm
+    // below would accept `2 @ 3`, which the HIR lowering then has to
+    // refuse as an internal error -- or worse, the runtime would read
+    // an integer as a list header and crash silently.
+    if matches!(op, BinOp::MatMul) {
+        return match (l, r) {
+            (Unknown, _) | (_, Unknown) => Some(Unknown),
+            (List(_), List(_)) if matrix_scalar(l).is_some() && matrix_scalar(r).is_some() => {
+                Some((*l).clone())
+            }
+            _ => Option::None,
+        };
+    }
     // The integral-only operators never widen to Float: `7 % 2.0` is a
     // mistake worth reporting rather than papering over.
     if op.is_bitwise() || matches!(op, BinOp::Mod | BinOp::FloorDiv) {

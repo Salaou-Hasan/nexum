@@ -171,12 +171,15 @@ pub fn split_method_key(key: &str) -> Option<(&str, &str)> {
 /// "unknown builtin" rather than silent agreement. `input` takes an
 /// optional prompt, so it is the only builtin with a range. `int` and
 /// `float` convert one value (sugar `x.int()` works like `xs.push(1)`).
+/// `solve(A, b)` solves a linear system A*x = b where A is a square
+/// matrix and b is a vector or matrix. Returns x.
 pub const BUILTINS: &[(&str, usize, usize)] = &[
     ("len", 1, 1),
     ("push", 2, 2),
     ("input", 0, 1),
     ("int", 1, 1),
     ("float", 1, 1),
+    ("solve", 2, 2),
 ];
 
 /// Arity range of an ambient builtin, if `name` is one.

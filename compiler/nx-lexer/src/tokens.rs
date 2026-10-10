@@ -35,6 +35,8 @@ pub enum TokenKind {
     PipeEq,
     Caret,
     CaretEq,
+    At,
+    AtEq,
     Tilde,
     Shl,
     ShlEq,

@@ -109,6 +109,10 @@ impl<'a> Verifier<'a> {
                     }
                     BinRule::Pow(PowRule::Saturate) => Some(HTy::Int),
                     BinRule::Concat => Some(HTy::Str),
+                    // The product has the left operand's type: this is
+                    // what lowering records (via the shared matrix), so
+                    // the cross-check projects the same side.
+                    BinRule::MatMul => Some(left.ty.clone()),
                     BinRule::Arith(ArithRule::Dynamic)
                     | BinRule::Pow(PowRule::Dynamic)
                     | BinRule::Dynamic => None,
@@ -253,6 +257,7 @@ impl<'a> Verifier<'a> {
                     BuiltinOp::Push => vec![2],
                     BuiltinOp::Input => vec![0, 1],
                     BuiltinOp::ToInt | BuiltinOp::ToFloat => vec![1],
+                    BuiltinOp::Solve => vec![2],
                 };
                 if !want.contains(&args.len()) {
                     self.err(
@@ -283,6 +288,10 @@ impl<'a> Verifier<'a> {
                     BuiltinOp::Input => HTy::Str,
                     BuiltinOp::ToInt => HTy::Int,
                     BuiltinOp::ToFloat => HTy::Float,
+                    // The checker answers Float shaped like b, but that
+                    // shape needs the arguments. Unknown here, and the
+                    // lowering agrees.
+                    BuiltinOp::Solve => HTy::Unknown,
                 };
                 self.exact(e, ctx, ret);
             }

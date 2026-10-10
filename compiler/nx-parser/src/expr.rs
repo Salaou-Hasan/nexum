@@ -299,6 +299,7 @@ impl Parser {
         loop {
             let op = match self.peek_kind() {
                 TokenKind::Star => BinOp::Mul,
+                TokenKind::At => BinOp::MatMul,
                 TokenKind::Slash => BinOp::Div,
                 // `//` has to be matched before `/`, which the lexer
                 // guarantees by emitting distinct tokens.

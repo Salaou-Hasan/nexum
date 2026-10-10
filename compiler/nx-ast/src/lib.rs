@@ -293,6 +293,8 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    /// `@` -- matrix multiplication.
+    MatMul,
     Div,
     /// `//` -- floor division. Truncating division on two Ints already
     /// floors toward negative infinity, so this is a spelling difference
@@ -331,6 +333,7 @@ impl BinOp {
             BinOp::Add => "+",
             BinOp::Sub => "-",
             BinOp::Mul => "*",
+            BinOp::MatMul => "@",
             BinOp::Div => "/",
             BinOp::FloorDiv => "//",
             BinOp::Mod => "%",
@@ -361,6 +364,7 @@ impl BinOp {
             BinOp::Add => Some("+="),
             BinOp::Sub => Some("-="),
             BinOp::Mul => Some("*="),
+            BinOp::MatMul => Some("@="),
             BinOp::Div => Some("/="),
             BinOp::FloorDiv => Some("//="),
             BinOp::Mod => Some("%="),

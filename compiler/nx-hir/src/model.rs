@@ -199,6 +199,7 @@ pub fn arith_plan(rule: BinRule, op: nx_ast::BinOp) -> ArithPlan {
         // own node. Answering `Dispatch` rather than panicking keeps a
         // malformed node from taking the compiler down mid-emission.
         BinRule::Concat => Dispatch,
+        BinRule::MatMul => Dispatch,
     }
 }
 
@@ -237,6 +238,8 @@ pub enum BinRule {
     Bitwise,
     /// `+` on two strings: concatenation, no overflow or promotion rule.
     Concat,
+    /// `@` -- matrix multiplication over List(List(N)) rows.
+    MatMul,
     Dynamic,
 }
 
@@ -354,6 +357,7 @@ pub enum BuiltinOp {
     Input,
     ToInt,
     ToFloat,
+    Solve,
 }
 
 /// Method receiver kind, carried through from the declaration.

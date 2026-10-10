@@ -148,6 +148,65 @@ impl Checker {
                 }
                 Ty::Float
             }
+            "solve" => {
+                // `solve(A, b)` solves A * x = b for x. A is a square
+                // matrix List(List(N)); b is a vector List(N) or a
+                // matrix List(List(N)) with a numeric N. Elimination
+                // divides, so x always comes back Float shaped like b.
+                // No numeric defaulting here, for the same reason as
+                // `@`: matrix parameters must stay dynamic.
+                if args.len() != 2 {
+                    self.err(
+                        span,
+                        format!("solve() expects 2 arguments, got {}", args.len()),
+                    );
+                    return Ty::Unknown;
+                }
+                let a_ty = self.check_expr(&args[0]);
+                let b_ty = self.check_expr(&args[1]);
+                if matches!(a_ty, Ty::Unknown) || matches!(b_ty, Ty::Unknown) {
+                    return Ty::Unknown;
+                }
+                let a_good = match &a_ty {
+                    Ty::List(rows) => match &**rows {
+                        Ty::List(cells) => {
+                            matches!(**cells, Ty::Int | Ty::Float | Ty::Unknown)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if !a_good {
+                    self.err(
+                        span,
+                        "solve() needs A to be a matrix (List(List(N))) with a numeric element type".to_string(),
+                    );
+                    return Ty::Unknown;
+                }
+                match &b_ty {
+                    Ty::List(rows) => match &**rows {
+                        Ty::List(cells) if matches!(**cells, Ty::Int | Ty::Float | Ty::Unknown) => {
+                            Ty::List(Box::new(Ty::List(Box::new(Ty::Float))))
+                        }
+                        Ty::Int | Ty::Float | Ty::Unknown => Ty::List(Box::new(Ty::Float)),
+                        _ => {
+                            self.err(
+                                span,
+                                "solve() needs b to be a vector or matrix with a numeric element type".to_string(),
+                            );
+                            Ty::Unknown
+                        }
+                    },
+                    _ => {
+                        self.err(
+                            span,
+                            "solve() needs b to be a vector or matrix with a numeric element type"
+                                .to_string(),
+                        );
+                        Ty::Unknown
+                    }
+                }
+            }
             _ => {
                 self.err(span, format!("unknown builtin '{name}'"));
                 Ty::Unknown

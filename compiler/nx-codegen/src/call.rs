@@ -295,6 +295,25 @@ impl Gen {
                 self.w(&format!("  {r} = call %NxVal @nx_to_float(%NxVal {ab})"));
                 Ok(NV::fresh_boxed(r, Ty::Float))
             }
+            "solve" => {
+                // `solve(A, b)` solves A * x = b. The checker pins the
+                // arity; anything else here is an internal error.
+                if args.len() != 2 {
+                    return Err(err(
+                        span,
+                        format!("solve() expects 2 arguments, got {}", args.len()),
+                    ));
+                }
+                let a = self.emit_expr(&args[0])?;
+                let b = self.emit_expr(&args[1])?;
+                let ab = self.store_boxed(&a);
+                let bb = self.store_boxed(&b);
+                let r = self.reg();
+                self.w(&format!(
+                    "  {r} = call %NxVal @nx_solve(%NxVal {ab}, %NxVal {bb})"
+                ));
+                Ok(NV::fresh_boxed(r, Ty::Unknown))
+            }
             _ => Err(err(span, format!("unknown builtin '{name}'"))),
         }
     }

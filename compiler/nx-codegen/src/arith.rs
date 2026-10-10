@@ -28,6 +28,12 @@ impl Gen {
             BinOp::Mul => self.w(&format!(
                 "  {out} = call %NxVal @nx_mul(%NxVal {lb}, %NxVal {rb})"
             )),
+            // `@` on two matrices: the runtime checks shapes and
+            // dispatches on element type. Scalar `*` on matrices also
+            // reaches the product through `@nx_mul`'s dynamic backstop.
+            BinOp::MatMul => self.w(&format!(
+                "  {out} = call %NxVal @nx_matmul(%NxVal {lb}, %NxVal {rb})"
+            )),
             BinOp::Div => self.w(&format!(
                 "  {out} = call %NxVal @nx_div(%NxVal {lb}, %NxVal {rb})"
             )),
@@ -359,6 +365,9 @@ impl Gen {
                 // unboxed form.
                 None
             }
+            // Matrices are never scalars: the guard above already
+            // returned None, and the boxed path calls `@nx_matmul`.
+            BinOp::MatMul => None,
             BinOp::And | BinOp::Or => None,
         }
     }
@@ -380,7 +389,8 @@ impl Gen {
             | BinOp::BitOr
             | BinOp::BitXor
             | BinOp::Shl
-            | BinOp::Shr => self.emit_scalar_binop(l, op, r),
+            | BinOp::Shr
+            | BinOp::MatMul => self.emit_scalar_binop(l, op, r),
             _ => None,
         }
     }

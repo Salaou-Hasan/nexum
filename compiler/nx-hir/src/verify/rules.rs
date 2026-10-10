@@ -123,6 +123,27 @@ impl<'a> Verifier<'a> {
                     self.err("V3", span, "concatenation on non-Str operands");
                 }
             }
+            BinRule::MatMul => {
+                let numeric_rows = |t: &HTy| match t {
+                    HTy::List(cells) => {
+                        matches!(**cells, HTy::Int | HTy::Float | HTy::Unknown)
+                    }
+                    _ => false,
+                };
+                let ok = match (l, r) {
+                    (HTy::List(lrows), HTy::List(rrows)) => {
+                        numeric_rows(lrows) && numeric_rows(rrows)
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    self.err(
+                        "V3",
+                        span,
+                        "matrix multiplication requires both operands to be matrices (List(List(N)))",
+                    );
+                }
+            }
         }
     }
 

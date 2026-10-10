@@ -525,6 +525,14 @@ is the runtime error `matrix shape mismatch`, which names both shapes
 fails the same way. Scalar `*` is unchanged, so `*` on two scalar lists
 does not type-check: a `List` element is not a scalar to multiply.
 
+`@` spells the same product explicitly, at the same precedence and
+associativity as `*`: `a @ b` is the matrix product, and `a @= b` the
+compound form. `@` on anything but two matrices is a compile-time type
+error (`2 @ 3` is rejected with "operator '@' not supported for Int and
+Int"); through dynamically-typed values a misuse panics loudly (`type
+mismatch` for non-lists, `matrix shape mismatch` for bad shapes)
+rather than misreading memory.
+
 ### 3.2 Primary expressions
 
 ```text
@@ -640,7 +648,7 @@ and `in` all count the same characters -- rule R3 in section 3.1.1.
 
 ### 4.3 Ambient builtins
 
-Five, and they need no import:
+Six, and they need no import:
 
 ```text
 len(x)          -- list, string or dict length  -> Int
@@ -648,6 +656,7 @@ push(xs, v)     -- append to a list            -> None
 input(prompt?)  -- read a line from stdin      -> Str
 int(x)          -- convert to Int               -> Int
 float(x)        -- convert to Float             -> Float
+solve(A, b)     -- solve A * x = b              -> Float vector or matrix
 ```
 
 Both also have method-call sugar, resolved *after* methods so a type may
@@ -686,6 +695,15 @@ none of those). Anything else is a type error; a well-typed value that
 still does not parse -- `int("abc")`, `float("1e9999")`, `int(2.5e18)`
 -- is a **runtime** error naming the value. Conversions are pure, so
 unlike `input()` they memoize normally.
+
+`solve(A, b)` solves the linear system `A * x = b` by Gaussian
+elimination with partial pivoting. `A` is a square `List(List(N))`
+matrix and `b` a `List(N)` vector or a `List(List(N))` matrix, with a
+numeric `N`; anything else is a compile-time type error. The answer
+has `b`'s shape and is always `Float`, because elimination divides --
+even all-`Int` inputs come back `Float`. A singular system is the
+runtime error "singular matrix"; a non-square `A` or a `b` whose rows
+do not match is "matrix shape mismatch", the same error `@` reports.
 
 The minimal stdlib — string, conversion, and the fuller list and dict
 surfaces — is Stage 3 work in progress, not yet present. Do not write

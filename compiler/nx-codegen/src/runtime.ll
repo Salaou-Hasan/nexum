@@ -89,6 +89,7 @@ declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
 @.msg.notcall = private constant [13 x i8] c"not callable\00"
 @.msg.noattr = private constant [38 x i8] c"only modules support attribute access\00"
 @.msg.shape = private constant [45 x i8] c"matrix shape mismatch: %lldx%lld * %lldx%lld\00"
+@.msg.singular = private constant [16 x i8] c"singular matrix\00"
 
 define void @nx_panic_shape(i64 %m, i64 %k, i64 %rl, i64 %n) {
 entry:
@@ -145,6 +146,29 @@ entry:
   %acc = alloca %NxVal
   %res_slot = alloca %NxVal
   %row_slot = alloca %NxVal
+  ; Dynamic callers (an Unknown-typed `@`) can reach this with
+  ; anything: refuse non-lists loudly instead of reading an
+  ; integer as a list header, which would crash silently.
+  %mlt = extractvalue %NxVal %l, 0
+  %rlt = extractvalue %NxVal %r, 0
+  %mlist = icmp eq i64 %mlt, 5
+  %rlist = icmp eq i64 %rlt, 5
+  %bothlist = and i1 %mlist, %rlist
+  br i1 %bothlist, label %mnonempty, label %mtype
+mtype:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+mnonempty:
+  %mlen = extractvalue %NxVal %l, 2
+  %rlen = extractvalue %NxVal %r, 2
+  %mne = icmp ne i64 %mlen, 0
+  %rne = icmp ne i64 %rlen, 0
+  %nonempty = and i1 %mne, %rne
+  br i1 %nonempty, label %mhaverows, label %mempty
+mempty:
+  call void @nx_panic_shape(i64 %mlen, i64 0, i64 %rlen, i64 0)
+  unreachable
+mhaverows:
   %m = extractvalue %NxVal %l, 2
   %lrow0 = call %NxVal @nx_listget(%NxVal %l, i64 0)
   %k = extractvalue %NxVal %lrow0, 2
@@ -214,6 +238,348 @@ mjdone:
   store i64 %in2, ptr %i
   br label %miloop
 midone:
+  %resv = load %NxVal, ptr %res_slot
+  ret %NxVal %resv
+}
+;; Solve A * x = b, where A is a square n-by-n numeric matrix and b is a
+;; length-n vector or an n-by-k numeric matrix, both as lists of lists.
+;; Returns x shaped like b, always Float: elimination divides, so integer
+;; arithmetic would be wrong. Partial pivoting; an exactly-zero pivot
+;; panics as singular. Cells convert with `nx_tonum`, so a non-numeric
+;; cell panics as a type mismatch, like everywhere else.
+define %NxVal @nx_solve(%NxVal %A, %NxVal %b) {
+entry:
+  ; Allocas live in the entry block, same reason as in @nx_matmul.
+  %i = alloca i64
+  %j = alloca i64
+  %c = alloca i64
+  %r = alloca i64
+  %p = alloca i64
+  %best = alloca i64
+  %bestv = alloca double
+  %res_slot = alloca %NxVal
+  %row_slot = alloca %NxVal
+  ; A must be a non-empty list whose first row is a list.
+  %At = extractvalue %NxVal %A, 0
+  %Aislist = icmp eq i64 %At, 5
+  %An = extractvalue %NxVal %A, 2
+  %Anz = icmp ne i64 %An, 0
+  br i1 %Aislist, label %sAnz, label %stype
+stype:
+  call void @nx_panic(ptr @.msg.type)
+  unreachable
+sAnz:
+  br i1 %Anz, label %sArow0, label %sshape0
+sArow0:
+  %A0 = call %NxVal @nx_listget(%NxVal %A, i64 0)
+  %A0t = extractvalue %NxVal %A0, 0
+  %A0l = icmp eq i64 %A0t, 5
+  br i1 %A0l, label %sAsquare, label %sshape0
+sAsquare:
+  %rectA = call i1 @nx_rect_rows(%NxVal %A, i64 %An, i64 %An)
+  br i1 %rectA, label %sbread, label %sshape0
+sbread:
+  ; b must be a non-empty list: a matrix when its first element is a
+  ; list, a vector when that element is numeric.
+  %bt = extractvalue %NxVal %b, 0
+  %bislist = icmp eq i64 %bt, 5
+  %bn = extractvalue %NxVal %b, 2
+  %bnz = icmp ne i64 %bn, 0
+  %bok0 = and i1 %bislist, %bnz
+  br i1 %bok0, label %sbrow0, label %sshape1
+sbrow0:
+  %b0 = call %NxVal @nx_listget(%NxVal %b, i64 0)
+  %b0t = extractvalue %NxVal %b0, 0
+  %b0l = icmp eq i64 %b0t, 5
+  br i1 %b0l, label %sbmat, label %sbvec
+sbmat:
+  %bk0 = extractvalue %NxVal %b0, 2
+  %rectb = call i1 @nx_rect_rows(%NxVal %b, i64 %bn, i64 %bk0)
+  %rowsmatch = icmp eq i64 %bn, %An
+  %bok = and i1 %rectb, %rowsmatch
+  br i1 %bok, label %salloc, label %sshape1
+sbvec:
+  %b0i = icmp eq i64 %b0t, 1
+  %b0f = icmp eq i64 %b0t, 2
+  %b0num = or i1 %b0i, %b0f
+  %vlenok = icmp eq i64 %bn, %An
+  %bokv = and i1 %b0num, %vlenok
+  br i1 %bokv, label %salloc, label %sshape1
+sshape0:
+  call void @nx_panic_shape(i64 %An, i64 %An, i64 0, i64 0)
+  unreachable
+sshape1:
+  call void @nx_panic_shape(i64 %An, i64 %An, i64 %bn, i64 0)
+  unreachable
+salloc:
+  ; k right-hand sides: the columns of b, or 1 for a vector.
+  %k = phi i64 [ %bk0, %sbmat ], [ 1, %sbvec ]
+  %isvec = phi i1 [ false, %sbmat ], [ true, %sbvec ]
+  %w = add i64 %An, %k
+  %cells = mul i64 %An, %w
+  %bytes = mul i64 %cells, 8
+  %mem = call ptr @malloc(i64 %bytes)
+  ; Fill the A block: buf[i][j] for j below n.
+  store i64 0, ptr %i
+  br label %sfilloloop
+sfilloloop:
+  %fiv = load i64, ptr %i
+  %fim = icmp slt i64 %fiv, %An
+  br i1 %fim, label %sfillobody, label %sfillbdispatch
+sfillobody:
+  %Arow = call %NxVal @nx_listget(%NxVal %A, i64 %fiv)
+  store i64 0, ptr %j
+  br label %sfilljloop
+sfilljloop:
+  %fjv = load i64, ptr %j
+  %fjn = icmp slt i64 %fjv, %An
+  br i1 %fjn, label %sfilljbody, label %sfilljdone
+sfilljbody:
+  %Acell = call %NxVal @nx_listget(%NxVal %Arow, i64 %fjv)
+  %Af = call double @nx_tonum(%NxVal %Acell)
+  %Abase = mul i64 %fiv, %w
+  %Aidx = add i64 %Abase, %fjv
+  %Aptr = getelementptr double, ptr %mem, i64 %Aidx
+  store double %Af, ptr %Aptr
+  %fjn2 = add i64 %fjv, 1
+  store i64 %fjn2, ptr %j
+  br label %sfilljloop
+sfilljdone:
+  %fin2 = add i64 %fiv, 1
+  store i64 %fin2, ptr %i
+  br label %sfilloloop
+sfillbdispatch:
+  br i1 %isvec, label %sfillvec, label %sfillmat
+sfillvec:
+  store i64 0, ptr %i
+  br label %sfvloop
+sfvloop:
+  %fviv = load i64, ptr %i
+  %fvim = icmp slt i64 %fviv, %An
+  br i1 %fvim, label %sfvbody, label %selimc
+sfvbody:
+  %bcell = call %NxVal @nx_listget(%NxVal %b, i64 %fviv)
+  %bf = call double @nx_tonum(%NxVal %bcell)
+  %fvbase = mul i64 %fviv, %w
+  %fvidx = add i64 %fvbase, %An
+  %fvptr = getelementptr double, ptr %mem, i64 %fvidx
+  store double %bf, ptr %fvptr
+  %fvin2 = add i64 %fviv, 1
+  store i64 %fvin2, ptr %i
+  br label %sfvloop
+sfillmat:
+  store i64 0, ptr %i
+  br label %sfmoloop
+sfmoloop:
+  %fmiv = load i64, ptr %i
+  %fmim = icmp slt i64 %fmiv, %An
+  br i1 %fmim, label %sfmobody, label %selimc
+sfmobody:
+  %brow = call %NxVal @nx_listget(%NxVal %b, i64 %fmiv)
+  store i64 0, ptr %j
+  br label %sfmjloop
+sfmjloop:
+  %fmjv = load i64, ptr %j
+  %fmjn = icmp slt i64 %fmjv, %k
+  br i1 %fmjn, label %sfmjbody, label %sfmjdone
+sfmjbody:
+  %mcell = call %NxVal @nx_listget(%NxVal %brow, i64 %fmjv)
+  %mf = call double @nx_tonum(%NxVal %mcell)
+  %fmbase = mul i64 %fmiv, %w
+  %fmoff = add i64 %An, %fmjv
+  %fmidx = add i64 %fmbase, %fmoff
+  %fmptr = getelementptr double, ptr %mem, i64 %fmidx
+  store double %mf, ptr %fmptr
+  %fmjn2 = add i64 %fmjv, 1
+  store i64 %fmjn2, ptr %j
+  br label %sfmjloop
+sfmjdone:
+  %fmin2 = add i64 %fmiv, 1
+  store i64 %fmin2, ptr %i
+  br label %sfmoloop
+selimc:
+  store i64 0, ptr %c
+  br label %scloop
+scloop:
+  %cv = load i64, ptr %c
+  %cm = icmp slt i64 %cv, %An
+  br i1 %cm, label %scbody, label %sextract
+scbody:
+  ; Pivot search over rows c..n for the largest |buf[][c]|.
+  store double 0.0, ptr %bestv
+  store i64 %cv, ptr %best
+  store i64 %cv, ptr %p
+  br label %sploop
+sploop:
+  %pv = load i64, ptr %p
+  %pm = icmp slt i64 %pv, %An
+  br i1 %pm, label %spbody, label %spdone
+spbody:
+  %pbase = mul i64 %pv, %w
+  %pidx = add i64 %pbase, %cv
+  %pptr = getelementptr double, ptr %mem, i64 %pidx
+  %pval = load double, ptr %pptr
+  %pabs = call double @llvm.fabs.f64(double %pval)
+  %curbest = load double, ptr %bestv
+  %isbigger = fcmp ogt double %pabs, %curbest
+  br i1 %isbigger, label %spbetter, label %spnext
+spbetter:
+  store double %pabs, ptr %bestv
+  store i64 %pv, ptr %best
+  br label %spnext
+spnext:
+  %pn = add i64 %pv, 1
+  store i64 %pn, ptr %p
+  br label %sploop
+spdone:
+  %topv = load double, ptr %bestv
+  %singular = fcmp oeq double %topv, 0.0
+  br i1 %singular, label %ssingular, label %sswap
+ssingular:
+  call void @nx_panic(ptr @.msg.singular)
+  unreachable
+sswap:
+  ; Swap the pivot row into place (a self-swap is harmless).
+  %swrow = load i64, ptr %best
+  store i64 0, ptr %j
+  br label %swloop
+swloop:
+  %swv = load i64, ptr %j
+  %swm = icmp slt i64 %swv, %w
+  br i1 %swm, label %swbody, label %swdone
+swbody:
+  %cbase = mul i64 %cv, %w
+  %cidx = add i64 %cbase, %swv
+  %cptr = getelementptr double, ptr %mem, i64 %cidx
+  %ctmp = load double, ptr %cptr
+  %bbase = mul i64 %swrow, %w
+  %bidx = add i64 %bbase, %swv
+  %bptr = getelementptr double, ptr %mem, i64 %bidx
+  %btmp = load double, ptr %bptr
+  store double %btmp, ptr %cptr
+  store double %ctmp, ptr %bptr
+  %swn = add i64 %swv, 1
+  store i64 %swn, ptr %j
+  br label %swloop
+swdone:
+  ; Normalize the pivot row from the diagonal rightwards: earlier
+  ; columns are already zero by the elimination invariant.
+  %pwbase = mul i64 %cv, %w
+  %pwidx = add i64 %pwbase, %cv
+  %pwptr = getelementptr double, ptr %mem, i64 %pwidx
+  %piv = load double, ptr %pwptr
+  store i64 %cv, ptr %j
+  br label %snloop
+snloop:
+  %snv = load i64, ptr %j
+  %snm = icmp slt i64 %snv, %w
+  br i1 %snm, label %snbody, label %sndone
+snbody:
+  %snbase = mul i64 %cv, %w
+  %snidx = add i64 %snbase, %snv
+  %snptr = getelementptr double, ptr %mem, i64 %snidx
+  %snval = load double, ptr %snptr
+  %snq = fdiv double %snval, %piv
+  store double %snq, ptr %snptr
+  %snn = add i64 %snv, 1
+  store i64 %snn, ptr %j
+  br label %snloop
+sndone:
+  ; Eliminate this column from every other row.
+  store i64 0, ptr %r
+  br label %srloop
+srloop:
+  %rv = load i64, ptr %r
+  %rm = icmp slt i64 %rv, %An
+  br i1 %rm, label %srbody, label %srnext_c
+srbody:
+  %isdiag = icmp eq i64 %rv, %cv
+  br i1 %isdiag, label %srnext, label %srelim
+srelim:
+  %fbase = mul i64 %rv, %w
+  %fidx = add i64 %fbase, %cv
+  %fptr = getelementptr double, ptr %mem, i64 %fidx
+  %fval = load double, ptr %fptr
+  store i64 %cv, ptr %j
+  br label %sjloop
+sjloop:
+  %sjv = load i64, ptr %j
+  %sjm = icmp slt i64 %sjv, %w
+  br i1 %sjm, label %sjbody, label %srnext
+sjbody:
+  %srbase = mul i64 %rv, %w
+  %sridx = add i64 %srbase, %sjv
+  %srptr = getelementptr double, ptr %mem, i64 %sridx
+  %srval = load double, ptr %srptr
+  %sxpbase = mul i64 %cv, %w
+  %sxpidx = add i64 %sxpbase, %sjv
+  %sxpptr = getelementptr double, ptr %mem, i64 %sxpidx
+  %sxpval = load double, ptr %sxpptr
+  %sub = fmul double %fval, %sxpval
+  %new = fsub double %srval, %sub
+  store double %new, ptr %srptr
+  %sjn = add i64 %sjv, 1
+  store i64 %sjn, ptr %j
+  br label %sjloop
+srnext:
+  %rn = add i64 %rv, 1
+  store i64 %rn, ptr %r
+  br label %srloop
+srnext_c:
+  %cn = add i64 %cv, 1
+  store i64 %cn, ptr %c
+  br label %scloop
+sextract:
+  %res0 = call %NxVal @nx_new_list(i64 %An)
+  store %NxVal %res0, ptr %res_slot
+  store i64 0, ptr %i
+  br i1 %isvec, label %sxvloop, label %sxmoloop
+sxvloop:
+  %sxiv = load i64, ptr %i
+  %sxim = icmp slt i64 %sxiv, %An
+  br i1 %sxim, label %sxvbody, label %sxdone
+sxvbody:
+  %xvbase = mul i64 %sxiv, %w
+  %xvidx = add i64 %xvbase, %An
+  %xvptr = getelementptr double, ptr %mem, i64 %xvidx
+  %xvval = load double, ptr %xvptr
+  %xvf = call %NxVal @nx_float(double %xvval)
+  call void @nx_listpush(ptr %res_slot, %NxVal %xvf)
+  %sxin = add i64 %sxiv, 1
+  store i64 %sxin, ptr %i
+  br label %sxvloop
+sxmoloop:
+  %smiv = load i64, ptr %i
+  %smim = icmp slt i64 %smiv, %An
+  br i1 %smim, label %sxmobody, label %sxdone
+sxmobody:
+  %smrow0 = call %NxVal @nx_new_list(i64 %k)
+  store %NxVal %smrow0, ptr %row_slot
+  store i64 0, ptr %j
+  br label %sxmjloop
+sxmjloop:
+  %smjv = load i64, ptr %j
+  %smjm = icmp slt i64 %smjv, %k
+  br i1 %smjm, label %sxmjbody, label %sxmjdone
+sxmjbody:
+  %smbase = mul i64 %smiv, %w
+  %smoff = add i64 %An, %smjv
+  %smidx = add i64 %smbase, %smoff
+  %smptr = getelementptr double, ptr %mem, i64 %smidx
+  %smval = load double, ptr %smptr
+  %smf = call %NxVal @nx_float(double %smval)
+  call void @nx_listpush(ptr %row_slot, %NxVal %smf)
+  %smjn = add i64 %smjv, 1
+  store i64 %smjn, ptr %j
+  br label %sxmjloop
+sxmjdone:
+  %smrowv = load %NxVal, ptr %row_slot
+  call void @nx_listpush(ptr %res_slot, %NxVal %smrowv)
+  %smin = add i64 %smiv, 1
+  store i64 %smin, ptr %i
+  br label %sxmoloop
+sxdone:
+  call void @free(ptr %mem)
   %resv = load %NxVal, ptr %res_slot
   ret %NxVal %resv
 }

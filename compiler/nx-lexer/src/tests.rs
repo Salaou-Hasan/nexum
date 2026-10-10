@@ -336,7 +336,15 @@ fn no_indent_or_dedent_inside_brackets() {
 
 #[test]
 fn bad_char_errors() {
-    assert!(lex("@").is_err());
+    assert!(lex("$").is_err());
+}
+
+/// `@` is the matrix-multiplication operator, so it lexes as a token
+/// rather than erroring like the remaining bad characters.
+#[test]
+fn at_lexes_as_matmul() {
+    assert_eq!(kinds("@"), vec![TokenKind::At, TokenKind::Eof]);
+    assert_eq!(kinds("@="), vec![TokenKind::AtEq, TokenKind::Eof]);
 }
 
 #[test]

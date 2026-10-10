@@ -125,6 +125,34 @@ pub(crate) fn decide_bin_rule(op: BinOp, l: &HTy, r: &HTy, span: Span) -> LResul
                 format!("internal: no binary rule for '{op:?}' on {l:?} and {r:?}"),
             )),
         },
+        MatMul => match (l, r) {
+            // Matrix multiplication: both operands must be List(List(N))
+            // with a numeric N, exactly the checker's matrix. (Vectors
+            // are List(N): their rows are scalars, so they fall to the
+            // error below.)
+            (HTy::List(lrows), HTy::List(rrows)) => {
+                let numeric_rows = |t: &HTy| match t {
+                    HTy::List(cells) => {
+                        matches!(**cells, HTy::Int | HTy::Float | HTy::Unknown)
+                    }
+                    _ => false,
+                };
+                if numeric_rows(lrows) && numeric_rows(rrows) {
+                    Ok(BinRule::MatMul)
+                } else {
+                    Err(lerr(
+                        span,
+                        "matrix multiplication requires both operands to be matrices (List(List(N))) with numeric element types",
+                    ))
+                }
+            }
+            _ => Err(lerr(
+                span,
+                format!(
+                    "matrix multiplication requires both operands to be matrices (List(List(N))) with numeric element types, got {l:?} and {r:?}"
+                ),
+            )),
+        },
         Pow => match (l, r) {
             (HTy::Int, HTy::Int) => Ok(BinRule::Pow(PowRule::Saturate)),
             (HTy::Float, HTy::Float) => Ok(BinRule::Arith(ArithRule::Float)),
@@ -160,6 +188,7 @@ pub(crate) fn builtin_op(name: &str) -> BuiltinOp {
         "input" => BuiltinOp::Input,
         "int" => BuiltinOp::ToInt,
         "float" => BuiltinOp::ToFloat,
+        "solve" => BuiltinOp::Solve,
         _ => BuiltinOp::Len,
     }
 }
@@ -172,5 +201,9 @@ pub(crate) fn builtin_ret(op: BuiltinOp) -> HTy {
         BuiltinOp::Input => HTy::Str,
         BuiltinOp::ToInt => HTy::Int,
         BuiltinOp::ToFloat => HTy::Float,
+        // The checker answers Float shaped like b, but that shape needs
+        // the arguments, which this table cannot see. Unknown is the
+        // honest answer here, and the verifier agrees.
+        BuiltinOp::Solve => HTy::Unknown,
     }
 }

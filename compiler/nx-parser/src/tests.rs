@@ -51,6 +51,30 @@ mod tests {
     }
 
     #[test]
+    fn at_parses_as_matmul_at_mul_precedence() {
+        // `@` shares `*`'s precedence level and associativity:
+        // `a @ b * c` is `(a @ b) * c`.
+        let p = prog("x = a @ b * c");
+        match &p.stmts[0] {
+            Stmt::Assign { values, .. } => match &values[0] {
+                Expr::Binary {
+                    op: BinOp::Mul,
+                    left,
+                    ..
+                } => assert!(matches!(
+                    &**left,
+                    Expr::Binary {
+                        op: BinOp::MatMul,
+                        ..
+                    }
+                )),
+                other => panic!("expected *, got {other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn generic_call() {
         let p = prog("foo(1, 2)");
         assert!(matches!(

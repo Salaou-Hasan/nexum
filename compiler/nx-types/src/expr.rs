@@ -439,6 +439,28 @@ impl Checker {
                             }
                         }
                     }
+                    BinOp::MatMul => {
+                        // `@` is matrix multiplication. No numeric
+                        // defaulting: a matrix parameter must stay
+                        // Unknown (dynamic) rather than collapsing to
+                        // Int, or generic matrix functions would stop
+                        // typechecking at the call. The result comes
+                        // from the shared matrix, so `@` and `*` agree
+                        // by construction.
+                        match arith_result(&l, *op, &r) {
+                            Some(t) => t,
+                            None => {
+                                self.err(
+                                    *span,
+                                    format!(
+                                        "operator '{}' not supported for {l} and {r}",
+                                        op.as_str()
+                                    ),
+                                );
+                                Ty::Unknown
+                            }
+                        }
+                    }
                 }
             }
             Expr::Call { callee, args, span } => {

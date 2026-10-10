@@ -1307,5 +1307,93 @@ fn matrix_shapes_must_conform() {
 /// element is not a scalar to multiply.
 #[test]
 fn scalar_list_mul_does_not_typecheck() {
-    assert_rejected("a = [1, 2]\nb = [3, 4]\nprint(a * b)\n", "not supported for List");
+    assert_rejected(
+        "a = [1, 2]\nb = [3, 4]\nprint(a * b)\n",
+        "not supported for List",
+    );
+}
+
+/// `@` is the explicit matrix product: same result as `*` on matrices,
+/// including mixed Int/Float operands, which come back Float.
+#[test]
+fn at_is_the_explicit_matrix_product() {
+    assert_output(
+        "a = [[1, 2], [3, 4]]\n\
+         b = [[5, 6], [7, 8]]\n\
+         print(a @ b)\n\
+         print(a @ [[1.5, 2.5], [3.5, 4.5]])\n",
+        &["[[19, 22], [43, 50]]", "[[8.5, 11.5], [18.5, 25.5]]"],
+    );
+}
+
+/// `@=` compounds like the other arithmetic assignments.
+#[test]
+fn at_augmented_assignment() {
+    assert_output(
+        "a = [[1, 2], [3, 4]]\nb = [[5, 6], [7, 8]]\na @= b\nprint(a)\n",
+        &["[[19, 22], [43, 50]]"],
+    );
+}
+
+/// `@` on scalars or vectors is a compile-time type error, not a
+/// runtime crash: only List(List(N)) multiplies.
+#[test]
+fn at_rejects_scalars_and_vectors() {
+    assert_rejected("print(2 @ 3)\n", "not supported for Int and Int");
+    assert_rejected("print([1, 2] @ [3, 4])\n", "not supported for List");
+}
+
+/// A dynamically-typed `@` on non-matrices panics loudly (`type
+/// mismatch`), never a silent crash: the runtime checks tags before
+/// reading any list header.
+#[test]
+fn at_dynamic_misuse_panics_loudly() {
+    assert_runtime_error(
+        "fn mm(a, b):\n    return a @ b\nprint(mm(2, 3))\n",
+        "type mismatch",
+    );
+}
+
+/// `solve(A, b)` solves a 2x2 system; the answer is exact in Float.
+#[test]
+fn solve_vector_system() {
+    assert_output(
+        "A = [[2.0, 1.0], [1.0, 3.0]]\nb = [5.0, 6.0]\nprint(solve(A, b))\n",
+        &["[1.8, 1.4]"],
+    );
+}
+
+/// A matrix right-hand side solves every column; Int inputs still come
+/// back Float, because elimination divides.
+#[test]
+fn solve_matrix_rhs_and_int_inputs() {
+    assert_output(
+        "A = [[2.0, 1.0], [1.0, 3.0]]\n\
+         B = [[5.0, 4.0], [6.0, 7.0]]\n\
+         print(solve(A, B))\n\
+         print(solve([[2, 1], [1, 3]], [5, 6]))\n",
+        &["[[1.8, 1], [1.4, 2]]", "[1.8, 1.4]"],
+    );
+}
+
+/// A singular system panics as `singular matrix`, and a non-square A
+/// or a bad `b` is a shape mismatch, not garbage.
+#[test]
+fn solve_rejects_singular_and_misshapen() {
+    assert_runtime_error(
+        "print(solve([[1.0, 2.0], [2.0, 4.0]], [3.0, 6.0]))\n",
+        "singular matrix",
+    );
+    assert_runtime_error(
+        "print(solve([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [1.0, 2.0]))\n",
+        "matrix shape mismatch",
+    );
+}
+
+/// `solve` with the wrong arity or non-matrix arguments is a
+/// compile-time type error.
+#[test]
+fn solve_rejects_bad_arguments() {
+    assert_rejected("print(solve([[1.0]]))\n", "expects 2 arguments");
+    assert_rejected("print(solve(1, 2))\n", "needs A to be a matrix");
 }
