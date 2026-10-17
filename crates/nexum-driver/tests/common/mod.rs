@@ -85,6 +85,27 @@ pub fn emit_ir(mir: &nexum_mir::MirModule) -> String {
     nexum_codegen::emit(mir, &nexum_target::TargetSpec::host())
 }
 
+/// Full front-end + MIR pipeline for a fixture file, at the given opt level.
+pub fn compile_file_opt(path: &Path, opt_level: u8) -> Pipeline {
+    let fe = run_frontend(path);
+    if has_errors(&fe.diagnostics) {
+        return Pipeline {
+            diagnostics: fe.diagnostics,
+            mir: None,
+        };
+    }
+    let hir = fe.hir.expect("clean front end must produce HIR");
+    let lowered = nexum_mir::lower(&hir);
+    let mut mir = lowered.module;
+    nexum_mir::optimize_level(&mut mir, opt_level);
+    let vdiags = nexum_mir::verify(&mir);
+    let diagnostics: Vec<Diagnostic> = fe.diagnostics.into_iter().chain(vdiags).collect();
+    Pipeline {
+        diagnostics,
+        mir: Some(mir),
+    }
+}
+
 pub fn nx_files(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use nexum_diagnostics::render;
 use nexum_lexer::lex;
-use nexum_mir::{lower, optimize, verify};
+use nexum_mir::{lower, optimize_level, verify};
 use nexum_parser::parse;
 use nexum_sema::analyze;
 use nexum_target::TargetSpec;
@@ -13,6 +13,9 @@ use std::process::Command;
 #[derive(Parser)]
 #[command(name = "nx", version, about = "Nexum compiler (bootstrap)")]
 struct Cli {
+    /// Optimization level (0 = none, 1 = const-fold + DCE + inlining).
+    #[arg(long, global = true, default_value_t = 0u8)]
+    opt_level: u8,
     #[command(subcommand)]
     cmd: Commands,
 }
@@ -34,29 +37,44 @@ enum Commands {
     EmitIr {
         file: PathBuf,
     },
+    Analyze {
+        file: PathBuf,
+        #[arg(long, default_value_t = 0u8)]
+        opt_level: u8,
+    },
     ExplainToolchain,
 }
 
 fn main() {
     let cli = Cli::parse();
+    let opt_level = cli.opt_level;
     match cli.cmd {
+        Commands::Analyze { file, opt_level } => match compile_to_mir(&file, opt_level) {
+            Ok((_sm, mir)) => {
+                print!("{}", nexum_mir::escape_analysis(&mir));
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        },
         Commands::ExplainToolchain => match Toolchain::discover() {
             Ok(tc) => println!("{}", tc.explain()),
             Err(e) => eprintln!("error: {}", e),
         },
         Commands::Check { file } => {
-            if let Err(e) = check_file(&file) {
+            if let Err(e) = check_file(&file, opt_level) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
         }
         Commands::Build { file, output } => {
-            if let Err(e) = build_file(&file, output) {
+            if let Err(e) = build_file(&file, output, opt_level) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
         }
-        Commands::EmitIr { file } => match compile_to_mir(&file) {
+        Commands::EmitIr { file } => match compile_to_mir(&file, opt_level) {
             Ok((_sm, mir)) => {
                 let target = TargetSpec::host();
                 print!("{}", nexum_codegen::emit(&mir, &target));
@@ -67,7 +85,7 @@ fn main() {
             }
         },
         Commands::Run { file } => {
-            if let Err(e) = run_file(&file) {
+            if let Err(e) = run_file(&file, opt_level) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
@@ -84,6 +102,7 @@ fn read_source(file: &PathBuf) -> Result<(nexum_source::SourceMap, nexum_source:
 
 fn compile_to_mir(
     file: &PathBuf,
+    opt_level: u8,
 ) -> Result<(nexum_source::SourceMap, nexum_mir::MirModule), String> {
     let (sm, fid) = read_source(file)?;
     let sf = sm.get(fid);
@@ -123,7 +142,7 @@ fn compile_to_mir(
     let hir = sema.hir.ok_or("no hir")?;
     let lowered = lower(&hir);
     let mut mir = lowered.module;
-    optimize(&mut mir);
+    optimize_level(&mut mir, opt_level);
     let vdiags = verify(&mir);
     for d in &vdiags {
         eprintln!("{}", render(d, &sm));
@@ -131,15 +150,15 @@ fn compile_to_mir(
     Ok((sm, mir))
 }
 
-fn check_file(file: &PathBuf) -> Result<(), String> {
-    let (sm, _mir) = compile_to_mir(file)?;
+fn check_file(file: &PathBuf, opt_level: u8) -> Result<(), String> {
+    let (sm, _mir) = compile_to_mir(file, opt_level)?;
     println!("check: ok");
     let _ = sm;
     Ok(())
 }
 
-fn build_file(file: &PathBuf, output: Option<PathBuf>) -> Result<(), String> {
-    let (_sm, mir) = compile_to_mir(file)?;
+fn build_file(file: &PathBuf, output: Option<PathBuf>, opt_level: u8) -> Result<(), String> {
+    let (_sm, mir) = compile_to_mir(file, opt_level)?;
     let tc = Toolchain::discover().map_err(|e| e.to_string())?;
     let target = TargetSpec::host();
     let ir = nexum_codegen::emit(&mir, &target);
@@ -162,15 +181,15 @@ fn build_file(file: &PathBuf, output: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-fn run_file(file: &PathBuf) -> Result<(), String> {
+fn run_file(file: &PathBuf, opt_level: u8) -> Result<(), String> {
     let exe = std::env::temp_dir().join("nexum_run.exe");
-    build_to(file, &exe)?;
+    build_to(file, &exe, opt_level)?;
     let status = Command::new(&exe).status().map_err(|e| e.to_string())?;
     std::process::exit(status.code().unwrap_or(0));
 }
 
-fn build_to(file: &PathBuf, exe: &PathBuf) -> Result<(), String> {
-    let (_sm, mir) = compile_to_mir(file)?;
+fn build_to(file: &PathBuf, exe: &PathBuf, opt_level: u8) -> Result<(), String> {
+    let (_sm, mir) = compile_to_mir(file, opt_level)?;
     let tc = Toolchain::discover().map_err(|e| e.to_string())?;
     let target = TargetSpec::host();
     let ir = nexum_codegen::emit(&mir, &target);

@@ -282,10 +282,21 @@ fn emit_fn(
                     match c {
                         Const::Int(v) => buf.push_str(&format!("  {} = add i64 0, {}\n", r, v)),
                         Const::Float(v) => {
-                            let mut ss = format!("{}", v);
-                            if !ss.contains('.') && !ss.contains('e') && !ss.contains('E') {
-                                ss.push_str(".0");
-                            }
+                            let ss = if v.is_infinite() {
+                                if v.is_sign_positive() {
+                                    "0x7FF0000000000000".to_string()
+                                } else {
+                                    "0xFFF0000000000000".to_string()
+                                }
+                            } else if v.is_nan() {
+                                "0x7FF8000000000000".to_string()
+                            } else {
+                                let mut s = format!("{}", v);
+                                if !s.contains('.') && !s.contains('e') && !s.contains('E') {
+                                    s.push_str(".0");
+                                }
+                                s
+                            };
                             buf.push_str(&format!("  {} = fadd double 0.0, {}\n", r, ss));
                         }
                         Const::Bool(v) => buf.push_str(&format!(

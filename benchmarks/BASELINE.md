@@ -24,7 +24,8 @@ Caveats:
 
 * The `nx` compiler itself is a debug build; compile-time numbers later will
   depend on `--release`.
-* Optimization currently relies entirely on clang/LLVM (`-O2`); MIR-level
-  passes (DCE, canonicalization, inlining) arrive in Phase 5.
+* Optimization currently relies on clang/LLVM (`-O2`) **and** MIR-level passes
+  (const-fold, DCE, small-function inlining) at `--opt-level 1`. See
+  `benchmarks/compiler_perf.md` for compiler-side timings.
 * Timer resolution and process startup dominate for small benchmarks; keep
   workloads ≥ ~10 ms.

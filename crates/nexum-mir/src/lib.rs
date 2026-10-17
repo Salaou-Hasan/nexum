@@ -788,7 +788,618 @@ pub fn verify(m: &MirModule) -> Vec<Diagnostic> {
     diags
 }
 
-// optimize: identity for now
+// ---- Phase 5 optimization passes ---------------------------------------
+
+/// Constant folding: replace pure `BinOp`/`UnOp`/`Copy` instructions whose
+/// operands are compile-time constants with a `Const` instruction. Operands
+/// that are themselves folded constants are resolved transitively.
+pub fn const_fold(m: &mut MirModule) {
+    for f in &mut m.functions {
+        // value -> constant, built from the current (pre-fold) instructions.
+        let mut consts: HashMap<Value, Const> = HashMap::new();
+        for b in &f.blocks {
+            for in_ in &b.instrs {
+                if let Instr::Const { dest, c, .. } = in_ {
+                    consts.insert(*dest, c.clone());
+                }
+            }
+        }
+        // Iterate to a fixpoint: folding one instruction may enable the next.
+        loop {
+            let mut changed = false;
+            for b in &mut f.blocks {
+                for in_ in &mut b.instrs {
+                    match in_ {
+                        Instr::BinOp {
+                            dest,
+                            op,
+                            lhs,
+                            rhs,
+                            ty,
+                        } => {
+                            if let (Some(cl), Some(cr)) =
+                                (consts.get(lhs).cloned(), consts.get(rhs).cloned())
+                            {
+                                if let Some(fc) = fold_binop(*op, &cl, &cr, ty.clone()) {
+                                    consts.insert(*dest, fc.clone());
+                                    *in_ = Instr::Const {
+                                        dest: *dest,
+                                        c: fc,
+                                        ty: ty.clone(),
+                                    };
+                                    changed = true;
+                                }
+                            }
+                        }
+                        Instr::UnOp {
+                            dest,
+                            op,
+                            operand,
+                            ty,
+                        } => {
+                            if let Some(c) = consts.get(operand).cloned() {
+                                if let Some(fc) = fold_unop(*op, &c, ty.clone()) {
+                                    consts.insert(*dest, fc.clone());
+                                    *in_ = Instr::Const {
+                                        dest: *dest,
+                                        c: fc,
+                                        ty: ty.clone(),
+                                    };
+                                    changed = true;
+                                }
+                            }
+                        }
+                        Instr::Copy { dest, src, ty } => {
+                            if let Some(c) = consts.get(src).cloned() {
+                                consts.insert(*dest, c.clone());
+                                *in_ = Instr::Const {
+                                    dest: *dest,
+                                    c,
+                                    ty: ty.clone(),
+                                };
+                                changed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+}
+
+fn fold_binop(op: BinOp, l: &Const, r: &Const, _ty: Ty) -> Option<Const> {
+    use BinOp::*;
+    match (op, l, r) {
+        (Add, Const::Int(a), Const::Int(b)) => Some(Const::Int(a.wrapping_add(*b))),
+        (Sub, Const::Int(a), Const::Int(b)) => Some(Const::Int(a.wrapping_sub(*b))),
+        (Mul, Const::Int(a), Const::Int(b)) => Some(Const::Int(a.wrapping_mul(*b))),
+        (Div, Const::Int(a), Const::Int(b)) if *b != 0 => {
+            if *a == i64::MIN && *b == -1 {
+                Some(Const::Int(i64::MIN))
+            } else {
+                Some(Const::Int(a / b))
+            }
+        }
+        (Mod, Const::Int(a), Const::Int(b)) if *b != 0 => {
+            if *a == i64::MIN && *b == -1 {
+                Some(Const::Int(0))
+            } else {
+                Some(Const::Int(a % b))
+            }
+        }
+        (Eq, Const::Int(a), Const::Int(b)) => Some(Const::Bool(a == b)),
+        (Ne, Const::Int(a), Const::Int(b)) => Some(Const::Bool(a != b)),
+        (Lt, Const::Int(a), Const::Int(b)) => Some(Const::Bool(a < b)),
+        (Gt, Const::Int(a), Const::Int(b)) => Some(Const::Bool(a > b)),
+        (Le, Const::Int(a), Const::Int(b)) => Some(Const::Bool(a <= b)),
+        (Ge, Const::Int(a), Const::Int(b)) => Some(Const::Bool(a >= b)),
+        (And, Const::Bool(a), Const::Bool(b)) => Some(Const::Bool(*a && *b)),
+        (Or, Const::Bool(a), Const::Bool(b)) => Some(Const::Bool(*a || *b)),
+        (Add, Const::Float(a), Const::Float(b)) => Some(Const::Float(a + b)),
+        (Sub, Const::Float(a), Const::Float(b)) => Some(Const::Float(a - b)),
+        (Mul, Const::Float(a), Const::Float(b)) => Some(Const::Float(a * b)),
+        (Div, Const::Float(a), Const::Float(b)) => Some(Const::Float(a / b)),
+        (Eq, Const::Float(a), Const::Float(b)) => Some(Const::Bool(a == b)),
+        (Ne, Const::Float(a), Const::Float(b)) => Some(Const::Bool(a != b)),
+        (Lt, Const::Float(a), Const::Float(b)) => Some(Const::Bool(a < b)),
+        (Gt, Const::Float(a), Const::Float(b)) => Some(Const::Bool(a > b)),
+        (Le, Const::Float(a), Const::Float(b)) => Some(Const::Bool(a <= b)),
+        (Ge, Const::Float(a), Const::Float(b)) => Some(Const::Bool(a >= b)),
+        (Eq, Const::Str(a), Const::Str(b)) => Some(Const::Bool(a == b)),
+        (Ne, Const::Str(a), Const::Str(b)) => Some(Const::Bool(a != b)),
+        (Eq, Const::Bool(a), Const::Bool(b)) => Some(Const::Bool(a == b)),
+        (Ne, Const::Bool(a), Const::Bool(b)) => Some(Const::Bool(a != b)),
+        _ => None,
+    }
+}
+
+fn fold_unop(op: UnOp, c: &Const, _ty: Ty) -> Option<Const> {
+    use UnOp::*;
+    match (op, c) {
+        (Neg, Const::Int(v)) => Some(Const::Int(v.wrapping_neg())),
+        (Neg, Const::Float(v)) => Some(Const::Float(-v)),
+        (Not, Const::Bool(v)) => Some(Const::Bool(!v)),
+        _ => None,
+    }
+}
+
+/// Dead code elimination: remove instructions whose result value is never
+/// used, and basic blocks unreachable from the entry block. Side-effecting
+/// instructions (calls, stores, panics, allocas that are stored to) are kept.
+pub fn dce(m: &mut MirModule) {
+    for f in &mut m.functions {
+        // Reachable blocks.
+        let mut reachable: std::collections::HashSet<BlockId> = std::collections::HashSet::new();
+        let mut stack = vec![f.entry];
+        while let Some(b) = stack.pop() {
+            if !reachable.insert(b) {
+                continue;
+            }
+            if let Some(bb) = f.blocks.iter().find(|x| x.id == b) {
+                match &bb.term {
+                    Some(Term::Goto(t)) => stack.push(*t),
+                    Some(Term::Branch {
+                        then_bb, else_bb, ..
+                    }) => {
+                        stack.push(*then_bb);
+                        stack.push(*else_bb);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        f.blocks.retain(|b| reachable.contains(&b.id));
+
+        // Iterative DCE to a fixed point.
+        loop {
+            // used values
+            let mut used: std::collections::HashSet<Value> = std::collections::HashSet::new();
+            for b in &f.blocks {
+                for in_ in &b.instrs {
+                    collect_uses(in_, &mut used);
+                }
+                if let Some(t) = &b.term {
+                    match t {
+                        Term::Branch { cond, .. } => {
+                            used.insert(*cond);
+                        }
+                        Term::Return(Some(v)) => {
+                            used.insert(*v);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut changed = false;
+            for b in &mut f.blocks {
+                let before = b.instrs.len();
+                b.instrs.retain(|in_| {
+                    if is_side_effecting(in_) {
+                        return true;
+                    }
+                    match instr_dest(in_) {
+                        None => true,
+                        Some(d) => used.contains(&d),
+                    }
+                });
+                if b.instrs.len() != before {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+}
+
+fn collect_uses(in_: &Instr, used: &mut std::collections::HashSet<Value>) {
+    match in_ {
+        Instr::Const { .. } => {}
+        Instr::BinOp { lhs, rhs, .. } => {
+            used.insert(*lhs);
+            used.insert(*rhs);
+        }
+        Instr::UnOp { operand, .. } => {
+            used.insert(*operand);
+        }
+        Instr::Call { args, .. } => {
+            for a in args {
+                used.insert(*a);
+            }
+        }
+        Instr::Copy { src, .. } => {
+            used.insert(*src);
+        }
+        Instr::Alloca { .. } => {}
+        Instr::Load { slot, .. } => {
+            used.insert(*slot);
+        }
+        Instr::Store { slot, value, .. } => {
+            used.insert(*slot);
+            used.insert(*value);
+        }
+        Instr::Record { fields, .. } => {
+            for fv in fields {
+                used.insert(*fv);
+            }
+        }
+        Instr::FieldGet { base, .. } => {
+            used.insert(*base);
+        }
+        Instr::FieldSet { base, value, .. } => {
+            used.insert(*base);
+            used.insert(*value);
+        }
+        Instr::Panic { msg } => {
+            used.insert(*msg);
+        }
+        Instr::ArrayLit { elems, .. } => {
+            for ev in elems {
+                used.insert(*ev);
+            }
+        }
+        Instr::IndexGet { base, index, .. } => {
+            used.insert(*base);
+            used.insert(*index);
+        }
+        Instr::IndexSet {
+            base, index, value, ..
+        } => {
+            used.insert(*base);
+            used.insert(*index);
+            used.insert(*value);
+        }
+    }
+}
+
+fn instr_dest(in_: &Instr) -> Option<Value> {
+    match in_ {
+        Instr::Const { dest, .. }
+        | Instr::BinOp { dest, .. }
+        | Instr::UnOp { dest, .. }
+        | Instr::Copy { dest, .. }
+        | Instr::Alloca { dest, .. }
+        | Instr::Load { dest, .. }
+        | Instr::Record { dest, .. }
+        | Instr::FieldGet { dest, .. }
+        | Instr::FieldSet { dest, .. }
+        | Instr::ArrayLit { dest, .. }
+        | Instr::IndexGet { dest, .. }
+        | Instr::IndexSet { dest, .. } => Some(*dest),
+        Instr::Call { dest, .. } => *dest,
+        _ => None,
+    }
+}
+
+fn instr_ty(in_: &Instr) -> Option<Ty> {
+    match in_ {
+        Instr::Const { ty, .. }
+        | Instr::BinOp { ty, .. }
+        | Instr::UnOp { ty, .. }
+        | Instr::Copy { ty, .. }
+        | Instr::Alloca { ty, .. }
+        | Instr::Load { ty, .. }
+        | Instr::Store { ty, .. }
+        | Instr::FieldGet { ty, .. }
+        | Instr::FieldSet { ty, .. }
+        | Instr::ArrayLit { ty, .. }
+        | Instr::IndexGet { ty, .. }
+        | Instr::IndexSet { ty, .. } => Some(ty.clone()),
+        Instr::Call { ty, .. } => Some(ty.clone()),
+        _ => None,
+    }
+}
+
+fn is_side_effecting(in_: &Instr) -> bool {
+    matches!(
+        in_,
+        Instr::Call { .. } | Instr::Store { .. } | Instr::Panic { .. }
+    )
+}
+
+/// Inlining: inline small, pure, single-block functions (no allocas, stores,
+/// loads, calls, or panics) at call sites. Repeats to a fixed point.
+pub fn inline_small(m: &mut MirModule) {
+    loop {
+        if !try_inline_one(m) {
+            break;
+        }
+    }
+}
+
+fn inlinable(g: &MirFn) -> bool {
+    if g.blocks.len() != 1 {
+        return false;
+    }
+    if g.mut_params.iter().any(|x| *x) {
+        return false;
+    }
+    let b = &g.blocks[0];
+    // last terminator must be Return(Some(_))
+    match &b.term {
+        Some(Term::Return(Some(_))) => {}
+        _ => return false,
+    }
+    if b.instrs.len() > 8 {
+        return false;
+    }
+    for in_ in &b.instrs {
+        match in_ {
+            Instr::Alloca { .. }
+            | Instr::Load { .. }
+            | Instr::Store { .. }
+            | Instr::Panic { .. }
+            | Instr::Call { .. } => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+fn try_inline_one(m: &mut MirModule) -> bool {
+    // Find a call site.
+    let mut site: Option<(usize, usize, usize, String, Vec<Value>, Value)> = None;
+    'outer: for fi in 0..m.functions.len() {
+        for bi in 0..m.functions[fi].blocks.len() {
+            for ii in 0..m.functions[fi].blocks[bi].instrs.len() {
+                if let Instr::Call {
+                    dest: Some(d),
+                    callee,
+                    args,
+                    ..
+                } = &m.functions[fi].blocks[bi].instrs[ii]
+                {
+                    let cname = callee.clone();
+                    let args = args.clone();
+                    let d = *d;
+                    // check callee exists and inlinable
+                    if let Some(ci) = m.functions.iter().position(|f| f.name == cname) {
+                        if ci != fi && inlinable(&m.functions[ci]) {
+                            site = Some((fi, bi, ii, cname, args, d));
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let (fi, bi, ii, cname, args, call_dest) = match site {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // Clone callee data.
+    let ci = m.functions.iter().position(|f| f.name == cname).unwrap();
+    let g_block = m.functions[ci].blocks[0].clone();
+    let g_params_count = m.functions[ci].params.len();
+    let g_ret = m.functions[ci].ret.clone();
+
+    // remap table
+    let mut remap: HashMap<Value, Value> = HashMap::new();
+    for i in 0..g_params_count {
+        if i < args.len() {
+            remap.insert(Value(i), args[i]);
+        }
+    }
+
+    // fresh value counter
+    let mut next = m.functions[fi]
+        .value_types
+        .keys()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    // return value of callee
+    let ret_val = match &g_block.term {
+        Some(Term::Return(Some(v))) => v.0,
+        _ => return false,
+    };
+
+    // Build replacement instrs.
+    let mut new_instrs: Vec<Instr> = Vec::new();
+    for in_ in &g_block.instrs {
+        let mut in_ = in_.clone();
+        // remap inputs
+        remap_inputs(&mut in_, &remap);
+        // remap dest
+        if let Some(d) = instr_dest(&in_) {
+            if d.0 == ret_val {
+                set_instr_dest(&mut in_, call_dest);
+                remap.insert(d, call_dest);
+            } else {
+                let fresh = Value(next);
+                next += 1;
+                set_instr_dest(&mut in_, fresh);
+                remap.insert(d, fresh);
+                // record type
+                if let Some(t) = instr_ty(&in_) {
+                    m.functions[fi].value_types.insert(fresh.0, t);
+                }
+            }
+        }
+        new_instrs.push(in_);
+    }
+    m.functions[fi].value_types.insert(call_dest.0, g_ret);
+
+    // splice
+    m.functions[fi].blocks[bi]
+        .instrs
+        .splice(ii..ii + 1, new_instrs);
+    true
+}
+
+fn remap_inputs(in_: &mut Instr, remap: &HashMap<Value, Value>) {
+    let r = |v: &mut Value| {
+        if let Some(nv) = remap.get(v) {
+            *v = *nv;
+        }
+    };
+    match in_ {
+        Instr::BinOp { lhs, rhs, .. } => {
+            r(lhs);
+            r(rhs);
+        }
+        Instr::UnOp { operand, .. } => {
+            r(operand);
+        }
+        Instr::Call { args, .. } => {
+            for a in args {
+                r(a);
+            }
+        }
+        Instr::Copy { src, .. } => {
+            r(src);
+        }
+        Instr::Load { slot, .. } => {
+            r(slot);
+        }
+        Instr::Store { slot, value, .. } => {
+            r(slot);
+            r(value);
+        }
+        Instr::Record { fields, .. } => {
+            for fv in fields {
+                r(fv);
+            }
+        }
+        Instr::FieldGet { base, .. } => {
+            r(base);
+        }
+        Instr::FieldSet { base, value, .. } => {
+            r(base);
+            r(value);
+        }
+        Instr::Panic { msg } => {
+            r(msg);
+        }
+        Instr::ArrayLit { elems, .. } => {
+            for ev in elems {
+                r(ev);
+            }
+        }
+        Instr::IndexGet { base, index, .. } => {
+            r(base);
+            r(index);
+        }
+        Instr::IndexSet {
+            base, index, value, ..
+        } => {
+            r(base);
+            r(index);
+            r(value);
+        }
+        _ => {}
+    }
+}
+
+fn set_instr_dest(in_: &mut Instr, v: Value) {
+    match in_ {
+        Instr::Const { dest, .. }
+        | Instr::BinOp { dest, .. }
+        | Instr::UnOp { dest, .. }
+        | Instr::Copy { dest, .. }
+        | Instr::Alloca { dest, .. }
+        | Instr::Load { dest, .. }
+        | Instr::Record { dest, .. }
+        | Instr::FieldGet { dest, .. }
+        | Instr::FieldSet { dest, .. }
+        | Instr::ArrayLit { dest, .. }
+        | Instr::IndexGet { dest, .. }
+        | Instr::IndexSet { dest, .. } => *dest = v,
+        Instr::Call { dest, .. } => *dest = Some(v),
+        _ => {}
+    }
+}
+
+/// Basic escape analysis: report which `concat` allocations escape their
+/// defining function (returned or passed to a call). Non-escaping
+/// allocations are candidates for future stack allocation / scalar
+/// replacement.
+pub fn escape_analysis(m: &MirModule) -> String {
+    let mut out = String::new();
+    out.push_str("# Escape analysis report\n\n");
+    for f in &m.functions {
+        // collect concat call dests
+        let mut allocs: Vec<Value> = Vec::new();
+        for b in &f.blocks {
+            for in_ in &b.instrs {
+                if let Instr::Call {
+                    dest: Some(d),
+                    callee,
+                    ..
+                } = in_
+                {
+                    if callee == "concat" {
+                        allocs.push(*d);
+                    }
+                }
+            }
+        }
+        if allocs.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("## {}\n", f.name));
+        for a in &allocs {
+            let escapes = allocation_escapes(f, *a);
+            out.push_str(&format!(
+                "  concat result %{}: {}\n",
+                a.0,
+                if escapes { "ESCAPES" } else { "local" }
+            ));
+        }
+    }
+    out
+}
+
+fn allocation_escapes(f: &MirFn, v: Value) -> bool {
+    // An allocation escapes if its value is returned, passed to a call, or
+    // stored into a slot that is itself returned/passed (conservative: any
+    // store counts as escape).
+    for b in &f.blocks {
+        for in_ in &b.instrs {
+            match in_ {
+                Instr::Call { args, .. } => {
+                    if args.contains(&v) {
+                        return true;
+                    }
+                }
+                Instr::Store { value, .. } if *value == v => {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if let Some(Term::Return(Some(rv))) = &b.term {
+            if *rv == v {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Run the default (level 1) optimization pipeline.
 pub fn optimize(m: &mut MirModule) {
-    let _ = m;
+    optimize_level(m, 1);
+}
+
+/// Run the optimization pipeline at the given level.
+/// Level 0: no passes. Level 1: const fold + DCE + inlining.
+pub fn optimize_level(m: &mut MirModule, level: u8) {
+    if level == 0 {
+        return;
+    }
+    const_fold(m);
+    dce(m);
+    inline_small(m);
+    // Re-run const fold + dce after inlining.
+    const_fold(m);
+    dce(m);
 }
