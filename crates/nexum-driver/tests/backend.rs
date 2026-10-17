@@ -1,8 +1,5 @@
 //! Phase 2 backend gate: LLVM IR verification, codegen invariants, and
 //! native output comparison.
-//!
-//! These tests require `clang` on PATH. When it is missing they print a note
-//! and pass (the compile-only gate still runs on machines without clang).
 
 mod common;
 
@@ -56,8 +53,23 @@ fn ir_verifies_for_examples() {
 }
 
 #[test]
+fn ir_verifies_for_all_targets() {
+    let Some(tc) = toolchain() else { return };
+    let f = examples_dir().join("hello.nx");
+    let p = common::compile_file(&f);
+    let mir = p.mir.expect("mir");
+    for name in nexum_target::TargetSpec::list() {
+        let target = nexum_target::TargetSpec::by_name(name).unwrap();
+        let ir = nexum_codegen::emit(&mir, &target);
+        let ll_path = tmp_dir().join(format!("hello_{}.ll", name));
+        std::fs::write(&ll_path, ir).expect("write ir");
+        nexum_toolchain::verify_ir(&tc.clang, ll_path.to_str().unwrap())
+            .unwrap_or_else(|e| panic!("target {}: {e}", name));
+    }
+}
+
+#[test]
 fn codegen_emits_expected_fragments() {
-    // numbers.nx exercises int/float math, bool logic and bool printing.
     let p = common::compile_file(&fixtures_dir("pass").join("numbers.nx"));
     let mir = p.mir.expect("mir");
     let ir = emit_ir(&mir);

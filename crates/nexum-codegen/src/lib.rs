@@ -21,7 +21,11 @@ fn llvm_ty(t: &Ty) -> String {
 pub fn emit(mir: &MirModule, target: &TargetSpec) -> String {
     let mut out = String::new();
     out.push_str("; ModuleID = 'nexum'\n");
-    out.push_str("target triple = \"x86_64-pc-windows-msvc\"\n");
+    out.push_str(&format!("target triple = \"{}\"\n", target.triple));
+    out.push_str(&format!(
+        "target datalayout = \"{}\"\n",
+        target.data_layout_str()
+    ));
     // The runtime slice (panic, managed heap, collector, roots, string
     // helpers) lives in the nexum-runtime crate; see docs/runtime-abi.md.
     let msvc = target.os.contains("windows");

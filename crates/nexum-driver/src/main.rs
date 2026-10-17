@@ -16,6 +16,9 @@ struct Cli {
     /// Optimization level (0 = none, 1 = const-fold + DCE + inlining).
     #[arg(long, global = true, default_value_t = 0u8)]
     opt_level: u8,
+    /// Target profile (e.g. windows-x86_64, linux-x86_64, macos-aarch64).
+    #[arg(long, global = true, default_value = "host")]
+    target: String,
     #[command(subcommand)]
     cmd: Commands,
 }
@@ -63,6 +66,7 @@ enum Commands {
 
 fn main() {
     let cli = Cli::parse();
+    *TARGET_NAME.lock().unwrap() = cli.target.clone();
     let opt_level = cli.opt_level;
     match cli.cmd {
         Commands::New { name } => {
@@ -127,7 +131,7 @@ fn main() {
         }
         Commands::EmitIr { file } => match compile_to_mir(&file, opt_level) {
             Ok((_sm, mir)) => {
-                let target = TargetSpec::host();
+                let target = current_target();
                 print!("{}", nexum_codegen::emit(&mir, &target));
             }
             Err(e) => {
@@ -619,11 +623,36 @@ fn explain(code: &str) {
     println!("See docs/language-reference/grammar.md for the full table.");
 }
 
+static TARGET_NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn resolve_target(name: &str) -> TargetSpec {
+    if name == "host" {
+        TargetSpec::host()
+    } else {
+        TargetSpec::by_name(name).unwrap_or_else(|| {
+            eprintln!(
+                "unknown target `{}`; valid: host, {}",
+                name,
+                TargetSpec::list().join(", ")
+            );
+            std::process::exit(1);
+        })
+    }
+}
 fn read_source(file: &PathBuf) -> Result<(nexum_source::SourceMap, nexum_source::FileId), String> {
     let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
     let mut sm = nexum_source::SourceMap::new();
     let fid = sm.add(file.clone(), text);
     Ok((sm, fid))
+}
+
+fn current_target() -> TargetSpec {
+    let name = TARGET_NAME.lock().unwrap().clone();
+    if name.is_empty() || name == "host" {
+        TargetSpec::host()
+    } else {
+        TargetSpec::by_name(&name).unwrap_or_else(TargetSpec::host)
+    }
 }
 
 fn compile_to_mir(
@@ -686,7 +715,7 @@ fn check_file(file: &PathBuf, opt_level: u8) -> Result<(), String> {
 fn build_file(file: &PathBuf, output: Option<PathBuf>, opt_level: u8) -> Result<(), String> {
     let (_sm, mir) = compile_to_mir(file, opt_level)?;
     let tc = Toolchain::discover().map_err(|e| e.to_string())?;
-    let target = TargetSpec::host();
+    let target = current_target();
     let ir = nexum_codegen::emit(&mir, &target);
     // write .ll
     let out_exe = output.unwrap_or_else(|| {
@@ -717,7 +746,7 @@ fn run_file(file: &PathBuf, opt_level: u8) -> Result<(), String> {
 fn build_to(file: &PathBuf, exe: &PathBuf, opt_level: u8) -> Result<(), String> {
     let (_sm, mir) = compile_to_mir(file, opt_level)?;
     let tc = Toolchain::discover().map_err(|e| e.to_string())?;
-    let target = TargetSpec::host();
+    let target = current_target();
     let ir = nexum_codegen::emit(&mir, &target);
     let ll_path = std::env::temp_dir().join("nexum_out.ll");
     fs::write(&ll_path, ir).map_err(|e| e.to_string())?;
