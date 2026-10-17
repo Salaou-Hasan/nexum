@@ -4,7 +4,27 @@ Nexum is a statically typed, ahead-of-time compiled native language with a clean
 data-oriented surface. This repository is the **bootstrap compiler** implementing Phases 0–9 of the
 design blueprint (Phase 10, optional self-hosting, is planned).
 
-## Status
+## Install
+
+```sh
+# Unix
+curl -fsSL https://raw.githubusercontent.com/Salaou-Hasan/nexum/main/install.sh | sh
+
+# Windows (PowerShell)
+iwr https://raw.githubusercontent.com/Salaou-Hasan/nexum/main/install.ps1 | iex
+
+# Or build from source
+cargo build --release -p nexum-driver
+```
+
+Or download a prebuilt binary from the
+[releases page](https://github.com/Salaou-Hasan/nexum/releases).
+
+## Editor support
+
+A VS Code extension lives in `editors/vscode/` (syntax highlighting + format
+on save via `nx fmt`). Build the VSIX with `npm run package` in that
+directory.
 
 Working vertical slice: a `.nx` source file compiles to a native executable on
 Windows (x86_64) using LLVM/clang. Supported today:

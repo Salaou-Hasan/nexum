@@ -58,6 +58,7 @@ enum Commands {
     EmitIr {
         file: PathBuf,
     },
+    Update,
     New {
         name: String,
     },
@@ -87,6 +88,9 @@ fn main() {
     *TARGET_NAME.lock().unwrap() = cli.target.clone();
     let opt_level = cli.opt_level;
     match cli.cmd {
+        Commands::Update => {
+            update_nexum();
+        }
         Commands::New { name } => {
             new_project(&name);
         }
@@ -219,6 +223,91 @@ fn new_project(name: &str) {
     .unwrap();
     println!("created project `{}`", name);
     println!("  cd {} && nx run src/main.nx", name);
+}
+
+fn update_nexum() {
+    use std::process::Command;
+    let current = env!("CARGO_PKG_VERSION");
+    println!("current version: {}", current);
+    // Fetch latest release tag via curl.
+    let api = "https://api.github.com/repos/Salaou-Hasan/nexum/releases/latest";
+    let out = Command::new("curl").args(["-sL", api]).output();
+    let body = match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(e) => {
+            eprintln!("error: curl not available: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Parse tag_name manually (avoid serde dep in driver).
+    let tag = body
+        .split("\"tag_name\"")
+        .nth(1)
+        .and_then(|s| s.split('"').nth(1))
+        .unwrap_or("")
+        .to_string();
+    if tag.is_empty() {
+        eprintln!("error: could not determine latest release");
+        std::process::exit(1);
+    }
+    let latest = tag.trim_start_matches('v');
+    println!("latest release: {}", tag);
+    if latest == current {
+        println!("already up to date");
+        return;
+    }
+    // Determine host target.
+    let target = if cfg!(target_os = "windows") {
+        "windows-x86_64"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "macos-aarch64"
+        } else {
+            "macos-x86_64"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "linux-aarch64"
+    } else {
+        "linux-x86_64"
+    };
+    let ext = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    let asset = format!("nx-{}{}", target, ext);
+    let url = format!(
+        "https://github.com/Salaou-Hasan/nexum/releases/download/{}/{}",
+        tag, asset
+    );
+    let tmp = std::env::temp_dir().join(&asset);
+    println!("downloading {} ...", url);
+    let status = Command::new("curl")
+        .args(["-sL", "-o", tmp.to_str().unwrap(), &url])
+        .status();
+    match status {
+        Ok(s) if s.success() && tmp.exists() => {}
+        _ => {
+            eprintln!("error: download failed");
+            std::process::exit(1);
+        }
+    }
+    // Replace current binary.
+    let current_exe = std::env::current_exe().unwrap();
+    let old = current_exe.with_extension("old");
+    let _ = std::fs::remove_file(&old);
+    if std::fs::rename(&current_exe, &old).is_err() {
+        eprintln!("error: could not rename current binary (try running as admin)");
+        std::process::exit(1);
+    }
+    if std::fs::rename(&tmp, &current_exe).is_err() {
+        // restore
+        let _ = std::fs::rename(&old, &current_exe);
+        eprintln!("error: could not install new binary");
+        std::process::exit(1);
+    }
+    let _ = std::fs::remove_file(&old);
+    println!("updated to {} — restart nx to use the new version", tag);
 }
 
 fn format_nx(text: &str) -> Result<String, String> {

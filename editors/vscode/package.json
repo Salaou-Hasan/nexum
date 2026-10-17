@@ -1,0 +1,67 @@
+{
+  "name": "nexum",
+  "displayName": "Nexum Language",
+  "description": "Language support for Nexum: syntax highlighting, formatting, and tooling.",
+  "version": "0.1.0",
+  "publisher": "nexum",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages", "Formatters"],
+  "keywords": ["nexum", "nx", "language"],
+  "icon": "icon.png",
+  "main": "./out/extension.js",
+  "activationEvents": ["onLanguage:nexum"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "nexum",
+        "aliases": ["Nexum", "nexum"],
+        "extensions": [".nx"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nexum",
+        "scopeName": "source.nexum",
+        "path": "./syntaxes/nexum.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "nexum.formatDocument",
+        "title": "Nexum: Format Document"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Nexum",
+      "properties": {
+        "nexum.nxPath": {
+          "type": "string",
+          "default": "nx",
+          "description": "Path to the nx executable."
+        },
+        "nexum.formatOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Format on save."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
