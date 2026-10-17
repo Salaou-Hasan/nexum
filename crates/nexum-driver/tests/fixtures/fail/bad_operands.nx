@@ -1,0 +1,4 @@
+# EXPECT: T008
+fn main():
+    let s = "a"
+    print(s + 1)

@@ -1,0 +1,4 @@
+# EXPECT: T041
+fn main():
+    collect(1)
+    print("never")

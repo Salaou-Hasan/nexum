@@ -1,0 +1,20 @@
+# `for v in xs:` binds each element by value; the array expression is
+# evaluated once. The binding is scoped to the loop body.
+type Pt:
+    x: Float
+    y: Float
+
+fn main():
+    let xs = [1, 2, 3]
+    for v in xs:
+        print(v)
+    let ps = [Pt(1.0, 2.0), Pt(3.0, 4.0)]
+    let mut s = 0.0
+    for p in ps:
+        s += p.x * 2.0 + p.y
+    print(s)
+    # `v` is rebound inside the loop only; the outer `v` is untouched.
+    let v = 100
+    for v in xs:
+        print(v)
+    print(v)

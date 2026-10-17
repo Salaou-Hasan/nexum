@@ -1,0 +1,7 @@
+fn main():
+    print("Hello, Nexum!")
+    let x = 40 + 2
+    print(x)
+    let y = 3.14
+    print(y)
+    print(true)

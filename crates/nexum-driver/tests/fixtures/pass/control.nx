@@ -1,0 +1,14 @@
+fn classify(n):
+    if n < 0:
+        return 0
+    else:
+        if n == 0:
+            return 1
+        return 2
+
+fn main():
+    print(classify(-5))
+    print(classify(0))
+    print(classify(7))
+    for i in 0..3:
+        print(i)

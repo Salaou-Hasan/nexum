@@ -1,0 +1,32 @@
+# Arrays: literals, indexing, `len`, nested arrays, arrays of records.
+
+type Pt:
+    x: Int
+    y: Int
+
+fn head(xs):
+    return xs[0]
+
+fn origin():
+    return Pt(0, 0)
+
+fn main():
+    let xs = [1, 2, 3]
+    let n = len(xs)
+    let a = xs[0]
+    let b = xs[n - 1]
+    let grid = [[1, 2], [3, 4]]
+    let inner = grid[1][0]
+    let ps = [Pt(1, 2), Pt(3, 4)]
+    let px = ps[1].x
+    let mut ys = [5, 6]
+    ys[0] = a + b
+    let h = head(ys)
+    let o = origin()
+    let ox = o.x
+    print(a)
+    print(b)
+    print(inner)
+    print(px)
+    print(h)
+    print(ox)

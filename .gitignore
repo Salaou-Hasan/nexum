@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Build / tooling artifacts
+*.exe
+*.ll
+*.o
+*.obj
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Scratch / temp files from agent runs
+err.txt
+out.txt
+scratch*.nx
+*.out.tmp

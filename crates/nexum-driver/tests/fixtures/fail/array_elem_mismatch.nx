@@ -1,0 +1,5 @@
+# EXPECT: T035
+# Array elements must all have the same type.
+fn main():
+    let xs = [1, 2.0, 3]
+    print(xs[0])

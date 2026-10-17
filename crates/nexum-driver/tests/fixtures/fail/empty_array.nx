@@ -1,0 +1,5 @@
+# EXPECT: T029
+# An empty array literal has no element type to infer.
+fn main():
+    let xs = []
+    print(0)

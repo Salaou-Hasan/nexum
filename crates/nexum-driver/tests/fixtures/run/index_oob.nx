@@ -1,0 +1,9 @@
+# Runtime bounds checking: a dynamic index past the end stops the program
+# with a panic (message on stderr, exit code 1).
+
+fn main():
+    let xs = [1, 2, 3]
+    print("before")
+    let mut i = 5
+    print(xs[i])
+    print("unreachable")

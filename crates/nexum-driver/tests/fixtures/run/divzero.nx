@@ -1,0 +1,7 @@
+# Int division by zero traps: message on stderr, exit code 1.
+fn main():
+    print("before")
+    let mut z = 1
+    z -= 1
+    print(10 / z)
+    print("unreachable")

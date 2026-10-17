@@ -1,0 +1,5 @@
+# EXPECT: T038
+# for-each iterates arrays only.
+fn main():
+    for v in 3:
+        print(v)

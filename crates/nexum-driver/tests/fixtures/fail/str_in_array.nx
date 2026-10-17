@@ -1,0 +1,4 @@
+# EXPECT: T039
+fn main():
+    let xs = ["a", "b"]
+    print(xs)

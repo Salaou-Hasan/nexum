@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nexum-driver",
+    "crates/nexum-source",
+    "crates/nexum-diagnostics",
+    "crates/nexum-lexer",
+    "crates/nexum-parser",
+    "crates/nexum-sema",
+    "crates/nexum-mir",
+    "crates/nexum-target",
+    "crates/nexum-toolchain",
+    "crates/nexum-codegen",
+    "crates/nexum-runtime",
+]
+default-members = ["crates/nexum-driver"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Nexum Team"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "1"

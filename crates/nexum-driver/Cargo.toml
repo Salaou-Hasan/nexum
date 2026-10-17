@@ -1,0 +1,21 @@
+[package]
+name = "nexum-driver"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nx"
+path = "src/main.rs"
+
+[dependencies]
+nexum-source = { path = "../nexum-source" }
+nexum-diagnostics = { path = "../nexum-diagnostics" }
+nexum-lexer = { path = "../nexum-lexer" }
+nexum-parser = { path = "../nexum-parser" }
+nexum-sema = { path = "../nexum-sema" }
+nexum-mir = { path = "../nexum-mir" }
+nexum-target = { path = "../nexum-target" }
+nexum-toolchain = { path = "../nexum-toolchain" }
+nexum-codegen = { path = "../nexum-codegen" }
+clap = { workspace = true }
+anyhow = { workspace = true }

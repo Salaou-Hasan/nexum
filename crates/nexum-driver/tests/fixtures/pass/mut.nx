@@ -1,0 +1,7 @@
+fn main():
+    let mut total = 0
+    let mut i = 0
+    while i < 10:
+        total = total + i
+        i = i + 1
+    print(total)

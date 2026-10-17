@@ -1,0 +1,13 @@
+fn main():
+    let a = concat("hello, ", "world")
+    print(a)
+    let b = concat(a, "!")
+    print(b)
+    print(len(b))
+    let c = concat("x", "y")
+    let d = concat("x", "y")
+    print(c == d)
+    print(c == c)
+    print(heap_used() > 0)
+    collect()
+    print(heap_used() > 0)

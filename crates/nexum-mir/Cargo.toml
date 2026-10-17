@@ -1,0 +1,10 @@
+[package]
+name = "nexum-mir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nexum-source = { path = "../nexum-source" }
+nexum-diagnostics = { path = "../nexum-diagnostics" }
+nexum-sema = { path = "../nexum-sema" }
+nexum-parser = { path = "../nexum-parser" }

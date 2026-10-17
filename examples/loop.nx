@@ -1,0 +1,9 @@
+fn main():
+    let mut i = 0
+    while i < 5:
+        print(i)
+        i = i + 1
+    print(100)
+    for j in 0..5:
+        print(j)
+    print(200)

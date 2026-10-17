@@ -1,0 +1,5 @@
+# EXPECT: T032
+# Array indices must be Int.
+fn main():
+    let xs = [1, 2, 3]
+    print(xs[1.0])

@@ -1,0 +1,5 @@
+# EXPECT: T031
+# Indexing requires an array.
+fn main():
+    let x = 3
+    print(x[0])

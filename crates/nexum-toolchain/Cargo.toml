@@ -1,0 +1,8 @@
+[package]
+name = "nexum-toolchain"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nexum-target = { path = "../nexum-target" }
+nexum-diagnostics = { path = "../nexum-diagnostics" }

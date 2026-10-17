@@ -1,0 +1,6 @@
+# EXPECT: T010
+# Compound assignment is an assignment: the target must be mutable.
+fn main():
+    let x = 1
+    x += 1
+    print(x)

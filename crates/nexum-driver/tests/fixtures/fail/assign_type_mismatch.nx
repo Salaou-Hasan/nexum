@@ -1,0 +1,5 @@
+# EXPECT: T012
+fn main():
+    let mut x = 1
+    x = "no"
+    print(x)

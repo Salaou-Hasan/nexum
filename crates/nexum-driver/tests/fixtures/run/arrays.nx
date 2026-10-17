@@ -1,0 +1,27 @@
+# Runtime behavior of arrays: loops with `len`, element writes, `mut`
+# parameters (by reference), and value copies.
+
+fn total(xs):
+    let mut s = 0
+    let mut i = 0
+    while i < len(xs):
+        s = s + xs[i]
+        i = i + 1
+    return s
+
+fn scale(mut xs, k):
+    let mut i = 0
+    while i < len(xs):
+        xs[i] = xs[i] * k
+        i = i + 1
+
+fn main():
+    let xs = [1, 2, 3, 4]
+    print(total(xs))
+    let mut ys = [10, 20, 30]
+    scale(ys, 4)
+    print(ys[0])
+    print(ys[1])
+    print(ys[2])
+    # `xs` was passed by value to `total`: still untouched.
+    print(xs[1])

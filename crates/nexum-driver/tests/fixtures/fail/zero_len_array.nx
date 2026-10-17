@@ -1,0 +1,5 @@
+# EXPECT: T030
+# Zero-length array types are rejected.
+fn main():
+    let xs: [Int; 0] = []
+    print(0)

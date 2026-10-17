@@ -1,0 +1,24 @@
+fn add(a, b):
+    return a + b
+
+fn is_even(n):
+    if n % 2 == 0:
+        return true
+    return false
+
+fn main():
+    print(add(3, 4))
+    print(is_even(4))
+    print(is_even(5))
+    let s = "Nexum"
+    print(s)
+    let f = 2.5
+    print(f * 2.0)
+    if true:
+        print("yes")
+    else:
+        print("no")
+    let mut i = 0
+    while i < 3:
+        print(i)
+        i = i + 1

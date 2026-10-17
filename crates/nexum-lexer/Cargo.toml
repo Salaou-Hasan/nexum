@@ -1,0 +1,8 @@
+[package]
+name = "nexum-lexer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nexum-source = { path = "../nexum-source" }
+nexum-diagnostics = { path = "../nexum-diagnostics" }

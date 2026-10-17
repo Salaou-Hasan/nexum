@@ -1,0 +1,8 @@
+# EXPECT: T010
+# Plain parameters are immutable copies (they are not declared `mut`).
+fn inc(x):
+    x = x + 1
+    return x
+
+fn main():
+    print(inc(1))

@@ -1,0 +1,14 @@
+type Vec2:
+    x: Float
+    y: Float
+
+fn length_sq(v):
+    return v.x * v.x + v.y * v.y
+
+fn main():
+    let mut p = Vec2(3.0, 4.0)
+    print(length_sq(p))
+    p.x = 6.0
+    print(length_sq(p))
+    let q = p
+    print(q.y)

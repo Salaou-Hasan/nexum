@@ -1,0 +1,4 @@
+# EXPECT: T034
+# `len` takes exactly one array argument.
+fn main():
+    print(len(3))

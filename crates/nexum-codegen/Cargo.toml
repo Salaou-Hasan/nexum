@@ -1,0 +1,12 @@
+[package]
+name = "nexum-codegen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nexum-mir = { path = "../nexum-mir" }
+nexum-sema = { path = "../nexum-sema" }
+nexum-target = { path = "../nexum-target" }
+nexum-toolchain = { path = "../nexum-toolchain" }
+nexum-diagnostics = { path = "../nexum-diagnostics" }
+nexum-runtime = { path = "../nexum-runtime" }

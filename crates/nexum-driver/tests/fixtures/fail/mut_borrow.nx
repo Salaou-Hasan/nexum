@@ -1,0 +1,9 @@
+# EXPECT: T037
+# A `mut` parameter borrows the caller's binding, which must be mutable.
+fn bump(mut n):
+    n = n + 1
+
+fn main():
+    let k = 5
+    bump(k)
+    print(k)

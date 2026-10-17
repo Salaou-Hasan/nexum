@@ -1,0 +1,22 @@
+# Compound assignment: `x op= e` is a read-modify-write, and the target
+# path is evaluated exactly once.
+fn next(mut i):
+    let v = i
+    i = i + 1
+    return v
+
+fn main():
+    let mut total = 5
+    total += 2
+    total *= 3
+    total -= 1
+    total /= 4
+    total %= 4
+    print(total)
+    let mut xs = [10, 20, 30]
+    xs[1] += 5
+    print(xs[1])
+    let mut i = 0
+    xs[next(i)] += 1
+    print(i)
+    print(xs[0])

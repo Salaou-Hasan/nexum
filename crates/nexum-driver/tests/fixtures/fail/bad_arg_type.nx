@@ -1,0 +1,6 @@
+# EXPECT: T007
+fn takes_int(n: Int):
+    return n
+
+fn main():
+    print(takes_int("x"))

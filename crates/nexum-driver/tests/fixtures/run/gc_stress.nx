@@ -1,0 +1,21 @@
+# GC stress: temporary results of nested calls and a forced collection.
+fn build(n):
+    if n == 0:
+        return "x"
+    return concat(build(n - 1), concat("y", "z"))
+
+fn main():
+    let r = build(4)
+    print(r)
+    collect()
+    print(r)
+    print(len(r))
+    let mut s = ""
+    let mut i = 0
+    while i < 10:
+        s = concat(s, "x")
+        i += 1
+    print(len(s))
+    let before = heap_used()
+    collect()
+    print(heap_used() < before)

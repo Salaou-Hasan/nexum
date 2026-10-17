@@ -1,0 +1,15 @@
+# Int arithmetic is fully defined: wrapping add/sub/mul, division by zero
+# panics (stderr + exit 1), MIN / -1 wraps.
+fn main():
+    let mut big = 9223372036854775807
+    big += 1
+    print(big)
+    let mn = -9223372036854775807 - 1
+    let mut neg1 = 0
+    neg1 -= 1
+    print(mn / neg1)
+    print(mn % neg1)
+    print(7 / 2)
+    print(-7 / 2)
+    print(7 % 3)
+    print(1.0 / 0.0)

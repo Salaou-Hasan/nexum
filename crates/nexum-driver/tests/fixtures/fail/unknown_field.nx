@@ -1,0 +1,8 @@
+# EXPECT: T019
+type Vec2:
+    x: Float
+    y: Float
+
+fn main():
+    let p = Vec2(1.0, 2.0)
+    print(p.z)

@@ -1,0 +1,5 @@
+# EXPECT: T033
+# A constant index outside the array length is a compile-time error.
+fn main():
+    let xs = [1, 2, 3]
+    print(xs[5])

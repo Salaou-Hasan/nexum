@@ -1,0 +1,4 @@
+# EXPECT: T040
+fn main():
+    let x = concat(1, 2)
+    print(x)

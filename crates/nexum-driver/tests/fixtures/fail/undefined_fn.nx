@@ -1,0 +1,3 @@
+# EXPECT: T006
+fn main():
+    mystery(1)

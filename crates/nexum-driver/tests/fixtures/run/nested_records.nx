@@ -1,0 +1,13 @@
+type Inner:
+    v: Int
+
+type Outer:
+    inner: Inner
+    tag: Int
+
+fn main():
+    let mut o = Outer(Inner(10), 1)
+    print(o.inner.v)
+    o.inner.v = 42
+    print(o.inner.v)
+    print(o.tag)

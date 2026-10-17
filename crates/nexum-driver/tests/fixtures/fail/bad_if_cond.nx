@@ -1,0 +1,4 @@
+# EXPECT: T001
+fn main():
+    if 3:
+        print(1)

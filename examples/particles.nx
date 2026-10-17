@@ -1,0 +1,19 @@
+# The spec's data-oriented particle integration pattern: an array of records
+# mutated in place through a `mut` (by-reference) parameter.
+
+type Particle:
+    x: Float
+    y: Float
+
+fn integrate(mut ps, dt):
+    for i in 0..len(ps):
+        ps[i].x = ps[i].x + 1.0 * dt
+        ps[i].y = ps[i].y + 2.0 * dt
+
+fn main():
+    let mut ps = [Particle(1.0, 2.0), Particle(3.0, 4.0)]
+    integrate(ps, 10.0)
+    print(ps[0].x)
+    print(ps[0].y)
+    print(ps[1].x)
+    print(ps[1].y)

@@ -1,0 +1,4 @@
+fn main():
+    print("before")
+    panic("boom")
+    print("after")

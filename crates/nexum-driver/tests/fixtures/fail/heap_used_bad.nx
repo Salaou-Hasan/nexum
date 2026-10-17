@@ -1,0 +1,3 @@
+# EXPECT: T042
+fn main():
+    print(heap_used(1))

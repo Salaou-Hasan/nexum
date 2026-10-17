@@ -1,0 +1,2 @@
+"timestamp","benchmark","runs","min_ms","median_ms"
+"2026-10-17T08:53:04.4234950+00:00","fib30","7","53.97","59.77"

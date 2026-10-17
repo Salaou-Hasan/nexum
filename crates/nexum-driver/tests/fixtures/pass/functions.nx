@@ -1,0 +1,12 @@
+fn fib(n):
+    if n <= 1:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn is_positive(n):
+    return n > 0
+
+fn main():
+    print(fib(10))
+    print(is_positive(3))
+    print(is_positive(0))
