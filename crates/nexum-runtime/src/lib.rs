@@ -56,8 +56,9 @@ pub fn runtime_ir(msvc: bool) -> String {
     s.push_str("@nexum_live = internal global i64 0, align 8\n");
     s.push_str("@nexum_since = internal global i64 0, align 8\n");
     s.push_str("@nexum_threshold = internal global i64 65536, align 8\n");
+    s.push_str("@nexum_msg_oom = private unnamed_addr constant [14 x i8] c\"out of memory\\00\"\n");
     s.push_str(
-        "@nexum_msg_oom = private unnamed_addr constant [14 x i8] c\"out of memory\\00\"\n\n",
+        "@nexum_msg_oob = private unnamed_addr constant [20 x i8] c\"index out of bounds\\00\"\n\n",
     );
 
     // panic: message + newline to stderr, then exit 1.
@@ -121,6 +122,11 @@ pub fn runtime_ir(msvc: bool) -> String {
     // String concatenation: fresh NUL-terminated buffer on the managed heap.
     s.push_str(
         "define internal ptr @nexum_concat(ptr %a, ptr %b) {\nentry:\n  %la = call i64 @strlen(ptr %a)\n  %lb = call i64 @strlen(ptr %b)\n  %sum = add i64 %la, %lb\n  %n1 = add i64 %sum, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  call ptr @memcpy(ptr %buf, ptr %a, i64 %la)\n  %dst = getelementptr i8, ptr %buf, i64 %la\n  %n2 = add i64 %lb, 1\n  call ptr @memcpy(ptr %dst, ptr %b, i64 %n2)\n  ret ptr %buf\n}\n\n",
+    );
+
+    // String indexing: returns a one-character NUL-terminated string.
+    s.push_str(
+        "define internal ptr @nexum_str_char_at(ptr %s, i64 %i) {\nentry:\n  %n = call i64 @strlen(ptr %s)\n  %neg = icmp slt i64 %i, 0\n  %oob = icmp sge i64 %i, %n\n  %bad = or i1 %neg, %oob\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %buf = call ptr @nexum_alloc(i64 1)\n  %srcp = getelementptr i8, ptr %s, i64 %i\n  %ch = load i8, ptr %srcp\n  store i8 %ch, ptr %buf\n  %nulp = getelementptr i8, ptr %buf, i64 1\n  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n\n",
     );
 
     // Live payload bytes (payload rounded up to 16, header excluded).

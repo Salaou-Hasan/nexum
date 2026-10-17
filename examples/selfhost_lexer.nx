@@ -1,0 +1,63 @@
+# Self-hosted lexer proof of concept (Phase 10a).
+# Tokenizes a source string and prints one token per line: "<kind> <text>".
+# Uses only features available in the bootstrap language:
+#   - string indexing (s[i]) and len(s)
+#   - fixed-size arrays for the output buffer
+#   - managed strings via concat
+
+fn char_in(s: Str, c: Str) -> Bool:
+    let n = len(s)
+    let mut i = 0
+    while i < n:
+        if s[i] == c:
+            return true
+        i = i + 1
+    return false
+
+fn is_digit(c: Str) -> Bool:
+    return char_in("0123456789", c)
+
+fn is_alpha(c: Str) -> Bool:
+    return char_in("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_", c)
+
+fn main():
+    let src = "let x = 42 + y"
+    let n = len(src)
+    let mut i = 0
+    while i < n:
+        let ch = src[i]
+        if ch == " ":
+            i = i + 1
+        else:
+            if is_alpha(ch):
+                let mut text = ""
+                let mut in_ident = true
+                while in_ident:
+                    if i >= n:
+                        in_ident = false
+                    else:
+                        let c = src[i]
+                        if is_alpha(c):
+                            text = concat(text, c)
+                            i = i + 1
+                        else:
+                            in_ident = false
+                print(concat("IDENT ", text))
+            else:
+                if is_digit(ch):
+                    let mut text = ""
+                    let mut in_digit = true
+                    while in_digit:
+                        if i >= n:
+                            in_digit = false
+                        else:
+                            let c = src[i]
+                            if is_digit(c):
+                                text = concat(text, c)
+                                i = i + 1
+                            else:
+                                in_digit = false
+                    print(concat("INT ", text))
+                else:
+                    print(concat("OP ", ch))
+                    i = i + 1

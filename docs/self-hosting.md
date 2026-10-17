@@ -26,7 +26,7 @@ language features that do not exist yet:
 
 | Stage | Deliverable | Prerequisite |
 | ----- | ----------- | ------------ |
-| 10a | Port the lexer to Nexum (single file, string input). | String indexing + a small token type. |
+| 10a | Port the lexer to Nexum (single file, string input). **Done** — see `examples/selfhost_lexer.nx`. | String indexing + a small token type. (Done) |
 | 10b | Port the parser (recursive descent). | Dynamic arrays or arena-allocated nodes. |
 | 10c | Port name resolution + type checking. | Hash maps in std. |
 | 10d | Port MIR lowering + optimization passes. | — |
@@ -49,8 +49,11 @@ specification.
 * The language can express recursive functions, arrays, records, control flow,
   managed strings and a precise GC (Phases 1–4), so the *shape* of a
   compiler is expressible.
-* `examples/selfhost_lexer.nx` is reserved for a future lexer port; it is
-  not yet checked in because the required string primitives are missing.
+* **Stage 10a is now demonstrated**: `examples/selfhost_lexer.nx` is a
+  working self-hosted lexer for a subset of Nexum (identifiers, integers,
+  single-character operators, whitespace). It tokenizes a source string and
+  prints one token per line, using only bootstrap language features
+  (string indexing, `concat`, fixed-size arrays are not needed).
 
 ## Recommendation
 

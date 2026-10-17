@@ -591,6 +591,7 @@ fn emit_fn(
                             "concat" => "nexum_concat",
                             "collect" => "nexum_collect",
                             "heap_used" => "nexum_heap_used",
+                            "str_char_at" => "nexum_str_char_at",
                             other => other,
                         };
                         let ret_ty = llvm_ty(ty);

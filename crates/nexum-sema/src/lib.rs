@@ -1010,6 +1010,14 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
             }
             let bt = b.ty();
             match &bt {
+                Ty::Str => {
+                    // String indexing returns a one-character string.
+                    HirExpr::Call {
+                        callee: "str_char_at".to_string(),
+                        args: vec![b, i],
+                        ty: Ty::Str,
+                    }
+                }
                 Ty::Array(elem, n) => {
                     if let HirExpr::Int(v, _) = &i {
                         if *v < 0 || *v as usize >= *n {
@@ -1161,6 +1169,44 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     callee: callee.clone(),
                     args: ha,
                     ty: Ty::Never,
+                };
+            }
+            if callee == "str_char_at" {
+                if ha.len() != 2 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T043",
+                            format!("str_char_at expects 2 arguments, got {}", ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                if let Some(a0) = ha.first() {
+                    if !a0.ty().compatible(&Ty::Str) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T043",
+                                format!("str_char_at expects Str, found {}", a0.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                }
+                if let Some(a1) = ha.get(1) {
+                    if !a1.ty().compatible(&Ty::Int) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T043",
+                                format!("str_char_at expects Int index, found {}", a1.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: Ty::Str,
                 };
             }
             if callee == "concat" {
