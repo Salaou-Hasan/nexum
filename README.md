@@ -38,8 +38,10 @@ Windows (x86_64) using LLVM/clang. Supported today:
 
 See `docs/language-reference/grammar.md` for the grammar draft,
 `docs/language-reference/decisions.md` for the decision record,
-`docs/runtime-abi.md` for the runtime ABI, and
-`benchmarks/BASELINE.md` for the first performance baseline.
+`docs/runtime-abi.md` for the runtime ABI,
+`docs/package-format.md` for the package format,
+`docs/standard-library.md` for the standard library, and
+`docs/compatibility.md` for compatibility and migration rules.
 
 ## Build
 

@@ -16,7 +16,7 @@ participate in collection.
 | `Float`    | `double`  | IEEE 754                                    |
 | `Bool`     | `i1`      | 0 / 1                                       |
 | `Str`      | `ptr`     | pointer to a NUL-terminated byte buffer     |
-| `Unit`     | `void`    | —                                           |
+| `Unit`     | `void`    | â€”                                           |
 | records    | `%name`   | LLVM struct, field order = declaration order |
 | arrays     | `[N x T]` | inline, value type                          |
 
@@ -24,9 +24,9 @@ participate in collection.
 pointer to a NUL-terminated UTF-8 buffer. Two representations share this
 type:
 
-* **static literals** — pointers into module-private global constants. They
+* **static literals** â€” pointers into module-private global constants. They
   are immortal and never participate in collection.
-* **heap strings** — pointers into blocks allocated by `nexum_alloc`
+* **heap strings** â€” pointers into blocks allocated by `nexum_alloc`
   (produced by `concat`). They are collected.
 
 The compiler distinguishes the two only through the managed-heap range check
@@ -39,11 +39,11 @@ is a single, contiguous-by-blocks region managed by `nexum_alloc`.
   adds a 32-byte header, and obtains memory from `malloc`. It links the new
   block at the head of a global singly-linked list (`@nexum_obj_head`).
 * **Object block layout** (all offsets in bytes):
-  * `+0`  `size` — payload size rounded up to 16 (i64)
-  * `+8`  `mark` — 0 = unmarked, 1 = marked (i64)
-  * `+16` `next` — next object in the global list (ptr)
+  * `+0`  `size` â€” payload size rounded up to 16 (i64)
+  * `+8`  `mark` â€” 0 = unmarked, 1 = marked (i64)
+  * `+16` `next` â€” next object in the global list (ptr)
   * `+24` reserved (i64)
-  * `+32` **payload** — the bytes the program sees, 16-byte aligned, always
+  * `+32` **payload** â€” the bytes the program sees, 16-byte aligned, always
     NUL-terminated for strings
 * **Collector**: precise, non-moving, single-threaded mark-sweep. A
   collection runs only inside `nexum_alloc` (when the allocation watermark
@@ -61,9 +61,9 @@ is a single, contiguous-by-blocks region managed by `nexum_alloc`.
 ## 3. Roots and safepoints
 
 * **Root frame**: a compiler-generated struct on a function's stack:
-  * `+0`  `prev` (ptr) — previous frame
-  * `+8`  `slots` (ptr) — pointer to an array of root slots
-  * `+16` `count` (i64) — number of slots
+  * `+0`  `prev` (ptr) â€” previous frame
+  * `+8`  `slots` (ptr) â€” pointer to an array of root slots
+  * `+16` `count` (i64) â€” number of slots
 * A **root slot** is an alloca of type `ptr` (a local `Str` variable or a
   compiler-managed temporary). The frame stores the *addresses* of these
   slots, so the collector reads their (possibly changing) contents at
@@ -116,3 +116,6 @@ order is LIFO within a scope. Recorded as D009.
 * Single-threaded only.
 ","path">
 C:\Nexum\nexum\docs\runtime-abi.md
+## 7. Stability policy (Phase 9)
+
+The runtime ABI is versioned. Breaking changes require a major version bump and a migration note. The bootstrap ABI (this document) is `v0`; it is allowed to change without notice until a `v1` is declared. Programs must be recompiled against the matching runtime.

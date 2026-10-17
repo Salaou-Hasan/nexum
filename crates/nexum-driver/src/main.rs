@@ -26,13 +26,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Run {
-        file: PathBuf,
+        file: Option<PathBuf>,
     },
     Check {
-        file: PathBuf,
+        file: Option<PathBuf>,
     },
     Build {
-        file: PathBuf,
+        file: Option<PathBuf>,
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Clang optimization level 0-3.
@@ -136,6 +136,7 @@ fn main() {
             Err(e) => eprintln!("error: {}", e),
         },
         Commands::Check { file } => {
+            let file = resolve_entry(file);
             if let Err(e) = check_file(&file, opt_level) {
                 eprintln!("{}", e);
                 std::process::exit(1);
@@ -151,6 +152,7 @@ fn main() {
             pgo_use,
             release,
         } => {
+            let file = resolve_entry(file);
             *BUILD_OPTS.lock().unwrap() = nexum_toolchain::BuildOpts {
                 opt: if release { 3 } else { opt },
                 lto: lto || release,
@@ -174,6 +176,7 @@ fn main() {
             }
         },
         Commands::Run { file } => {
+            let file = resolve_entry(file);
             if let Err(e) = run_file(&file, opt_level) {
                 eprintln!("{}", e);
                 std::process::exit(1);
@@ -684,6 +687,30 @@ static BUILD_OPTS: std::sync::Mutex<nexum_toolchain::BuildOpts> =
 
 fn current_build_opts() -> nexum_toolchain::BuildOpts {
     BUILD_OPTS.lock().unwrap().clone()
+}
+
+fn resolve_entry(file: Option<PathBuf>) -> PathBuf {
+    if let Some(f) = file {
+        return f;
+    }
+    // Auto-detect from nexum.toml in the current directory.
+    let manifest = std::path::Path::new("nexum.toml");
+    if manifest.exists() {
+        if let Ok(text) = std::fs::read_to_string(manifest) {
+            for line in text.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("entry") {
+                    let rest = rest.trim().trim_start_matches('=').trim();
+                    let rest = rest.trim_matches('"');
+                    if !rest.is_empty() {
+                        return std::path::PathBuf::from(rest);
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("error: no input file and no nexum.toml found");
+    std::process::exit(1);
 }
 
 fn current_target() -> TargetSpec {
