@@ -38,12 +38,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install llvm
       - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release -p nexum-driver --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/nx* ${{ matrix.asset }} 2>/dev/null || cp target/${{ matrix.target }}/release/nexum-driver ${{ matrix.asset }}
-          chmod +x ${{ matrix.asset }} 2>/dev/null || true
+          BIN="target/${{ matrix.target }}/release/nx"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then BIN="${BIN}.exe"; fi
+          cp "$BIN" "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
