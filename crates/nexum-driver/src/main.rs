@@ -35,6 +35,24 @@ enum Commands {
         file: PathBuf,
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Clang optimization level 0-3.
+        #[arg(long, default_value_t = 2u8)]
+        opt: u8,
+        /// Enable thin LTO.
+        #[arg(long)]
+        lto: bool,
+        /// Sysroot path.
+        #[arg(long)]
+        sysroot: Option<String>,
+        /// PGO: generate profile data.
+        #[arg(long)]
+        pgo_generate: bool,
+        /// PGO: use profile data from path.
+        #[arg(long)]
+        pgo_use: Option<String>,
+        /// Release profile: opt 3 + LTO.
+        #[arg(long)]
+        release: bool,
     },
     /// Compile and print LLVM IR to stdout.
     EmitIr {
@@ -123,7 +141,23 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Build { file, output } => {
+        Commands::Build {
+            file,
+            output,
+            opt,
+            lto,
+            sysroot,
+            pgo_generate,
+            pgo_use,
+            release,
+        } => {
+            *BUILD_OPTS.lock().unwrap() = nexum_toolchain::BuildOpts {
+                opt: if release { 3 } else { opt },
+                lto: lto || release,
+                sysroot,
+                pgo_generate,
+                pgo_use,
+            };
             if let Err(e) = build_file(&file, output, opt_level) {
                 eprintln!("{}", e);
                 std::process::exit(1);
@@ -639,11 +673,17 @@ fn resolve_target(name: &str) -> TargetSpec {
         })
     }
 }
-fn read_source(file: &PathBuf) -> Result<(nexum_source::SourceMap, nexum_source::FileId), String> {
-    let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
-    let mut sm = nexum_source::SourceMap::new();
-    let fid = sm.add(file.clone(), text);
-    Ok((sm, fid))
+static BUILD_OPTS: std::sync::Mutex<nexum_toolchain::BuildOpts> =
+    std::sync::Mutex::new(nexum_toolchain::BuildOpts {
+        opt: 2,
+        lto: false,
+        sysroot: None,
+        pgo_generate: false,
+        pgo_use: None,
+    });
+
+fn current_build_opts() -> nexum_toolchain::BuildOpts {
+    BUILD_OPTS.lock().unwrap().clone()
 }
 
 fn current_target() -> TargetSpec {
@@ -653,6 +693,13 @@ fn current_target() -> TargetSpec {
     } else {
         TargetSpec::by_name(&name).unwrap_or_else(TargetSpec::host)
     }
+}
+
+fn read_source(file: &PathBuf) -> Result<(nexum_source::SourceMap, nexum_source::FileId), String> {
+    let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let mut sm = nexum_source::SourceMap::new();
+    let fid = sm.add(file.clone(), text);
+    Ok((sm, fid))
 }
 
 fn compile_to_mir(
@@ -726,10 +773,11 @@ fn build_file(file: &PathBuf, output: Option<PathBuf>, opt_level: u8) -> Result<
     let ll_path = std::env::temp_dir().join("nexum_out.ll");
     fs::write(&ll_path, ir).map_err(|e| e.to_string())?;
     nexum_toolchain::verify_ir(&tc.clang, ll_path.to_str().unwrap())?;
-    run_clang(
+    nexum_toolchain::run_clang_with(
         &tc.clang,
         ll_path.to_str().unwrap(),
         out_exe.to_str().unwrap(),
+        &current_build_opts(),
     )
     .map_err(|e| e.to_string())?;
     println!("built: {}", out_exe.display());
@@ -751,7 +799,12 @@ fn build_to(file: &PathBuf, exe: &PathBuf, opt_level: u8) -> Result<(), String> 
     let ll_path = std::env::temp_dir().join("nexum_out.ll");
     fs::write(&ll_path, ir).map_err(|e| e.to_string())?;
     nexum_toolchain::verify_ir(&tc.clang, ll_path.to_str().unwrap())?;
-    run_clang(&tc.clang, ll_path.to_str().unwrap(), exe.to_str().unwrap())
-        .map_err(|e| e.to_string())?;
+    nexum_toolchain::run_clang_with(
+        &tc.clang,
+        ll_path.to_str().unwrap(),
+        exe.to_str().unwrap(),
+        &current_build_opts(),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }

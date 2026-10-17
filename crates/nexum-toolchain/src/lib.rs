@@ -38,14 +38,49 @@ fn find_exe(name: &str) -> Option<String> {
     None
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct BuildOpts {
+    /// Clang optimization level (0-3).
+    pub opt: u8,
+    /// Enable thin LTO.
+    pub lto: bool,
+    /// Optional sysroot path passed to clang.
+    pub sysroot: Option<String>,
+    /// PGO: generate profile data.
+    pub pgo_generate: bool,
+    /// PGO: use profile data from this path.
+    pub pgo_use: Option<String>,
+}
+
 pub fn run_clang(clang: &str, ll_path: &str, out_path: &str) -> Result<(), String> {
-    let status = Command::new(clang)
-        .arg("-Wno-override-module")
-        .arg(ll_path)
-        .arg("-o")
-        .arg(out_path)
-        .status()
-        .map_err(|e| e.to_string())?;
+    run_clang_with(clang, ll_path, out_path, &BuildOpts::default())
+}
+
+pub fn run_clang_with(
+    clang: &str,
+    ll_path: &str,
+    out_path: &str,
+    opts: &BuildOpts,
+) -> Result<(), String> {
+    let mut cmd = Command::new(clang);
+    cmd.arg("-Wno-override-module");
+    let o = opts.opt.min(3);
+    cmd.arg(format!("-O{}", o));
+    if opts.lto {
+        cmd.arg("-flto=thin");
+        cmd.arg("-fuse-ld=lld");
+    }
+    if let Some(s) = &opts.sysroot {
+        cmd.arg(format!("--sysroot={}", s));
+    }
+    if opts.pgo_generate {
+        cmd.arg("-fprofile-generate");
+    }
+    if let Some(p) = &opts.pgo_use {
+        cmd.arg(format!("-fprofile-use={}", p));
+    }
+    cmd.arg(ll_path).arg("-o").arg(out_path);
+    let status = cmd.status().map_err(|e| e.to_string())?;
     if status.success() {
         Ok(())
     } else {

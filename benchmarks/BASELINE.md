@@ -29,3 +29,7 @@ Caveats:
   `benchmarks/compiler_perf.md` for compiler-side timings.
 * Timer resolution and process startup dominate for small benchmarks; keep
   workloads ≥ ~10 ms.
+
+## Phase 8 baseline (optimization maturity)
+
+See `benchmarks/phase8_report.md` for the full comparison. MIR-level passes (const-fold, DCE, inlining) land via `--opt-level 1`. PGO/LTO available via `nx build --release` / `--lto` / `--pgo-generate` / `--pgo-use`. Compile-time numbers in `benchmarks/compiler_perf.md`.
