@@ -1209,6 +1209,47 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     ty: Ty::Str,
                 };
             }
+            if callee == "slice" {
+                if ha.len() != 3 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T044",
+                            format!(
+                                "slice expects 3 arguments (str, start, end), got {}",
+                                ha.len()
+                            ),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                if let Some(a0) = ha.first() {
+                    if !a0.ty().compatible(&Ty::Str) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T044",
+                                format!("slice expects Str, found {}", a0.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                }
+                for a in ha.iter().skip(1) {
+                    if !a.ty().compatible(&Ty::Int) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T044",
+                                format!("slice expects Int bounds, found {}", a.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: Ty::Str,
+                };
+            }
             if callee == "concat" {
                 if ha.len() != 2 {
                     ctx.diagnostics.push(

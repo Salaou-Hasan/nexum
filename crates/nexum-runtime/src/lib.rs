@@ -129,6 +129,11 @@ pub fn runtime_ir(msvc: bool) -> String {
         "define internal ptr @nexum_str_char_at(ptr %s, i64 %i) {\nentry:\n  %n = call i64 @strlen(ptr %s)\n  %neg = icmp slt i64 %i, 0\n  %oob = icmp sge i64 %i, %n\n  %bad = or i1 %neg, %oob\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %buf = call ptr @nexum_alloc(i64 1)\n  %srcp = getelementptr i8, ptr %s, i64 %i\n  %ch = load i8, ptr %srcp\n  store i8 %ch, ptr %buf\n  %nulp = getelementptr i8, ptr %buf, i64 1\n  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n\n",
     );
 
+    // String slicing: s[lo..hi] (lo inclusive, hi exclusive), NUL-terminated.
+    s.push_str(
+        "define internal ptr @nexum_slice(ptr %s, i64 %lo, i64 %hi) {\nentry:\n  %n = call i64 @strlen(ptr %s)\n  %neglo = icmp slt i64 %lo, 0\n  %neghi = icmp slt i64 %hi, 0\n  %hioob = icmp sgt i64 %hi, %n\n  %lohi = icmp sgt i64 %lo, %hi\n  %bad1 = or i1 %neglo, %neghi\n  %bad2 = or i1 %hioob, %lohi\n  %bad = or i1 %bad1, %bad2\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %len = sub i64 %hi, %lo\n  %n1 = add i64 %len, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  %srcp = getelementptr i8, ptr %s, i64 %lo\n  call ptr @memcpy(ptr %buf, ptr %srcp, i64 %len)\n  %nulp = getelementptr i8, ptr %buf, i64 %len\n  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n\n",
+    );
+
     // Live payload bytes (payload rounded up to 16, header excluded).
     s.push_str(
         "define internal i64 @nexum_heap_used() {\nentry:\n  %v = load i64, ptr @nexum_live\n  ret i64 %v\n}\n\n",

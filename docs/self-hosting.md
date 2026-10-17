@@ -14,7 +14,7 @@ language features that do not exist yet:
 2. **Standard library I/O** — file reading, directory traversal, process
    spawning. The bootstrap has no `io` module.
 3. **String indexing and slicing** — the lexer needs `src[i]` / substrings;
-   `Str` only supports `concat`, `len`, equality today.
+   `Str` supports `concat`, `len`, `==`, indexing, and `slice`. (Done)
 4. **Dynamic collections** — token streams, AST nodes, symbol tables need
    growable vectors; only fixed-size arrays exist.
 5. **Generics / traits** — AST nodes are a tagged union family; Nexum has

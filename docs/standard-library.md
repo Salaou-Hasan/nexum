@@ -14,6 +14,8 @@ are resolved by name.
 | `concat(a,b)`| `concat(a: Str, b: Str) -> Str` | Concatenate two strings on the managed heap.         |
 | `collect()` | `collect() -> Unit`        | Force a garbage collection.                              |
 | `heap_used()`| `heap_used() -> Int`      | Live payload bytes on the managed heap.                  |
+| `slice(s,lo,hi)` | `slice(s: Str, lo: Int, hi: Int) -> Str` | Substring `s[lo..hi]`. |
+| `str_char_at(s,i)` | `str_char_at(s: Str, i: Int) -> Str` | Single character at index `i`. |
 
 ## Planned (post-Phase 9)
 

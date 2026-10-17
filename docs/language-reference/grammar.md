@@ -228,6 +228,8 @@ access `.` < call.
 | T040 | `concat` arity/type error                      |
 | T041 | `collect` arity error                          |
 | T042 | `heap_used` arity error                        |
+| T043 | `str_char_at` arity/type error                 |
+| T044 | `slice` arity/type error                       |
 
 Parser codes: P001 unexpected token, P002 expected function name, P003 expected
 variable name, P004 unexpected statement/token, P006 expected field name after
