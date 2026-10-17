@@ -94,7 +94,8 @@ fn run_outputs_match_fixtures() {
     for f in files {
         let expected_path = f.with_extension("out");
         let expected = std::fs::read_to_string(&expected_path)
-            .unwrap_or_else(|e| panic!("missing {}: {e}", expected_path.display()));
+            .unwrap_or_else(|e| panic!("missing {}: {e}", expected_path.display()))
+            .replace("\r\n", "\n");
         let p = compile_file(&f);
         let errs = error_lines(&p.diagnostics);
         assert!(errs.is_empty(), "{}: {:?}", f.display(), errs);

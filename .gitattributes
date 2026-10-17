@@ -1,0 +1,15 @@
+* text=auto eol=lf
+*.exe binary
+*.o binary
+*.obj binary
+*.ll text eol=lf
+*.nx text eol=lf
+*.out text eol=lf
+*.exit text eol=lf
+*.md text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
