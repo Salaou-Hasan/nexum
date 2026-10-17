@@ -20,3 +20,6 @@ err.txt
 out.txt
 scratch*.nx
 *.out.tmp
+tmp.err
+tmp.ll
+tmp.o
