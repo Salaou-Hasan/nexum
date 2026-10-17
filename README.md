@@ -1,8 +1,8 @@
 # Nexum — Language Design & Implementation Blueprint (Bootstrap)
 
 Nexum is a statically typed, ahead-of-time compiled native language with a clean,
-data-oriented surface. This repository is the **bootstrap compiler** implementing
-Phase 0 (architecture spike) and Phases 1–3 of the design blueprint.
+data-oriented surface. This repository is the **bootstrap compiler** implementing Phases 0–9 of the
+design blueprint (Phase 10, optional self-hosting, is planned).
 
 ## Status
 
@@ -40,8 +40,9 @@ See `docs/language-reference/grammar.md` for the grammar draft,
 `docs/language-reference/decisions.md` for the decision record,
 `docs/runtime-abi.md` for the runtime ABI,
 `docs/package-format.md` for the package format,
-`docs/standard-library.md` for the standard library, and
-`docs/compatibility.md` for compatibility and migration rules.
+`docs/standard-library.md` for the standard library,
+`docs/compatibility.md` for compatibility and migration rules, and
+`docs/self-hosting.md` for the self-hosting roadmap.
 
 ## Build
 
