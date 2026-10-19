@@ -4,7 +4,7 @@
 //! before it does anything: the LLVM toolchain, the compiler with the file
 //! icon and the file association, and the editor extension.
 
-use nexum_toolchain::{clang_install_hint, clang_installed, find_program};
+use nexum_toolchain::{clang_install_hint, clang_installed, find_program, find_vscode};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -193,7 +193,7 @@ fn make_executable(_path: &Path) {}
 /// Install the editor extension.
 fn install_extension(tag: &str) -> bool {
     use std::process::Stdio;
-    let code = match find_program("code") {
+    let code = match find_vscode() {
         Some(c) => c,
         None => {
             note("Visual Studio Code was not found; the extension was not installed");
@@ -278,7 +278,7 @@ pub fn setup() {
 
     // The editor extension.
     step("checking the editor extension");
-    if find_program("code").is_some() {
+    if find_vscode().is_some() {
         note("Visual Studio Code is installed");
     } else {
         note("Visual Studio Code was not found.");
@@ -302,7 +302,7 @@ pub fn setup() {
                 }
                 // The installer puts the extension in place, but the portable
                 // install does not, so it is done here as well.
-                if find_program("code").is_some() {
+                if find_vscode().is_some() {
                     install_extension(&tag);
                 }
             } else {

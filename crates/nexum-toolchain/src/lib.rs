@@ -1,5 +1,6 @@
 //! Toolchain discovery (clang, linker).
 
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,89 @@ pub fn clang_installed() -> bool {
 /// Find a program on the PATH.
 pub fn find_program(name: &str) -> Option<String> {
     find_exe(name)
+}
+
+/// Find the Visual Studio Code command line.
+///
+/// It is not on the PATH by default: the installer puts it there, but a lot
+/// of setups do not, so the usual install locations are looked at as well.
+pub fn find_vscode() -> Option<String> {
+    if cfg!(target_os = "windows") {
+        // The command is a batch file. The extensionless `code` next to it is
+        // a shell script, which cannot be run here.
+        if let Some(code) = find_exe_any("code", &["cmd", "exe"]) {
+            return Some(code);
+        }
+        let mut candidates = Vec::new();
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            candidates.push(
+                PathBuf::from(&local)
+                    .join("Programs")
+                    .join("Microsoft VS Code")
+                    .join("bin")
+                    .join("code.cmd"),
+            );
+        }
+        for root in [
+            std::env::var("ProgramFiles").unwrap_or_default(),
+            std::env::var("ProgramFiles(x86)").unwrap_or_default(),
+        ] {
+            if root.is_empty() {
+                continue;
+            }
+            candidates.push(
+                PathBuf::from(root)
+                    .join("Microsoft VS Code")
+                    .join("bin")
+                    .join("code.cmd"),
+            );
+        }
+        candidates
+            .into_iter()
+            .find(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+    } else {
+        if let Some(code) = find_exe("code") {
+            return Some(code);
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        let candidates = if cfg!(target_os = "macos") {
+            vec![
+                PathBuf::from("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
+                PathBuf::from(
+                    "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/bin/code",
+                ),
+                PathBuf::from("/usr/local/bin/code"),
+                PathBuf::from("/usr/bin/code"),
+            ]
+        } else {
+            vec![
+                PathBuf::from("/usr/bin/code"),
+                PathBuf::from("/usr/share/code/code"),
+                PathBuf::from("/snap/bin/code"),
+                PathBuf::from(&home).join(".local/bin/code"),
+                PathBuf::from(&home).join("snap/code/current/usr/bin/code"),
+            ]
+        };
+        candidates
+            .into_iter()
+            .find(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+    }
+}
+
+/// Find a program on the PATH with one of the given file extensions.
+fn find_exe_any(name: &str, extensions: &[&str]) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for ext in extensions {
+            let cand = dir.join(format!("{name}.{ext}"));
+            if cand.exists() {
+                return Some(cand.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
 }
 
 /// How to install the LLVM toolchain on this platform.

@@ -464,6 +464,8 @@ fn update_windows(tag: &str) {
         // the developer is running as well.
         let asset = download_release_asset(tag, host_asset());
         replace_running_binary(&asset);
+        println!("note: the compiler is also installed in the standard location,");
+        println!("      so there are two copies; the one on your PATH is used.");
     }
 }
 
@@ -476,27 +478,44 @@ fn update_portable(tag: &str) {
 /// Install (or update) the editor extension.
 fn install_vscode_extension(vsix: &std::path::Path) {
     use std::process::Command;
-    let vsix = vsix.to_str().unwrap_or_default();
-    // On Windows `code` is a batch file, which cannot be executed directly:
-    // it has to go through the command interpreter.
-    let out = if cfg!(target_os = "windows") {
-        Command::new("cmd.exe")
-            .args(["/c", "code", "--install-extension", vsix, "--force"])
-            .output()
-    } else {
-        Command::new("code")
-            .args(["--install-extension", vsix, "--force"])
-            .output()
+    use std::process::Stdio;
+    // The `code` command is not on the PATH by default, so the usual install
+    // locations are looked at as well.
+    let code = match nexum_toolchain::find_vscode() {
+        Some(c) => c,
+        None => {
+            println!("note: Visual Studio Code was not found; the extension was not updated");
+            println!("      install it later with:");
+            println!("        code --install-extension nexum-language.vsix");
+            return;
+        }
     };
-    match out {
-        Ok(o) if o.status.success() => {
-            println!("editor extension updated");
-        }
-        _ => {
-            println!(
-                "note: the editor extension was not updated (is `code` on your PATH?)"
-            );
-        }
+    let vsix = vsix.to_str().unwrap_or_default();
+    // The extension installer prints its own progress and warnings, which
+    // only get in the way here.
+    let ok = if cfg!(target_os = "windows") {
+        Command::new("cmd.exe")
+            .args(["/c", &code, "--install-extension", vsix, "--force"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        Command::new(&code)
+            .args(["--install-extension", vsix, "--force"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if ok {
+        println!("editor extension updated");
+    } else {
+        println!("note: the editor extension could not be updated");
+        println!("      install it later with:");
+        println!("        code --install-extension nexum-language.vsix");
     }
 }
 
