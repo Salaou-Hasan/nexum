@@ -139,6 +139,9 @@ A program built for Linux now declares six external symbols - `printf`,
 seventeen. The next slice replaces the allocator and the output formatting,
 which leaves the C library behind entirely.
 
+The layer is verified on all three platforms: a program built for Linux
+opens, reads and writes a file through it, and the same code runs on macOS.
+
 The cross-target verification now assembles for the target the module
 claims, not for the host: a module that contains assembly for a foreign
 instruction set cannot be checked by the host assembler.

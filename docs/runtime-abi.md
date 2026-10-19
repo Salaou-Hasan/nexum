@@ -31,6 +31,46 @@ The Windows build needs its own system call stubs: its kernel interface
 lives behind `ntdll`, so the stubs have to be generated rather than
 assembled.
 
+### The system call layer
+
+The layer lives in `crates/nexum-runtime/src/syscalls.rs` and covers Linux
+and macOS on x86-64 and AArch64. The wrappers are inline assembly in the
+generated IR, and three details of it are worth writing down, because each
+of them is silent when it is wrong:
+
+* **The arguments are pinned to their registers.** The constraint string
+  names the register each argument goes in, so the assembly body never
+  refers to an operand by number. The numbering of the operands in an
+  assembly block counts the output as operand zero, and a mistake there
+  moves the wrong value into the wrong register without any diagnostic.
+* **The system call number is an immediate.** In AT&T syntax `movq 1, %rax`
+  reads the 64-bit value at the absolute address 1; an immediate needs the
+  sigil, and a literal dollar is written twice in an assembly block because
+  a single one starts an operand reference.
+* **The stack is aligned for the call.** The system call instruction wants
+  a 16-byte aligned stack, and a function without a frame is entered with
+  the stack at 8 modulo 16. The wrapper aligns it and restores it.
+
+The numbers themselves are per system, and they do not match:
+
+| Call | Linux | Darwin |
+| ---- | ----- | ------ |
+| `read` | 0 | 3 |
+| `write` | 1 | 4 |
+| `open` | 2 | 5 |
+| `close` | 3 | 6 |
+| `lseek` | 8 | 199 |
+| `mmap` | 9 | 197 |
+| `munmap` | 11 | 198 |
+| `exit` | 60 | 1 |
+
+The conventions differ as well: on x86-64 the number goes in `rax` and the
+arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`; on AArch64 the number
+goes in `x8` (Linux) or `x16` (Darwin) and the arguments in `x0` to `x5`,
+and the result comes back in `x0` - the same register the first argument
+went in, which is why the arguments are staged in `x9` to `x14` and moved
+into place. The instruction is `svc #0` on Linux and `svc #0x80` on Darwin.
+
 ## 1. Native (unmanaged) values
 
 These are values the compiler passes and stores by value. None of them
