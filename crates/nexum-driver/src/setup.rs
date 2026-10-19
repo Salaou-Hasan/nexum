@@ -16,8 +16,11 @@ fn ask(question: &str) -> bool {
     print!("  {question} [Y/n] ");
     let _ = std::io::stdout().flush();
     let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err() {
-        return false;
+    match std::io::stdin().read_line(&mut answer) {
+        // The input ended, so there is nobody to ask: skip the step.
+        Ok(0) => return false,
+        Ok(_) => {}
+        Err(_) => return false,
     }
     let answer = answer.trim().to_ascii_lowercase();
     answer.is_empty() || answer == "y" || answer == "yes"
