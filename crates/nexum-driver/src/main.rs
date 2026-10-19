@@ -323,7 +323,7 @@ fn update_nexum() {
         std::process::exit(1);
     }
     let _ = std::fs::remove_file(&old);
-    println!("updated to {} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â restart nx to use the new version", tag);
+    println!("updated to {} - restart nx to use the new version", tag);
 }
 
 fn format_nx(text: &str) -> Result<String, String> {
