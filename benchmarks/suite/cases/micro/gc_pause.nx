@@ -1,0 +1,33 @@
+# BENCH unit=ns-per-gc ops=30000 expect=4096 base=cases/micro/gc_pause_base.nx note="one collection of a 4096 byte live heap that stays reachable; the C twin reclaims the same dead object with free"
+#
+# The cost of a collected allocation: what does one collection cost?
+#
+# The live heap is 64 strings of 65 bytes that stay reachable through the
+# list, so the collector has a real live set to mark and not just a pile of
+# unreachable objects to sweep. Each iteration allocates one string, makes
+# it the live one and collects: the collection marks the 64 live strings
+# and frees the string the iteration replaced.
+#
+# The explicit collect() is the only collection in the measured window -
+# the runtime's watermark is 64 KiB and the window allocates far less than
+# that between two collections, so the number below is the cost of one
+# collection and not of an amortised mixture.
+
+fn main():
+    let live = list_new()
+    let mut i = 0
+    while i < 64:
+        list_push(live, concat("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef"))
+        i = i + 1
+    let mut j = 0
+    while j < 30000:
+        let tmp = concat("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef")
+        list_set(live, 0, tmp)
+        collect()
+        j = j + 1
+    let mut total = 0
+    let mut k = 0
+    while k < list_len(live):
+        total = total + len(list_get(live, k))
+        k = k + 1
+    print(total)

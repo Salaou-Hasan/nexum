@@ -1,0 +1,26 @@
+# BENCH unit=ns-per-alloc ops=4000000 expect=4000001 base=cases/micro/alloc_concat_base.nx note="one managed allocation of 65 bytes: two strlens, one allocation, two memcpys, and the amortised cost of the collector; the C twin does the same with malloc and free"
+#
+# The allocation cost claim: what does one managed allocation cost?
+#
+# concat is the cheapest managed allocation the language has: it is
+# exactly one allocation of the two strings' length plus one, and the
+# runtime copies the bytes into it. The result is kept in last, so the
+# previous string becomes garbage and the collector has something to
+# reclaim - the collector's watermark is 64 KiB, so it runs every 819
+# iterations, and its cost is part of what this case measures.
+#
+# The C twin allocates the same bytes with malloc and frees the previous
+# one, so the difference between the two programs is what the collector
+# costs on top of malloc and free.
+
+fn main():
+    let mut last = ""
+    let mut acc = 0
+    let mut i = 0
+    while i < 4000000:
+        last = concat("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef")
+        acc = acc + 1
+        i = i + 1
+    if last == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef":
+        acc = acc + 1
+    print(acc)

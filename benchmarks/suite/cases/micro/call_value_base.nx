@@ -1,0 +1,15 @@
+# BENCH unit=ns-per-call ops=10000000 expect=50000005000000 note="the paired baseline of call_value: the same array work, without the call"
+#
+# The same loop and the same array work as call_value, with the call
+# written out inline. The harness subtracts this program's median from
+# call_value's, so what is left is the cost of the call.
+
+fn main():
+    let mut acc = 0
+    let mut i = 0
+    while i < 10000000:
+        let mut a: [Int; 64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        a[i % 64] = i + 1
+        acc = acc + a[(i + 1) % 64] + i + 1
+        i = i + 1
+    print(acc)
