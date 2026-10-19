@@ -71,14 +71,17 @@ impl Syscalls {
                 open_mode: 0o644,
             },
             SysOs::Macos => Self {
-                read: 0,
+                // Darwin numbers its system calls from the BSD master table,
+                // and it does not match Linux: read is 3, exit is 1 and
+                // lseek is 199 here.
+                read: 3,
                 write: 4,
                 open: 5,
                 close: 6,
                 mmap: 197,
-                munmap: 199,
-                exit: 200,
-                lseek: 26,
+                munmap: 198,
+                exit: 1,
+                lseek: 199,
                 open_read: 0,
                 open_write: 1 | 512 | 1024,
                 open_mode: 0o644,
