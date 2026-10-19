@@ -91,4 +91,12 @@ jobs:
           for f in nx-* *.vsix; do
             [ -f "$f" ] && ASSETS="$ASSETS $f"
           done
-          gh release create ${{ github.ref_name }} $ASSETS --title "${{ github.ref_name }}" --notes "Nexum release ${{ github.ref_name }}"
+          TAG=${{ github.ref_name }}
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # The release already exists (the tag was re-pushed): refresh the
+            # assets instead of failing.
+            gh release upload "$TAG" $ASSETS --clobber
+            gh release edit "$TAG" --title "$TAG" --notes "Nexum release $TAG"
+          else
+            gh release create "$TAG" $ASSETS --title "$TAG" --notes "Nexum release $TAG"
+          fi
