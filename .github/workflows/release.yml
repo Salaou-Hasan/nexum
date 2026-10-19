@@ -138,7 +138,7 @@ jobs:
                    "$root/usr/share/applications" \
                    "$root/usr/share/mime/packages"
           install -m 0755 nx-linux-x86_64 "$root/usr/bin/nx"
-          install -m 0644 icon/icon.png "$root/usr/share/icons/hicolor/256x256/apps/nexum.png"
+          install -m 0644 icon/icon-256.png "$root/usr/share/icons/hicolor/256x256/apps/nexum.png"
           install -m 0644 nexum-language.vsix "$root/usr/share/nexum/nexum-language.vsix"
           sed "s/@VERSION@/$version/g" packaging/linux/nexum.desktop.in \
             > "$root/usr/share/applications/nexum.desktop"
