@@ -436,7 +436,16 @@ fn update_windows(tag: &str) {
         ])
         .status();
     if running_in_place {
-        let _ = std::fs::remove_file(current_exe.with_extension("old"));
+        // The old binary is still open by this process, so it is removed
+        // once it has exited.
+        let old = current_exe.with_extension("old");
+        let _ = Command::new("cmd.exe")
+            .args([
+                "/c",
+                "ping 127.0.0.1 -n 3 >nul & del /f /q",
+            ])
+            .arg(old.to_str().unwrap_or_default())
+            .spawn();
     }
     match status {
         Ok(s) if s.success() => {}
