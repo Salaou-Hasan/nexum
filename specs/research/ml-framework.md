@@ -513,9 +513,10 @@ into `nan` and the gradient into `nan`. `logsumexp` never underflows.
 ### 6.4 The optimisers
 
 **State.** SGD with momentum keeps one velocity buffer per parameter tensor.
-Adam keeps two (the first and second moment) plus the step counter. Because
-the parameters are `List[List[Float]]` - one entry per parameter tensor - the
-state is the same shape:
+Adam keeps two (the first and second moment) plus the step counter and the
+two running bias-correction powers. Because the parameters are
+`List[List[Float]]` - one entry per parameter tensor - the tensor state is
+the same shape:
 
 ```
 params: List[List[Float]]     # 2 entries per layer: the weights and the bias
@@ -524,6 +525,8 @@ vel:    List[List[Float]]     # SGD momentum
 m:      List[List[Float]]     # Adam, first moment
 v:      List[List[Float]]     # Adam, second moment
 ```
+
+and the scalar state is a record (see the Adam signature below).
 
 **SGD with momentum.**
 
@@ -537,15 +540,27 @@ fn sgd_momentum(params: List, pgrads: List, vel: List, lr: Float, mu: Float)
 **Adam.**
 
 ```
-fn adam(params: List, pgrads: List, m: List, v: List,
-        lr: Float, b1: Float, b2: Float, eps: Float, t: Int) -> Int
-    # t = t + 1
+type OptState:
+    t: Int
+    b1t: Float
+    b2t: Float
+
+fn adam(mut st: OptState, params: List, pgrads: List, m: List, v: List,
+        lr: Float, b1: Float, b2: Float, eps: Float)
+    # st.t = st.t + 1
+    # st.b1t = st.b1t * b1
+    # st.b2t = st.b2t * b2
     # m[pi][e] = b1 * m[pi][e] + (1 - b1) * g
     # v[pi][e] = b2 * v[pi][e] + (1 - b2) * g * g
-    # mhat = m[pi][e] / (1 - b1^t)
-    # vhat = v[pi][e] / (1 - b2^t)
+    # mhat = m[pi][e] / (1 - st.b1t)
+    # vhat = v[pi][e] / (1 - st.b2t)
     # params[pi][e] = params[pi][e] - lr * mhat / (sqrt(vhat) + eps)
 ```
+
+The scalar state lives in a record and the record is a `mut` parameter, so the
+callee's assignments are visible in the caller afterwards (D001) - the same
+mechanism the PRNG uses. The tensor state lives in `m` and `v`, which are
+updated in place through the shared list handles.
 
 Four details are not optional:
 
@@ -553,8 +568,9 @@ Four details are not optional:
   `sqrt(vhat + eps)`. The second form silently changes the update size for
   every parameter whose gradient is small, and it is a common bug.
 * **The bias correction needs `b1^t`.** Without a `pow` builtin, keep the
-  running power in the optimiser state and multiply by `b1` each step: `b1t
-  = b1t * b1`. It is O(1) and exact to the same accuracy as `pow`.
+  running power in the optimiser state and multiply by `b1` each step, which
+  is what `st.b1t` above is. It is O(1) per step and exact to the same
+  accuracy as `pow`.
 * **`sqrt` must be correctly rounded.** It is in the denominator of every
   Adam update, so a systematic bias in `sqrt` biases every parameter of the
   model in the same direction. This is the one builtin where "close enough"
