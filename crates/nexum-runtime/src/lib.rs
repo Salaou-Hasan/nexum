@@ -73,12 +73,10 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
         s.push_str("@nexum_mode_r = private unnamed_addr constant [3 x i8] c\"rb\\00\"\n");
         s.push_str("@nexum_mode_w = private unnamed_addr constant [3 x i8] c\"wb\\00\"\n\n");
     } else {
-        // On the POSIX targets the error stream is written to directly:
-        // macOS does not export `stderr` as a global, and the C library
-        // accessor for it differs between the systems.
-
         // The system call layer: the program reaches the kernel through it,
-        // and not through the C library.
+        // and not through the C library. The error stream is written to
+        // through it as well: macOS does not export `stderr` as a global,
+        // and the C library accessor for it differs between the systems.
         let sys_os = if os.contains("macos") {
             syscalls::SysOs::Macos
         } else {
@@ -90,8 +88,7 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
             syscalls::SysArch::X86_64
         };
         let numbers = syscalls::Syscalls::for_os(sys_os);
-        let conv = syscalls::convention(sys_os, sys_arch);
-        s.push_str(&syscalls::wrappers(conv, &numbers));
+        s.push_str(&syscalls::wrappers(sys_os, sys_arch, &numbers));
         s.push_str(&strings::file_routines(
             true,
             numbers.open_write,
