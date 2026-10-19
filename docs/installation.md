@@ -37,7 +37,7 @@ and installing Nexum never changes the icon theme you already have.
 To install it by hand, double-click the MSI, or:
 
 ```powershell
-msiexec /i Nexum-0.3.0-x64.msi
+msiexec /i Nexum-0.3.2-x64.msi
 ```
 
 ## Linux: the package
@@ -48,7 +48,7 @@ into `/usr/bin`, the icon into the icon theme directory, registers the
 Studio Code is installed.
 
 ```sh
-sudo dpkg -i nexum-0.3.0-amd64.deb
+sudo dpkg -i nexum-0.3.2-amd64.deb
 ```
 
 ## The portable binaries

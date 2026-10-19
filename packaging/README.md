@@ -9,7 +9,7 @@ WiX tool - the interface and the `PATH` handling are done with the core
 elements and two small scripts, so no WiX extension is required.
 
 ```sh
-wix build Package.wxs -d NexumVersion=0.3.0 -o Nexum-0.3.0-x64.msi
+wix build Package.wxs -d NexumVersion=0.3.2 -o Nexum-0.3.2-x64.msi
 ```
 
 The sources it expects next to it: `nx.exe`, `nexum.ico`,
