@@ -24,7 +24,8 @@ the missing pieces, and this is the order they have to arrive in.
 
 ### The runtime still leans on libc
 
-The generated program's runtime declares seventeen external symbols:
+When the programme started, the generated program's runtime declared
+seventeen external symbols:
 
 | Area | Symbols |
 | ---- | ------- |
@@ -34,6 +35,17 @@ The generated program's runtime declares seventeen external symbols:
 | strings | `strlen`, `memcpy`, `strcmp` |
 | raw POSIX | `write` |
 | files | `fopen`, `fclose`, `fseek`, `ftell`, `fread`, `fwrite` |
+
+The system call layer, the runtime's own string routines and the runtime's
+own file routines have taken ten of them away. A program built for Linux
+now *declares* six - `printf`, `fputs`, `fputc`, `exit`, `malloc` and
+`free` - and *depends* on four, because `fputs` and `fputc` are only
+called on the Windows panic path and the optimiser drops them. The count
+that matters is the one in the object file, and the gate
+`crates/nexum-driver/tests/freestanding.rs` pins it.
+
+What is left is the allocator and the output formatting, and phase 11a.2
+takes both away.
 
 So every program Nexum builds today is a C program with a Nexum front end.
 The collector allocates through `malloc`, prints through `printf`, and
@@ -73,7 +85,7 @@ reaches the filesystem through `fopen`.
 | **11e** | Concurrency: threads, atomics, a scheduler, channels. | Training and inference both want the cores. |
 | **11f** | SIMD and explicit layout: vectors, strides, intrinsics. | The difference between "works" and "fast". |
 | **11g** | The native linker: the program is linked by us, not by `clang`. | The last toolchain dependency in the build path. |
-| **11h** | The GPU path: a driver-native compute path (SPIR-V/Vulkan on the common case, Metal on Apple silicon). | The difference between a toy and a real model. |
+| **11h** | The GPU path: a driver-native compute path - the kernel's own ioctls, not Vulkan. | The difference between a toy and a real model. |
 | **11i** | The ML framework, now at full scale: `f32` tensors, autograd, layers, optimizers, BLAS-shaped kernels, data pipelines. | The thing this whole plan exists for. |
 | **11j** | The toolchain self-hosts: the compiler is written in Nexum. | The proof that the language is complete. |
 
@@ -136,7 +148,7 @@ Phase 11a is under way. The first slice is done:
 
 A program built for Linux now declares six external symbols - `printf`,
 `fputs`, `fputc`, `exit`, `malloc` and `free` - where it used to declare
-seventeen. The next slice replaces the allocator and the output formatting,
+four. The next slice replaces the allocator and the output formatting,
 which leaves the C library behind entirely.
 
 The layer is verified on all three platforms: a program built for Linux
