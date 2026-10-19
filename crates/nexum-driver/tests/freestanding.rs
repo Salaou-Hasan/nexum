@@ -24,12 +24,11 @@ fn external_symbols(target: &str) -> Vec<String> {
     let ir = nexum_codegen::emit(&mir, &spec);
     let mut out = Vec::new();
     for line in ir.lines() {
-        if let Some(rest) = line.strip_prefix("declare ") {
-            if let Some(open) = rest.find('(') {
-                if let Some(at) = rest[..open].find('@') {
-                    out.push(rest[at + 1..open].to_string());
-                }
-            }
+        if let Some(rest) = line.strip_prefix("declare ")
+            && let Some(open) = rest.find('(')
+            && let Some(at) = rest[..open].find('@')
+        {
+            out.push(rest[at + 1..open].to_string());
         }
     }
     out.sort();
