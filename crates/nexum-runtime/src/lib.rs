@@ -56,7 +56,10 @@ pub fn runtime_ir(msvc: bool) -> String {
         // `stderr` global only exists on non-Windows targets.
         s.push_str("declare ptr @__acrt_iob_func(i32)\n\n");
     } else {
-        s.push_str("@stderr = external global ptr\n\n");
+        // On the POSIX targets the error stream is written to directly:
+        // macOS does not export `stderr` as a global, and the C library
+        // accessor for it differs between the systems.
+        s.push_str("declare i64 @write(i32, ptr, i64)\n\n");
     }
 
     s.push_str("%nexum.root_frame = type { ptr, ptr, i64 }\n");
@@ -68,8 +71,9 @@ pub fn runtime_ir(msvc: bool) -> String {
     s.push_str("@nexum_threshold = internal global i64 65536, align 8\n");
     s.push_str("@nexum_msg_oom = private unnamed_addr constant [14 x i8] c\"out of memory\\00\"\n");
     s.push_str(
-        "@nexum_msg_oob = private unnamed_addr constant [20 x i8] c\"index out of bounds\\00\"\n\n",
+        "@nexum_msg_oob = private unnamed_addr constant [20 x i8] c\"index out of bounds\\00\"\n",
     );
+    s.push_str("@nexum_nl = private unnamed_addr constant [2 x i8] c\"\\0A\\00\"\n\n");
 
     // panic: message + newline to stderr, then exit 1.
     if msvc {
@@ -78,7 +82,7 @@ pub fn runtime_ir(msvc: bool) -> String {
         );
     } else {
         s.push_str(
-            "define internal void @nexum_panic(ptr %msg) {\n  %err = load ptr, ptr @stderr\n  %f = call i32 @fputs(ptr %msg, ptr %err)\n  %n = call i32 @fputc(i32 10, ptr %err)\n  call void @exit(i32 1)\n  unreachable\n}\n\n",
+            "define internal void @nexum_panic(ptr %msg) {\n  %len = call i64 @strlen(ptr %msg)\n  %w = call i64 @write(i32 2, ptr %msg, i64 %len)\n  %n = call i64 @write(i32 2, ptr @nexum_nl, i64 1)\n  call void @exit(i32 1)\n  unreachable\n}\n\n",
         );
     }
 
