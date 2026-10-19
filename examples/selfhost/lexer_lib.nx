@@ -134,9 +134,11 @@ fn single_char_kind(c: Str) -> Str:
 fn lex_tokens(src: Str) -> List:
     let n = len(src)
     let tokens = list_new()
-    # The indent stack is a fixed-size array: the depth is tracked separately,
-    # so no pop is needed.
-    let mut indents = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    # The indent stack is a list that only ever grows: the depth is tracked
+    # separately, so a dedent just moves the depth back and the value that
+    # is still there is the one that applies.
+    let indents = list_new()
+    list_push(indents, 0)
     let mut depth = 0
     let mut i = 0
     let mut line = 1
@@ -174,12 +176,19 @@ fn lex_tokens(src: Str) -> List:
                         line = line + 1
                 else:
                     let indent = j - i
-                    let cur = indents[depth]
+                    let cur = list_get(indents, depth)
                     if indent > cur:
                         depth = depth + 1
-                        indents[depth] = indent
+                        # A list cannot be popped, so the stack is kept in
+                        # sync by overwriting the value of the level that is
+                        # re-entered, and by growing the list only when a new
+                        # level is reached.
+                        if list_len(indents) > depth:
+                            list_set(indents, depth, indent)
+                        else:
+                            list_push(indents, indent)
                         list_push(tokens, Token("Indent", "", line))
-                    while indent < indents[depth]:
+                    while indent < list_get(indents, depth):
                         list_push(tokens, Token("Dedent", "", line))
                         depth = depth - 1
                     i = i + indent

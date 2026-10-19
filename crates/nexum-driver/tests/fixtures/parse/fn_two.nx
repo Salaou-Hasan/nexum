@@ -1,0 +1,5 @@
+fn one():
+    print(1)
+
+fn two():
+    print(2)

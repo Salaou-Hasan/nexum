@@ -1,0 +1,8 @@
+fn main():
+    let mut i = 0
+    while i < 2:
+        if i == 0:
+            print("zero")
+        else:
+            print("one")
+        i = i + 1

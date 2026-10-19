@@ -7,13 +7,14 @@
 #
 # The AST is a flat arena: a `List` of `Node` records whose children are
 # referenced by index, plus a side table for the child lists that have a
-# variable length (call arguments, array elements). A record cannot contain
-# itself, so a tree of records is not expressible; an arena with indices is,
-# and it is the data-oriented shape the spec prefers anyway.
+# variable length (call arguments, array elements, block statements). A
+# record cannot contain itself, so a tree of records is not expressible; an
+# arena with indices is, and it is the data-oriented shape the spec prefers
+# anyway.
 #
-# Scope: expressions. A program is a single expression statement, which is
-# what exercises the parts of a parser that are easy to get wrong -
-# precedence, associativity and postfix chains.
+# Scope: functions, `let`, assignment, expression statements, `return`,
+# `if`/`else`, `while`, `for`, record declarations, `import` and type
+# annotations. Path assignments (`a.b[i] = v`) are not parsed yet.
 
 import "lexer_lib.nx"
 
@@ -64,14 +65,11 @@ fn text_at(tokens: List, i: Int) -> Str:
     let t = list_get(tokens, i)
     return t.text
 
-# Layout tokens carry no meaning for an expression.
-fn is_layout(k: Str) -> Bool:
-    return k == "Newline" or k == "Indent" or k == "Dedent"
-
-fn skip_layout(tokens: List, mut pos: Int):
+# Skip the newlines between statements.
+fn skip_newlines(tokens: List, mut pos: Int):
     let mut more = true
     while more:
-        if is_layout(kind_at(tokens, pos)):
+        if kind_at(tokens, pos) == "Newline":
             pos = pos + 1
         else:
             more = false
@@ -122,7 +120,21 @@ fn mul_op(k: Str) -> Str:
         return "mod"
     return ""
 
-# --- the parser ---
+# The compound assignment operators.
+fn compound_op(k: Str) -> Str:
+    if k == "PlusEq":
+        return "add"
+    if k == "MinusEq":
+        return "sub"
+    if k == "StarEq":
+        return "mul"
+    if k == "SlashEq":
+        return "div"
+    if k == "PercentEq":
+        return "mod"
+    return ""
+
+# --- expressions ---
 
 fn parse_or(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
     let mut lhs = parse_and(nodes, extra, tokens, pos)
@@ -336,7 +348,292 @@ fn parse_primary(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
     pos = pos + 1
     return add_node(nodes, "var", "", 0, 0, 0)
 
+# --- types ---
+
+# A type expression: a name, or an array type `[T; N]`.
+fn parse_type(nodes: List, tokens: List, mut pos: Int) -> Int:
+    if kind_at(tokens, pos) == "LBracket":
+        pos = pos + 1
+        let elem = parse_type(nodes, tokens, pos)
+        if kind_at(tokens, pos) == "Semicolon":
+            pos = pos + 1
+        let mut size = "0"
+        if kind_at(tokens, pos) == "Int":
+            size = text_at(tokens, pos)
+            pos = pos + 1
+        if kind_at(tokens, pos) == "RBracket":
+            pos = pos + 1
+        return add_node(nodes, "array", size, elem, 0, 0)
+    let name = text_at(tokens, pos)
+    pos = pos + 1
+    return add_node(nodes, "named", name, 0, 0, 0)
+
+# --- statements ---
+
+# A block is the statements between an Indent and the matching Dedent. The
+# statements are collected in a local list so that they end up contiguous in
+# the side table. `ret_type` is the return type of the enclosing function,
+# or -1.
+fn parse_block(nodes: List, extra: List, tokens: List, mut pos: Int, ret_type: Int) -> Int:
+    skip_newlines(tokens, pos)
+    let mut stmts = list_new()
+    list_push(stmts, 0)
+    if kind_at(tokens, pos) != "Indent":
+        # A block that is not indented holds a single statement.
+        let s = parse_stmt(nodes, extra, tokens, pos)
+        if s >= 0:
+            list_push(stmts, s)
+    else:
+        pos = pos + 1
+        let mut more = true
+        while more:
+            skip_newlines(tokens, pos)
+            let k = kind_at(tokens, pos)
+            if k == "Dedent":
+                more = false
+            else:
+                if k == "Eof":
+                    more = false
+                else:
+                    let s = parse_stmt(nodes, extra, tokens, pos)
+                    if s >= 0:
+                        list_push(stmts, s)
+        if kind_at(tokens, pos) == "Dedent":
+            pos = pos + 1
+    let start = list_len(extra)
+    let mut count = 0
+    let mut i = 1
+    let total = list_len(stmts)
+    while i < total:
+        list_push(extra, list_get(stmts, i))
+        count = count + 1
+        i = i + 1
+    return add_node(nodes, "block", "", start, count, ret_type)
+
+fn parse_fn_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let name = text_at(tokens, pos)
+    pos = pos + 1
+    if kind_at(tokens, pos) == "LParen":
+        pos = pos + 1
+    let params = list_new()
+    list_push(params, 0)
+    let mut more = true
+    while more:
+        let k = kind_at(tokens, pos)
+        if k == "RParen":
+            more = false
+        else:
+            if k == "Eof":
+                more = false
+            else:
+                if k == "KwMut":
+                    pos = pos + 1
+                let pname = text_at(tokens, pos)
+                pos = pos + 1
+                let mut pty = -1
+                if kind_at(tokens, pos) == "Colon":
+                    pos = pos + 1
+                    pty = parse_type(nodes, tokens, pos)
+                list_push(params, add_node(nodes, "param", pname, pty, 0, 0))
+                if kind_at(tokens, pos) == "Comma":
+                    pos = pos + 1
+                else:
+                    more = false
+    if kind_at(tokens, pos) == "RParen":
+        pos = pos + 1
+    let mut ret = -1
+    if kind_at(tokens, pos) == "Arrow":
+        pos = pos + 1
+        ret = parse_type(nodes, tokens, pos)
+    if kind_at(tokens, pos) == "Colon":
+        pos = pos + 1
+    let body = parse_block(nodes, extra, tokens, pos, ret)
+    let start = list_len(extra)
+    let mut count = 0
+    let mut i = 1
+    let total = list_len(params)
+    while i < total:
+        list_push(extra, list_get(params, i))
+        count = count + 1
+        i = i + 1
+    return add_node(nodes, "fn", name, start, count, body)
+
+fn parse_let_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let mut kind = "let"
+    if kind_at(tokens, pos) == "KwMut":
+        pos = pos + 1
+        kind = "let-mut"
+    let name = text_at(tokens, pos)
+    pos = pos + 1
+    let name_node = add_node(nodes, "name", name, 0, 0, 0)
+    let mut ty = -1
+    if kind_at(tokens, pos) == "Colon":
+        pos = pos + 1
+        ty = parse_type(nodes, tokens, pos)
+    if kind_at(tokens, pos) == "Eq":
+        pos = pos + 1
+    let value = parse_or(nodes, extra, tokens, pos)
+    return add_node(nodes, kind, "", name_node, value, ty)
+
+fn parse_return_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let k = kind_at(tokens, pos)
+    let mut value = -1
+    if k == "Newline":
+        value = -1
+    else:
+        if k == "Dedent":
+            value = -1
+        else:
+            if k == "Eof":
+                value = -1
+            else:
+                value = parse_or(nodes, extra, tokens, pos)
+    return add_node(nodes, "return", "", value, 0, 0)
+
+fn parse_if_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let cond = parse_or(nodes, extra, tokens, pos)
+    if kind_at(tokens, pos) == "Colon":
+        pos = pos + 1
+    let then_block = parse_block(nodes, extra, tokens, pos, -1)
+    let mut else_block = -1
+    if kind_at(tokens, pos) == "KwElse":
+        pos = pos + 1
+        if kind_at(tokens, pos) == "Colon":
+            pos = pos + 1
+        else_block = parse_block(nodes, extra, tokens, pos, -1)
+    return add_node(nodes, "if", "", cond, then_block, else_block)
+
+fn parse_while_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let cond = parse_or(nodes, extra, tokens, pos)
+    if kind_at(tokens, pos) == "Colon":
+        pos = pos + 1
+    let body = parse_block(nodes, extra, tokens, pos, -1)
+    return add_node(nodes, "while", "", cond, body, 0)
+
+fn parse_for_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let var = text_at(tokens, pos)
+    pos = pos + 1
+    if kind_at(tokens, pos) == "KwIn":
+        pos = pos + 1
+    let first = parse_or(nodes, extra, tokens, pos)
+    let mut iter = add_node(nodes, "each", "", first, 0, 0)
+    if kind_at(tokens, pos) == "Range":
+        pos = pos + 1
+        let hi = parse_or(nodes, extra, tokens, pos)
+        iter = add_node(nodes, "range", "", first, hi, 0)
+    if kind_at(tokens, pos) == "Colon":
+        pos = pos + 1
+    let body = parse_block(nodes, extra, tokens, pos, -1)
+    return add_node(nodes, "for", var, iter, body, 0)
+
+# A record declaration: `type Name:` followed by the indented fields.
+fn parse_type_decl(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let name = text_at(tokens, pos)
+    pos = pos + 1
+    if kind_at(tokens, pos) == "Colon":
+        pos = pos + 1
+    let fields = list_new()
+    list_push(fields, 0)
+    skip_newlines(tokens, pos)
+    if kind_at(tokens, pos) == "Indent":
+        pos = pos + 1
+        let mut more = true
+        while more:
+            skip_newlines(tokens, pos)
+            let k = kind_at(tokens, pos)
+            if k == "Dedent":
+                more = false
+            else:
+                if k == "Eof":
+                    more = false
+                else:
+                    let fname = text_at(tokens, pos)
+                    pos = pos + 1
+                    let mut ty = -1
+                    if kind_at(tokens, pos) == "Colon":
+                        pos = pos + 1
+                        ty = parse_type(nodes, tokens, pos)
+                    list_push(fields, add_node(nodes, "field", fname, ty, 0, 0))
+        if kind_at(tokens, pos) == "Dedent":
+            pos = pos + 1
+    let start = list_len(extra)
+    let mut count = 0
+    let mut i = 1
+    let total = list_len(fields)
+    while i < total:
+        list_push(extra, list_get(fields, i))
+        count = count + 1
+        i = i + 1
+    return add_node(nodes, "type", name, start, count, 0)
+
+fn parse_import_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    let path = text_at(tokens, pos)
+    pos = pos + 1
+    return add_node(nodes, "import", path, 0, 0, 0)
+
+# An assignment starts with a name; the value follows the `=`.
+fn parse_assign_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let name = text_at(tokens, pos)
+    pos = pos + 1
+    let name_node = add_node(nodes, "name", name, 0, 0, 0)
+    let k = kind_at(tokens, pos)
+    let mut kind = "assign"
+    let mut op = ""
+    if k == "Eq":
+        op = ""
+    else:
+        op = compound_op(k)
+        kind = "assign-op"
+    pos = pos + 1
+    let value = parse_or(nodes, extra, tokens, pos)
+    return add_node(nodes, kind, op, name_node, value, 0)
+
+# A statement: one of the keyword forms, or an assignment, or an expression.
+fn parse_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let k = kind_at(tokens, pos)
+    if k == "KwFn":
+        return parse_fn_stmt(nodes, extra, tokens, pos)
+    if k == "KwLet":
+        return parse_let_stmt(nodes, extra, tokens, pos)
+    if k == "KwReturn":
+        return parse_return_stmt(nodes, extra, tokens, pos)
+    if k == "KwIf":
+        return parse_if_stmt(nodes, extra, tokens, pos)
+    if k == "KwWhile":
+        return parse_while_stmt(nodes, extra, tokens, pos)
+    if k == "KwFor":
+        return parse_for_stmt(nodes, extra, tokens, pos)
+    if k == "KwType":
+        return parse_type_decl(nodes, extra, tokens, pos)
+    if k == "KwImport":
+        return parse_import_stmt(nodes, extra, tokens, pos)
+    if k == "Ident":
+        # `name = value` and `name op= value` are assignments; anything else
+        # that starts with a name is an expression statement.
+        let k1 = kind_at(tokens, pos + 1)
+        if k1 == "Eq":
+            return parse_assign_stmt(nodes, extra, tokens, pos)
+        if compound_op(k1) != "":
+            return parse_assign_stmt(nodes, extra, tokens, pos)
+    let e = parse_or(nodes, extra, tokens, pos)
+    return add_node(nodes, "expr", "", e, 0, 0)
+
 # --- the normalized form ---
+
+fn print_statements(nodes: List, extra: List, start: Int, count: Int, depth: Int):
+    let mut i = 0
+    while i < count:
+        let child = list_get(extra, start + i)
+        print_node(nodes, extra, child, depth)
+        i = i + 1
 
 fn print_node(nodes: List, extra: List, idx: Int, depth: Int):
     let n = list_get(nodes, idx)
@@ -345,40 +642,126 @@ fn print_node(nodes: List, extra: List, idx: Int, depth: Int):
         print(concat(concat(pad, "binop "), n.text))
         print_node(nodes, extra, n.a, depth + 2)
         print_node(nodes, extra, n.b, depth + 2)
-    else:
-        if n.kind == "unop":
-            print(concat(concat(pad, "unop "), n.text))
+        return
+    if n.kind == "unop":
+        print(concat(concat(pad, "unop "), n.text))
+        print_node(nodes, extra, n.a, depth + 2)
+        return
+    if n.kind == "call":
+        print(concat(concat(pad, "call "), n.text))
+        print_statements(nodes, extra, n.a, n.b, depth + 2)
+        return
+    if n.kind == "field":
+        print(concat(concat(pad, "field "), n.text))
+        print_node(nodes, extra, n.a, depth + 2)
+        return
+    if n.kind == "index":
+        print(concat(pad, "index"))
+        print_node(nodes, extra, n.a, depth + 2)
+        print_node(nodes, extra, n.b, depth + 2)
+        return
+    if n.kind == "array":
+        if n.text == "":
+            # An array literal: the children are the elements.
+            print(concat(pad, "array"))
+            print_statements(nodes, extra, n.a, n.b, depth + 2)
+            return
+        # An array type: the child is the element type.
+        print(concat(concat(pad, "array "), n.text))
+        print_node(nodes, extra, n.a, depth + 2)
+        return
+    if n.kind == "str":
+        print(concat(concat(pad, "str "), escape(n.text)))
+        return
+    if n.kind == "named":
+        print(concat(concat(pad, "named "), n.text))
+        return
+    if n.kind == "fn":
+        print(concat(concat(pad, "fn "), n.text))
+        print_statements(nodes, extra, n.a, n.b, depth + 2)
+        let body = list_get(nodes, n.c)
+        if body.c >= 0:
+            print(concat(spaces(depth + 2), "return-type"))
+            print_node(nodes, extra, body.c, depth + 4)
+        print_statements(nodes, extra, body.a, body.b, depth + 2)
+        return
+    if n.kind == "param":
+        print(concat(concat(pad, "param "), n.text))
+        if n.a >= 0:
+            print(concat(pad, "param-type"))
             print_node(nodes, extra, n.a, depth + 2)
-        else:
-            if n.kind == "call":
-                print(concat(concat(pad, "call "), n.text))
-                let mut i = 0
-                while i < n.b:
-                    let child = list_get(extra, n.a + i)
-                    print_node(nodes, extra, child, depth + 2)
-                    i = i + 1
-            else:
-                if n.kind == "field":
-                    print(concat(concat(pad, "field "), n.text))
-                    print_node(nodes, extra, n.a, depth + 2)
-                else:
-                    if n.kind == "index":
-                        print(concat(pad, "index"))
-                        print_node(nodes, extra, n.a, depth + 2)
-                        print_node(nodes, extra, n.b, depth + 2)
-                    else:
-                        if n.kind == "array":
-                            print(concat(pad, "array"))
-                            let mut i = 0
-                            while i < n.b:
-                                let child = list_get(extra, n.a + i)
-                                print_node(nodes, extra, child, depth + 2)
-                                i = i + 1
-                        else:
-                            if n.kind == "str":
-                                print(concat(concat(pad, "str "), escape(n.text)))
-                            else:
-                                print(concat(concat(pad, n.kind), concat(" ", n.text)))
+        return
+    if n.kind == "let" or n.kind == "let-mut":
+        print(concat(pad, n.kind))
+        print_node(nodes, extra, n.a, depth + 2)
+        if n.c >= 0:
+            print(concat(spaces(depth + 2), "let-type"))
+            print_node(nodes, extra, n.c, depth + 4)
+        print_node(nodes, extra, n.b, depth + 2)
+        return
+    if n.kind == "assign":
+        print(concat(pad, "assign"))
+        print_node(nodes, extra, n.a, depth + 2)
+        print_node(nodes, extra, n.b, depth + 2)
+        return
+    if n.kind == "assign-op":
+        print(concat(concat(pad, "assign-op "), n.text))
+        print_node(nodes, extra, n.a, depth + 2)
+        print_node(nodes, extra, n.b, depth + 2)
+        return
+    if n.kind == "expr":
+        print(concat(pad, "expr"))
+        print_node(nodes, extra, n.a, depth + 2)
+        return
+    if n.kind == "return":
+        print(concat(pad, "return"))
+        if n.a >= 0:
+            print_node(nodes, extra, n.a, depth + 2)
+        return
+    if n.kind == "if":
+        print(concat(pad, "if"))
+        print_node(nodes, extra, n.a, depth + 2)
+        let then_block = list_get(nodes, n.b)
+        print(concat(spaces(depth + 2), "then"))
+        print_statements(nodes, extra, then_block.a, then_block.b, depth + 4)
+        if n.c >= 0:
+            let else_block = list_get(nodes, n.c)
+            print(concat(spaces(depth + 2), "else"))
+            print_statements(nodes, extra, else_block.a, else_block.b, depth + 4)
+        return
+    if n.kind == "while":
+        print(concat(pad, "while"))
+        print_node(nodes, extra, n.a, depth + 2)
+        let body = list_get(nodes, n.b)
+        print_statements(nodes, extra, body.a, body.b, depth + 2)
+        return
+    if n.kind == "for":
+        print(concat(concat(pad, "for "), n.text))
+        print_node(nodes, extra, n.a, depth + 2)
+        let body = list_get(nodes, n.b)
+        print_statements(nodes, extra, body.a, body.b, depth + 2)
+        return
+    if n.kind == "range":
+        print(concat(pad, "range"))
+        print_node(nodes, extra, n.a, depth + 2)
+        print_node(nodes, extra, n.b, depth + 2)
+        return
+    if n.kind == "each":
+        print(concat(pad, "each"))
+        print_node(nodes, extra, n.a, depth + 2)
+        return
+    if n.kind == "type":
+        print(concat(concat(pad, "type "), n.text))
+        print_statements(nodes, extra, n.a, n.b, depth + 2)
+        return
+    if n.kind == "name":
+        print(concat(concat(pad, "name "), n.text))
+        return
+    if n.kind == "import":
+        print(concat(concat(pad, "import "), n.text))
+        return
+    # The default: the kind and its text.
+    print(concat(concat(pad, n.kind), concat(" ", n.text)))
 
 fn main():
     let src = read_file("nexum_selfhost_input.nx")
@@ -391,7 +774,28 @@ fn main():
     let extra = list_new()
     list_push(extra, 0)
     let mut pos = 0
-    skip_layout(tokens, pos)
-    let root = parse_or(nodes, extra, tokens, pos)
-    print("expr")
-    print_node(nodes, extra, root, 2)
+    # The module is a list of statements.
+    let stmts = list_new()
+    list_push(stmts, 0)
+    let mut more = true
+    while more:
+        skip_newlines(tokens, pos)
+        let k = kind_at(tokens, pos)
+        if k == "Eof":
+            more = false
+        else:
+            if k == "Dedent":
+                pos = pos + 1
+            else:
+                let s = parse_stmt(nodes, extra, tokens, pos)
+                if s >= 0:
+                    list_push(stmts, s)
+    let start = list_len(extra)
+    let mut count = 0
+    let mut i = 1
+    let total = list_len(stmts)
+    while i < total:
+        list_push(extra, list_get(stmts, i))
+        count = count + 1
+        i = i + 1
+    print_statements(nodes, extra, start, count, 0)

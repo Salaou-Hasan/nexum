@@ -1,0 +1,39 @@
+# Deeply nested blocks. The indentation rules are what the lexer's indent
+# stack has to get right: a block that is left and re-entered at the same
+# level must not be mistaken for a new level.
+
+fn classify(value: Int) -> Str:
+    let mut n = value
+    let mut depth = 0
+    let mut out = ""
+    while n > 0:
+        if n % 2 == 0:
+            if n % 3 == 0:
+                if n % 5 == 0:
+                    if n % 7 == 0:
+                        if n % 11 == 0:
+                            depth = depth + 1
+                            out = concat(out, "eleven")
+                        else:
+                            depth = depth + 1
+                            out = concat(out, "not-eleven")
+                    else:
+                        depth = depth + 1
+                        out = concat(out, "not-seven")
+                else:
+                    depth = depth + 1
+                    out = concat(out, "not-five")
+            else:
+                depth = depth + 1
+                out = concat(out, "not-three")
+        else:
+            depth = depth + 1
+            out = concat(out, "odd")
+        n = n - 1
+    print(depth)
+    print(out)
+    return out
+
+fn main():
+    print(classify(7))
+    print(classify(100))

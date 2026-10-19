@@ -1,0 +1,2 @@
+fn scale(v, f):
+    return v * f
