@@ -142,6 +142,8 @@ jobs:
           install -m 0644 nexum-language.vsix "$root/usr/share/nexum/nexum-language.vsix"
           sed "s/@VERSION@/$version/g" packaging/linux/nexum.desktop.in \
             > "$root/usr/share/applications/nexum.desktop"
+          install -m 0644 packaging/linux/nexum.xml.in \
+            "$root/usr/share/mime/packages/nexum.xml"
           sed "s/@VERSION@/$version/g" packaging/linux/control.in > "$root/DEBIAN/control"
           sed "s/@VERSION@/$version/g" packaging/linux/postinst.in > "$root/DEBIAN/postinst"
           chmod 0755 "$root/DEBIAN/postinst"

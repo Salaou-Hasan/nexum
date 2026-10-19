@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="text/x-nexum">
+    <comment>Nexum source file</comment>
+    <glob pattern="*.nx"/>
+    <icon name="nexum"/>
+    <generic-icon name="text-x-generic"/>
+  </mime-type>
+</mime-info>
