@@ -290,3 +290,96 @@ pub fn wrappers(os: SysOs, arch: SysArch, sys: &Syscalls) -> String {
     push("exit", sys.exit, &[arg(0, "%a0")]);
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two systems number their calls differently, and a wrong number is
+    /// silent: the call reaches the kernel as a different one.
+    #[test]
+    fn the_numbers_are_per_system() {
+        let linux = Syscalls::for_os(SysOs::Linux);
+        assert_eq!(linux.read, 0);
+        assert_eq!(linux.write, 1);
+        assert_eq!(linux.open, 2);
+        assert_eq!(linux.close, 3);
+        assert_eq!(linux.lseek, 8);
+        assert_eq!(linux.exit, 60);
+
+        let darwin = Syscalls::for_os(SysOs::Macos);
+        assert_eq!(darwin.read, 3);
+        assert_eq!(darwin.write, 4);
+        assert_eq!(darwin.open, 5);
+        assert_eq!(darwin.close, 6);
+        assert_eq!(darwin.lseek, 199);
+        assert_eq!(darwin.exit, 1);
+    }
+
+    /// In AT&T syntax `movq 1, %rax` reads the 64-bit value at the address
+    /// 1; an immediate needs the sigil, and a literal dollar is written twice
+    /// because a single one starts an operand reference.
+    #[test]
+    fn the_number_is_an_immediate() {
+        let linux = Syscalls::for_os(SysOs::Linux);
+        let ir = wrappers(SysOs::Linux, SysArch::X86_64, &linux);
+        assert!(ir.contains("movq $$0, %rax"), "{ir}");
+        assert!(ir.contains("movq $$2, %rax"), "{ir}");
+        assert!(!ir.contains("movq 0, %rax"), "{ir}");
+        assert!(!ir.contains("movq 2, %rax"), "{ir}");
+    }
+
+    /// The stack is aligned for the call and restored afterwards.
+    #[test]
+    fn the_stack_is_aligned_for_the_call() {
+        let linux = Syscalls::for_os(SysOs::Linux);
+        let ir = wrappers(SysOs::Linux, SysArch::X86_64, &linux);
+        assert!(ir.contains("and $$-16, %rsp"), "{ir}");
+        assert!(ir.contains("mov %r12, %rsp"), "{ir}");
+    }
+
+    /// The arguments are pinned to their registers, so the body never
+    /// refers to an operand by number: the numbering counts the output as
+    /// operand zero.
+    #[test]
+    fn the_arguments_are_pinned_to_their_registers() {
+        let linux = Syscalls::for_os(SysOs::Linux);
+        let ir = wrappers(SysOs::Linux, SysArch::X86_64, &linux);
+        assert!(ir.contains("\"={rax},{rdi},{rsi},{rdx}"), "{ir}");
+        assert!(!has_operand_reference(&ir), "{ir}");
+    }
+
+    /// A dollar that is not doubled is an operand reference. The immediates
+    /// in the assembly text are written `$$1` and the like.
+    fn has_operand_reference(ir: &str) -> bool {
+        let bytes = ir.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'$' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+                    i += 2;
+                    continue;
+                }
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// AArch64 takes the first argument in the register the result comes
+    /// back in, so the arguments are staged elsewhere and moved into place.
+    #[test]
+    fn aarch64_stages_its_arguments() {
+        let linux = Syscalls::for_os(SysOs::Linux);
+        let ir = wrappers(SysOs::Linux, SysArch::Aarch64, &linux);
+        assert!(ir.contains("\"={x0},{x9},{x10},{x11}"), "{ir}");
+        assert!(ir.contains("mov x0, x9"), "{ir}");
+        assert!(ir.contains("svc #0"), "{ir}");
+
+        let darwin = Syscalls::for_os(SysOs::Macos);
+        let ir = wrappers(SysOs::Macos, SysArch::Aarch64, &darwin);
+        assert!(ir.contains("mov x16, #"), "{ir}");
+        assert!(ir.contains("svc #0x80"), "{ir}");
+    }
+}
