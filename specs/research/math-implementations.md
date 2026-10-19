@@ -94,9 +94,9 @@ disguise (measured, see below).
 ## What the code looks like today
 
 * The runtime is emitted as LLVM IR text by
-  `crates/nexum-runtime/src/lib.rs:46` (`runtime_ir(os, arch)`), which
+  `crates/nexum-runtime/src/lib.rs:50` (`runtime_ir(os, arch)`), which
   concatenates a few string constants: the declarations of the C-library
-  symbols the program still uses (`crates/nexum-runtime/src/lib.rs:49`:
+  symbols the program still uses (`crates/nexum-runtime/src/lib.rs:53`:
   `printf`, `fputs`, `fputc`, `exit`, `malloc`, `free`), the string routines
   (`crates/nexum-runtime/src/strings.rs:11`), the file routines
   (`crates/nexum-runtime/src/strings.rs:33`) and the system call layer
@@ -113,10 +113,10 @@ disguise (measured, see below).
   than taken from `libm`", and says why — "it needs the math functions to be
   ours so that the results do not depend on the C library's version".
 * The roadmap names the five functions the language is missing:
-  `docs/native-roadmap.md:49` — "no `sqrt`, `exp`, `log`, `tanh`, `erf` — no
+  `docs/native-roadmap.md:60` — "no `sqrt`, `exp`, `log`, `tanh`, `erf` — no
   math at all beyond `+ - * / %`". Phase 11a owns "our own … math and I/O
-  routines" (`docs/native-roadmap.md:69`) and phase 11c owns "the math
-  builtins (implemented by us, not libm)" (`docs/native-roadmap.md:71`).
+  routines" (`docs/native-roadmap.md:81`) and phase 11c owns "the math
+  builtins (implemented by us, not libm)" (`docs/native-roadmap.md:83`).
 * The standard library doc already reserves a `math` module for
   "trigonometry, rounding, constants" (`docs/standard-library.md:50`).
 * The target table (`crates/nexum-target/src/lib.rs:47` and `:53`) gives
@@ -124,8 +124,8 @@ disguise (measured, see below).
   with **no `-march`/`-mcpu`**, so x86-64 is the SSE2 baseline. This matters
   for FMA (see below).
 * The link step still calls `clang`
-  (`crates/nexum-toolchain/src/lib.rs:174`); the IR is handed to it as a
-  file (`crates/nexum-toolchain/src/lib.rs:221` verifies a module by
+  (`crates/nexum-toolchain/src/lib.rs:177`); the IR is handed to it as a
+  file (`crates/nexum-toolchain/src/lib.rs:229` verifies a module by
   compiling it).
 
 ## The design
