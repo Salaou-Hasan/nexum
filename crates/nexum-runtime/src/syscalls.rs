@@ -203,7 +203,8 @@ fn call_body(conv: Convention, nr: i64, args: &[Arg]) -> String {
         // The value comes from the operand, which the constraint has placed
         // in the staging register; a constant is materialised there.
         let value = match arg.source {
-            Some(_) => format!("${}", i),
+            // The output is operand 0, so the arguments start at 1.
+            Some(_) => format!("${}", i + 1),
             None => match conv {
                 Convention::LinuxX86_64 | Convention::DarwinX86_64 => {
                     format!("{}", arg.constant)
@@ -243,9 +244,7 @@ fn call_body(conv: Convention, nr: i64, args: &[Arg]) -> String {
     // The text of an assembly block is one line: the newlines are escapes,
     // and a literal percent sign is doubled.
     let text = match conv {
-        Convention::LinuxX86_64 | Convention::DarwinX86_64 => {
-            text.replace('\n', "\\0A")
-        }
+        Convention::LinuxX86_64 | Convention::DarwinX86_64 => text.replace('\n', "\\0A"),
         Convention::LinuxAarch64 | Convention::DarwinAarch64 => text.replace('\n', "\\0A"),
     };
     format!(
