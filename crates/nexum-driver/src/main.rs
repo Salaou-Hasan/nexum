@@ -1138,7 +1138,7 @@ fn build_file(file: &Path, output: Option<PathBuf>, opt_level: u8) -> Result<(),
     });
     let ll_path = std::env::temp_dir().join("nexum_out.ll");
     fs::write(&ll_path, ir).map_err(|e| e.to_string())?;
-    nexum_toolchain::verify_ir(&tc.clang, ll_path.to_str().unwrap())?;
+    nexum_toolchain::verify_ir_for(&tc.clang, ll_path.to_str().unwrap(), Some(&target.triple))?;
     nexum_toolchain::run_clang_with(
         &tc.clang,
         ll_path.to_str().unwrap(),
@@ -1164,7 +1164,7 @@ fn build_to(file: &Path, exe: &Path, opt_level: u8) -> Result<(), String> {
     let ir = nexum_codegen::emit(&mir, &target);
     let ll_path = std::env::temp_dir().join("nexum_out.ll");
     fs::write(&ll_path, ir).map_err(|e| e.to_string())?;
-    nexum_toolchain::verify_ir(&tc.clang, ll_path.to_str().unwrap())?;
+    nexum_toolchain::verify_ir_for(&tc.clang, ll_path.to_str().unwrap(), Some(&target.triple))?;
     nexum_toolchain::run_clang_with(
         &tc.clang,
         ll_path.to_str().unwrap(),

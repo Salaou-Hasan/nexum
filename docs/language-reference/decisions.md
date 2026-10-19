@@ -174,3 +174,69 @@ iteration.
   is invariant under whether `xs` is a variable, a parameter or an expression.
 * Open: a `mut` iteration form (iterating in place over elements of a mutable
   binding) can be added later without changing this rule's meaning.
+
+## D012 - The runtime is freestanding: no libc (decided)
+
+A program built by Nexum depends on the kernel and on nothing else. The
+runtime does not link the C library: the string routines, the file routines
+and the system call layer are part of the runtime.
+
+* Rationale: "full control over every single thing in the hardware" is not
+  reachable while the allocator, the string handling and the system calls
+  are somebody else's. It is also the shortest path to the work Nexum is
+  aimed at now: the systems work and the model framework both need an
+  allocator and a math library that are ours.
+* Status: the POSIX targets are freestanding for the file routines and the
+  string routines; the allocator and the output formatting still use the C
+  library, and are phase 11a.2. The Windows build still uses the C library
+  throughout, because Windows has no direct system call instruction: its
+  kernel interface lives behind `ntdll`, and generating our own stubs for it
+  is phase 11a.2 as well.
+* Consequences: the toolchain may still use Rust and LLVM. That is the
+  compiler's business, not the language's.
+
+## D013 - The operating system is reached through inline assembly (decided)
+
+The system call layer is written as inline assembly in the generated LLVM
+IR: the number goes in the register the ABI uses, the arguments are pinned
+to the registers the instruction reads them from, and the result comes back
+in the register the ABI returns it in.
+
+* Rationale: a C binding would be a C dependency, and the assembly is
+  where the control actually is - the register allocation, the calling
+  convention and the error convention are all visible in it.
+* Status: implemented for Linux and macOS on x86-64 and AArch64.
+
+## D014 - Inline assembly is a first-class language feature (decided, staged)
+
+A Nexum program can write assembly inline, so that it can reach what the
+language does not model: device registers, privileged instructions, the
+system call interface itself.
+
+* Rationale: the runtime needs it, and if the runtime needs it, the
+  language needs it - otherwise the parts of the machine the language cannot
+  reach are exactly the parts a systems program needs.
+* Status: the language surface is phase 11b. The runtime already uses the
+  mechanism it will be built on.
+
+## D015 - The numeric tower is f32 and f64 (decided, staged)
+
+`Float` is `f64` today. The tower grows to `f32` and `f64` with the
+arithmetic semantics spelled out per operation, and the math builtins
+implemented by us rather than taken from `libm`.
+
+* Rationale: a model framework needs `f32` for the memory traffic and the
+  vector width, and it needs the math functions to be ours so that the
+  results do not depend on the C library's version.
+* Status: phase 11c.
+
+## D016 - The program is linked by the Nexum toolchain (decided, staged)
+
+The generated program is linked by the Nexum toolchain, not by `clang`.
+The compiler may still be written in Rust and use LLVM's libraries; that is
+the toolchain's business.
+
+* Rationale: the last place a program depends on somebody else's build
+  system is the link step, and it is the step that decides the ABI and the
+  layout of the binary.
+* Status: phase 11g. Until then the toolchain calls `clang` to link.

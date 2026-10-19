@@ -1575,7 +1575,7 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                         // Runtime length of a (possibly heap-allocated)
                         // string: lowered to a `strlen` runtime call.
                         return HirExpr::Call {
-                            callee: "strlen".to_string(),
+                            callee: "nexum_strlen".to_string(),
                             args: ha,
                             ty: Ty::Int,
                         };

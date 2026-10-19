@@ -40,26 +40,66 @@
 //! scanned conservatively. A collection runs only inside an allocation when
 //! the watermark is exceeded, or when a program calls the `collect()` builtin.
 
-pub fn runtime_ir(msvc: bool) -> String {
+pub mod strings;
+pub mod syscalls;
+
+pub fn runtime_ir(os: &str, arch: &str) -> String {
     let mut s = String::new();
+    let msvc = os.contains("windows");
     s.push_str("declare i32 @printf(ptr, ...)\n");
     s.push_str("declare i32 @fputs(ptr, ptr)\n");
     s.push_str("declare i32 @fputc(i32, ptr)\n");
     s.push_str("declare void @exit(i32)\n");
     s.push_str("declare ptr @malloc(i64)\n");
     s.push_str("declare void @free(ptr)\n");
-    s.push_str("declare i64 @strlen(ptr)\n");
-    s.push_str("declare ptr @memcpy(ptr, ptr, i64)\n");
-    s.push_str("declare i32 @strcmp(ptr, ptr)\n");
+
+    // The string routines are ours on every platform: a program should not
+    // need the C library for a byte copy.
+    s.push_str(&strings::string_routines());
+
     if msvc {
         // The UCRT exposes stdio streams through __acrt_iob_func; the classic
         // `stderr` global only exists on non-Windows targets.
         s.push_str("declare ptr @__acrt_iob_func(i32)\n\n");
+        // Windows has no direct system call instruction: its kernel
+        // interface lives behind ntdll. The file routines still go through
+        // the C library until the system call stubs exist (phase 11a.2).
+        s.push_str("declare ptr @fopen(ptr, ptr)\n");
+        s.push_str("declare i32 @fclose(ptr)\n");
+        s.push_str("declare i32 @fseek(ptr, i64, i32)\n");
+        s.push_str("declare i64 @ftell(ptr)\n");
+        s.push_str("declare i64 @fread(ptr, i64, i64, ptr)\n");
+        s.push_str("declare i64 @fwrite(ptr, i64, i64, ptr)\n\n");
+        s.push_str("@nexum_mode_r = private unnamed_addr constant [3 x i8] c\"rb\\00\"\n");
+        s.push_str("@nexum_mode_w = private unnamed_addr constant [3 x i8] c\"wb\\00\"\n\n");
     } else {
         // On the POSIX targets the error stream is written to directly:
         // macOS does not export `stderr` as a global, and the C library
         // accessor for it differs between the systems.
-        s.push_str("declare i64 @write(i32, ptr, i64)\n\n");
+
+        // The system call layer: the program reaches the kernel through it,
+        // and not through the C library.
+        let sys_os = if os.contains("macos") {
+            syscalls::SysOs::Macos
+        } else {
+            syscalls::SysOs::Linux
+        };
+        let sys_arch = if arch.contains("aarch64") {
+            syscalls::SysArch::Aarch64
+        } else {
+            syscalls::SysArch::X86_64
+        };
+        let numbers = syscalls::Syscalls::for_os(sys_os);
+        let conv = syscalls::convention(sys_os, sys_arch);
+        s.push_str(&syscalls::wrappers(conv, &numbers));
+        s.push_str(&strings::file_routines(
+            true,
+            numbers.open_write,
+            numbers.open_mode,
+        ));
+    }
+    if msvc {
+        s.push_str(&strings::file_routines(false, 0, 0));
     }
 
     s.push_str("%nexum.root_frame = type { ptr, ptr, i64 }\n");
@@ -82,7 +122,7 @@ pub fn runtime_ir(msvc: bool) -> String {
         );
     } else {
         s.push_str(
-            "define internal void @nexum_panic(ptr %msg) {\n  %len = call i64 @strlen(ptr %msg)\n  %w = call i64 @write(i32 2, ptr %msg, i64 %len)\n  %n = call i64 @write(i32 2, ptr @nexum_nl, i64 1)\n  call void @exit(i32 1)\n  unreachable\n}\n\n",
+            "define internal void @nexum_panic(ptr %msg) {\n  %len = call i64 @nexum_strlen(ptr %msg)\n  %w = call i64 @nexum_sys_write(i64 2, ptr %msg, i64 %len)\n  %n = call i64 @nexum_sys_write(i64 2, ptr @nexum_nl, i64 1)\n  call void @exit(i32 1)\n  unreachable\n}\n\n",
         );
     }
 
@@ -149,38 +189,23 @@ pub fn runtime_ir(msvc: bool) -> String {
 
     // String concatenation: fresh NUL-terminated buffer on the managed heap.
     s.push_str(
-        "define internal ptr @nexum_concat(ptr %a, ptr %b) {\nentry:\n  %la = call i64 @strlen(ptr %a)\n  %lb = call i64 @strlen(ptr %b)\n  %sum = add i64 %la, %lb\n  %n1 = add i64 %sum, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  call ptr @memcpy(ptr %buf, ptr %a, i64 %la)\n  %dst = getelementptr i8, ptr %buf, i64 %la\n  %n2 = add i64 %lb, 1\n  call ptr @memcpy(ptr %dst, ptr %b, i64 %n2)\n  ret ptr %buf\n}\n\n",
+        "define internal ptr @nexum_concat(ptr %a, ptr %b) {\nentry:\n  %la = call i64 @nexum_strlen(ptr %a)\n  %lb = call i64 @nexum_strlen(ptr %b)\n  %sum = add i64 %la, %lb\n  %n1 = add i64 %sum, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  call ptr @nexum_memcpy(ptr %buf, ptr %a, i64 %la)\n  %dst = getelementptr i8, ptr %buf, i64 %la\n  %n2 = add i64 %lb, 1\n  call ptr @nexum_memcpy(ptr %dst, ptr %b, i64 %n2)\n  ret ptr %buf\n}\n\n",
     );
 
     // String indexing: returns a one-character NUL-terminated string.
     s.push_str(
-        "define internal ptr @nexum_str_char_at(ptr %s, i64 %i) {\nentry:\n  %n = call i64 @strlen(ptr %s)\n  %neg = icmp slt i64 %i, 0\n  %oob = icmp sge i64 %i, %n\n  %bad = or i1 %neg, %oob\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %buf = call ptr @nexum_alloc(i64 1)\n  %srcp = getelementptr i8, ptr %s, i64 %i\n  %ch = load i8, ptr %srcp\n  store i8 %ch, ptr %buf\n  %nulp = getelementptr i8, ptr %buf, i64 1\n  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n\n",
+        "define internal ptr @nexum_str_char_at(ptr %s, i64 %i) {\nentry:\n  %n = call i64 @nexum_strlen(ptr %s)\n  %neg = icmp slt i64 %i, 0\n  %oob = icmp sge i64 %i, %n\n  %bad = or i1 %neg, %oob\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %buf = call ptr @nexum_alloc(i64 1)\n  %srcp = getelementptr i8, ptr %s, i64 %i\n  %ch = load i8, ptr %srcp\n  store i8 %ch, ptr %buf\n  %nulp = getelementptr i8, ptr %buf, i64 1\n  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n\n",
     );
 
     // String slicing: s[lo..hi] (lo inclusive, hi exclusive), NUL-terminated.
     s.push_str(
-        "define internal ptr @nexum_slice(ptr %s, i64 %lo, i64 %hi) {\nentry:\n  %n = call i64 @strlen(ptr %s)\n  %neglo = icmp slt i64 %lo, 0\n  %neghi = icmp slt i64 %hi, 0\n  %hioob = icmp sgt i64 %hi, %n\n  %lohi = icmp sgt i64 %lo, %hi\n  %bad1 = or i1 %neglo, %neghi\n  %bad2 = or i1 %hioob, %lohi\n  %bad = or i1 %bad1, %bad2\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %len = sub i64 %hi, %lo\n  %n1 = add i64 %len, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  %srcp = getelementptr i8, ptr %s, i64 %lo\n  call ptr @memcpy(ptr %buf, ptr %srcp, i64 %len)\n  %nulp = getelementptr i8, ptr %buf, i64 %len\n  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n\n",
+        "define internal ptr @nexum_slice(ptr %s, i64 %lo, i64 %hi) {\nentry:\n  %n = call i64 @nexum_strlen(ptr %s)\n  %neglo = icmp slt i64 %lo, 0\n  %neghi = icmp slt i64 %hi, 0\n  %hioob = icmp sgt i64 %hi, %n\n  %lohi = icmp sgt i64 %lo, %hi\n  %bad1 = or i1 %neglo, %neghi\n  %bad2 = or i1 %hioob, %lohi\n  %bad = or i1 %bad1, %bad2\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %len = sub i64 %hi, %lo\n  %n1 = add i64 %len, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  %srcp = getelementptr i8, ptr %s, i64 %lo\n  call ptr @nexum_memcpy(ptr %buf, ptr %srcp, i64 %len)\n  %nulp = getelementptr i8, ptr %buf, i64 %len\n  store i8 0, ptr %nulp\n  ret ptr %buf\n}\n\n",
     );
 
     // File I/O helpers.
-    s.push_str("@nexum_mode_r = private unnamed_addr constant [3 x i8] c\"rb\\00\"\n");
-    s.push_str("@nexum_mode_w = private unnamed_addr constant [3 x i8] c\"wb\\00\"\n");
     s.push_str(
         "@nexum_msg_notfound = private unnamed_addr constant [15 x i8] c\"file not found\\00\"\n\n",
     );
-    s.push_str("declare ptr @fopen(ptr, ptr)\n");
-    s.push_str("declare i32 @fclose(ptr)\n");
-    s.push_str("declare i32 @fseek(ptr, i64, i32)\n");
-    s.push_str("declare i64 @ftell(ptr)\n");
-    s.push_str("declare i64 @fread(ptr, i64, i64, ptr)\n");
-    s.push_str("declare i64 @fwrite(ptr, i64, i64, ptr)\n\n");
-    s.push_str(
-        "define internal ptr @nexum_read_file(ptr %path) {\nentry:\n  %f = call ptr @fopen(ptr %path, ptr @nexum_mode_r)\n  %isnull = icmp eq ptr %f, null\n  br i1 %isnull, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_notfound)\n  unreachable\nok:\n  %s1 = call i32 @fseek(ptr %f, i64 0, i32 2)\n  %size = call i64 @ftell(ptr %f)\n  %s2 = call i32 @fseek(ptr %f, i64 0, i32 0)\n  %n1 = add i64 %size, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  %rd = call i64 @fread(ptr %buf, i64 1, i64 %size, ptr %f)\n  %nulp = getelementptr i8, ptr %buf, i64 %size\n  store i8 0, ptr %nulp\n  %cl = call i32 @fclose(ptr %f)\n  ret ptr %buf\n}\n\n",
-    );
-    s.push_str(
-        "define internal void @nexum_write_file(ptr %path, ptr %content) {\nentry:\n  %f = call ptr @fopen(ptr %path, ptr @nexum_mode_w)\n  %isnull = icmp eq ptr %f, null\n  br i1 %isnull, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_notfound)\n  unreachable\nok:\n  %len = call i64 @strlen(ptr %content)\n  %wr = call i64 @fwrite(ptr %content, i64 1, i64 %len, ptr %f)\n  %cl = call i32 @fclose(ptr %f)\n  ret void\n}\n\n",
-    );
-
     // ---- growable list ----------------------------------------------------
     //
     // A list is a heap object whose payload is
@@ -197,13 +222,13 @@ pub fn runtime_ir(msvc: bool) -> String {
         "define internal i64 @nexum_list_len(ptr %list) {\nentry:\n  %lenp = getelementptr i8, ptr %list, i64 8\n  %len = load i64, ptr %lenp\n  ret i64 %len\n}\n\n",
     );
     s.push_str(
-        "define internal void @nexum_list_push(ptr %list, ptr %elem, i64 %elem_size, i64 %elem_scan) {\nentry:\n  %datap = getelementptr i8, ptr %list, i64 0\n  %lenp = getelementptr i8, ptr %list, i64 8\n  %capp = getelementptr i8, ptr %list, i64 16\n  %esp = getelementptr i8, ptr %list, i64 24\n  %escp = getelementptr i8, ptr %list, i64 32\n  %esize = load i64, ptr %esp\n  %iszero = icmp eq i64 %esize, 0\n  br i1 %iszero, label %first, label %growcheck\nfirst:\n  store i64 %elem_size, ptr %esp\n  store i64 %elem_scan, ptr %escp\n  %cap0 = mul i64 %elem_size, 8\n  store i64 %cap0, ptr %capp\n  %noscan = icmp eq i64 %elem_scan, 0\n  %scan0 = select i1 %noscan, i64 0, i64 %cap0\n  %buf0 = call ptr @nexum_alloc_scanned(i64 %cap0, i64 %scan0)\n  store ptr %buf0, ptr %datap\n  br label %append\ngrowcheck:\n  %len = load i64, ptr %lenp\n  %cap = load i64, ptr %capp\n  %used = mul i64 %len, %esize\n  %full = icmp uge i64 %used, %cap\n  br i1 %full, label %grow, label %append\ngrow:\n  %newcap = mul i64 %cap, 2\n  store i64 %newcap, ptr %capp\n  %escan = load i64, ptr %escp\n  %noscan2 = icmp eq i64 %escan, 0\n  %newscan = select i1 %noscan2, i64 0, i64 %newcap\n  %olddata = load ptr, ptr %datap\n  %oldlen = load i64, ptr %lenp\n  %oldbytes = mul i64 %oldlen, %esize\n  %newbuf = call ptr @nexum_alloc_scanned(i64 %newcap, i64 %newscan)\n  call ptr @memcpy(ptr %newbuf, ptr %olddata, i64 %oldbytes)\n  store ptr %newbuf, ptr %datap\n  br label %append\nappend:\n  %len2 = load i64, ptr %lenp\n  %esize2 = load i64, ptr %esp\n  %data = load ptr, ptr %datap\n  %off = mul i64 %len2, %esize2\n  %dst = getelementptr i8, ptr %data, i64 %off\n  call ptr @memcpy(ptr %dst, ptr %elem, i64 %esize2)\n  %len3 = add i64 %len2, 1\n  store i64 %len3, ptr %lenp\n  ret void\n}\n\n",
+        "define internal void @nexum_list_push(ptr %list, ptr %elem, i64 %elem_size, i64 %elem_scan) {\nentry:\n  %datap = getelementptr i8, ptr %list, i64 0\n  %lenp = getelementptr i8, ptr %list, i64 8\n  %capp = getelementptr i8, ptr %list, i64 16\n  %esp = getelementptr i8, ptr %list, i64 24\n  %escp = getelementptr i8, ptr %list, i64 32\n  %esize = load i64, ptr %esp\n  %iszero = icmp eq i64 %esize, 0\n  br i1 %iszero, label %first, label %growcheck\nfirst:\n  store i64 %elem_size, ptr %esp\n  store i64 %elem_scan, ptr %escp\n  %cap0 = mul i64 %elem_size, 8\n  store i64 %cap0, ptr %capp\n  %noscan = icmp eq i64 %elem_scan, 0\n  %scan0 = select i1 %noscan, i64 0, i64 %cap0\n  %buf0 = call ptr @nexum_alloc_scanned(i64 %cap0, i64 %scan0)\n  store ptr %buf0, ptr %datap\n  br label %append\ngrowcheck:\n  %len = load i64, ptr %lenp\n  %cap = load i64, ptr %capp\n  %used = mul i64 %len, %esize\n  %full = icmp uge i64 %used, %cap\n  br i1 %full, label %grow, label %append\ngrow:\n  %newcap = mul i64 %cap, 2\n  store i64 %newcap, ptr %capp\n  %escan = load i64, ptr %escp\n  %noscan2 = icmp eq i64 %escan, 0\n  %newscan = select i1 %noscan2, i64 0, i64 %newcap\n  %olddata = load ptr, ptr %datap\n  %oldlen = load i64, ptr %lenp\n  %oldbytes = mul i64 %oldlen, %esize\n  %newbuf = call ptr @nexum_alloc_scanned(i64 %newcap, i64 %newscan)\n  call ptr @nexum_memcpy(ptr %newbuf, ptr %olddata, i64 %oldbytes)\n  store ptr %newbuf, ptr %datap\n  br label %append\nappend:\n  %len2 = load i64, ptr %lenp\n  %esize2 = load i64, ptr %esp\n  %data = load ptr, ptr %datap\n  %off = mul i64 %len2, %esize2\n  %dst = getelementptr i8, ptr %data, i64 %off\n  call ptr @nexum_memcpy(ptr %dst, ptr %elem, i64 %esize2)\n  %len3 = add i64 %len2, 1\n  store i64 %len3, ptr %lenp\n  ret void\n}\n\n",
     );
     s.push_str(
         "define internal ptr @nexum_list_get(ptr %list, i64 %i) {\nentry:\n  %lenp = getelementptr i8, ptr %list, i64 8\n  %len = load i64, ptr %lenp\n  %neg = icmp slt i64 %i, 0\n  %oob = icmp sge i64 %i, %len\n  %bad = or i1 %neg, %oob\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %datap = getelementptr i8, ptr %list, i64 0\n  %data = load ptr, ptr %datap\n  %esp = getelementptr i8, ptr %list, i64 24\n  %esize = load i64, ptr %esp\n  %off = mul i64 %i, %esize\n  %p = getelementptr i8, ptr %data, i64 %off\n  ret ptr %p\n}\n\n",
     );
     s.push_str(
-        "define internal void @nexum_list_set(ptr %list, i64 %i, ptr %elem) {\nentry:\n  %lenp = getelementptr i8, ptr %list, i64 8\n  %len = load i64, ptr %lenp\n  %neg = icmp slt i64 %i, 0\n  %oob = icmp sge i64 %i, %len\n  %bad = or i1 %neg, %oob\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %datap = getelementptr i8, ptr %list, i64 0\n  %data = load ptr, ptr %datap\n  %esp = getelementptr i8, ptr %list, i64 24\n  %esize = load i64, ptr %esp\n  %off = mul i64 %i, %esize\n  %dst = getelementptr i8, ptr %data, i64 %off\n  call ptr @memcpy(ptr %dst, ptr %elem, i64 %esize)\n  ret void\n}\n\n",
+        "define internal void @nexum_list_set(ptr %list, i64 %i, ptr %elem) {\nentry:\n  %lenp = getelementptr i8, ptr %list, i64 8\n  %len = load i64, ptr %lenp\n  %neg = icmp slt i64 %i, 0\n  %oob = icmp sge i64 %i, %len\n  %bad = or i1 %neg, %oob\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_oob)\n  unreachable\nok:\n  %datap = getelementptr i8, ptr %list, i64 0\n  %data = load ptr, ptr %datap\n  %esp = getelementptr i8, ptr %list, i64 24\n  %esize = load i64, ptr %esp\n  %off = mul i64 %i, %esize\n  %dst = getelementptr i8, ptr %data, i64 %off\n  call ptr @nexum_memcpy(ptr %dst, ptr %elem, i64 %esize)\n  ret void\n}\n\n",
     );
 
     // Live payload bytes (payload rounded up to 16, header excluded).

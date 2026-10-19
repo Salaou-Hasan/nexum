@@ -68,7 +68,7 @@ fn ir_verifies_for_all_targets() {
         let ir = nexum_codegen::emit(&mir, &target);
         let ll_path = tmp_dir().join(format!("hello_{}.ll", name));
         std::fs::write(&ll_path, ir).expect("write ir");
-        nexum_toolchain::verify_ir(&tc.clang, ll_path.to_str().unwrap())
+        nexum_toolchain::verify_ir_for(&tc.clang, ll_path.to_str().unwrap(), Some(&target.triple))
             .unwrap_or_else(|e| panic!("target {}: {e}", name));
     }
 }

@@ -212,9 +212,24 @@ pub fn run_clang_with(
 /// verifier, and backend (the strongest check available without standalone
 /// `opt`/`llvm-as` binaries).
 pub fn verify_ir(clang: &str, ll_path: &str) -> Result<(), String> {
+    verify_ir_for(clang, ll_path, None)
+}
+
+/// Verify a module for a given target. The target matters: the module may
+/// contain assembly for a foreign instruction set, which the host assembler
+/// cannot check.
+pub fn verify_ir_for(
+    clang: &str,
+    ll_path: &str,
+    target: Option<&str>,
+) -> Result<(), String> {
     let obj_path = format!("{}.verify.obj", ll_path);
-    let output = Command::new(clang)
-        .arg("-Wno-override-module")
+    let mut command = Command::new(clang);
+    command.arg("-Wno-override-module");
+    if let Some(t) = target {
+        command.arg(format!("--target={t}"));
+    }
+    let output = command
         .arg("-x")
         .arg("ir")
         .arg("-c")

@@ -30,6 +30,15 @@ them.
 
 `nx update` brings the compiler and the editor extension back in step.
 
+## Where it is going
+
+Nexum is moving from a general purpose language to one that owns the
+machine: a freestanding runtime that talks to the kernel directly, a
+standard library written in Nexum, and nothing in between. The plan is in
+[docs/native-roadmap.md](docs/native-roadmap.md) - the system call layer
+and the runtime's own string and file routines are done, and the allocator
+and the numeric tower come next.
+
 ## Editor support
 
 A VS Code extension lives in `editors/vscode/` (syntax highlighting, format

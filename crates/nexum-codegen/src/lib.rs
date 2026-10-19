@@ -116,8 +116,7 @@ pub fn emit(mir: &MirModule, target: &TargetSpec) -> String {
     ));
     // The runtime slice (panic, managed heap, collector, roots, string
     // helpers) lives in the nexum-runtime crate; see docs/runtime-abi.md.
-    let msvc = target.os.contains("windows");
-    out.push_str(&nexum_runtime::runtime_ir(msvc));
+    out.push_str(&nexum_runtime::runtime_ir(&target.os, &target.arch));
 
     // record type definitions
     for (name, fields) in &mir.records {
@@ -618,7 +617,7 @@ fn emit_fn(
                                 // Byte-wise content equality.
                                 let c = format!("%v{}_eq", dest.0);
                                 buf.push_str(&format!(
-                                    "  {} = call i32 @strcmp(ptr {}, ptr {})\n",
+                                    "  {} = call i32 @nexum_strcmp(ptr {}, ptr {})\n",
                                     c, l, rr
                                 ));
                                 buf.push_str(&format!("  {} = icmp eq i32 {}, 0\n", r, c));
@@ -638,7 +637,7 @@ fn emit_fn(
                             if oty_str == "ptr" {
                                 let c = format!("%v{}_eq", dest.0);
                                 buf.push_str(&format!(
-                                    "  {} = call i32 @strcmp(ptr {}, ptr {})\n",
+                                    "  {} = call i32 @nexum_strcmp(ptr {}, ptr {})\n",
                                     c, l, rr
                                 ));
                                 buf.push_str(&format!("  {} = icmp ne i32 {}, 0\n", r, c));

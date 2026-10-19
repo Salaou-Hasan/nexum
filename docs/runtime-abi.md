@@ -8,6 +8,29 @@ layouts, root frames, safepoints, and the staged arena / cleanup model.
 The tracing model is decided in
 `docs/language-reference/decisions-gc.md`; this document pins the layouts.
 
+## 0. The runtime is freestanding
+
+A program built by Nexum depends on the kernel and on nothing else. The
+runtime does not link the C library on the POSIX targets: the string
+routines, the file routines and the system call layer are part of the
+runtime, and the system call layer is inline assembly in the generated IR
+(D012, D013 in `docs/language-reference/decisions.md`).
+
+The parts that still come from the C library, and when they go:
+
+| Piece | Today | Phase |
+| ----- | ----- | ----- |
+| `strlen`, `memcpy`, `strcmp` | the runtime's own | done |
+| file reading and writing | the system calls | done (POSIX) |
+| `malloc`, `free` | the C library | 11a.2 |
+| `printf`, `fputs`, `fputc` | the C library | 11a.2 |
+| `exit` | the C library | 11a.2 |
+| the file routines on Windows | the C library | 11a.2 (Windows has no direct system call instruction) |
+
+The Windows build needs its own system call stubs: its kernel interface
+lives behind `ntdll`, so the stubs have to be generated rather than
+assembled.
+
 ## 1. Native (unmanaged) values
 
 These are values the compiler passes and stores by value. None of them
