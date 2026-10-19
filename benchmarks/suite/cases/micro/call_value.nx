@@ -1,0 +1,43 @@
+# BENCH unit=ns-per-call ops=10000000 expect=50000005000000 ir_check=call i64 @noinline asm_check=noinline base=cases/micro/call_value_base.nx status=blocked note="not measurable yet: the language has no way to keep a call from being inlined, and clang inlines every user function call at -O1 and above, so an optimised build has no call to measure. The scaffolding below keeps one alive, and the assembly check proves it survived, but the paired baseline is then optimised differently from the case, so the subtraction does not isolate the call. The case and its C twin are in place for the day the compiler can keep a call alive."
+#
+# The call overhead claim: what does one call cost?
+#
+# This case is not measured yet, and the reason is worth stating precisely,
+# because it is a property of the language and not of the harness.
+#
+# A call overhead is the difference between making a call and not making
+# one. That difference only exists if the call survives the optimiser. In
+# Nexum there is no way to say "do not inline this function", and clang
+# inlines every user function call at -O1 and above: a callee small enough
+# to inline turns this case into a measurement of an empty loop.
+#
+# The callee below is therefore deliberately expensive - it builds a 64
+# element array, writes one element and reads another - which is enough for
+# clang's inliner to refuse it, and the asm_check in the header proves that
+# the call is still a call in the compiled program.
+#
+# The problem is the other side of the subtraction. The paired baseline has
+# to do the same work, and the optimiser treats the two programs
+# differently: the caller's copy of the work can be folded away or
+# vectorised, the callee's cannot, because the caller cannot see into it.
+# The measurements bear this out: the Nexum difference and the C twin's
+# difference for the same pair disagreed by an order of magnitude, and
+# neither of them was the cost of a call.
+#
+# The suite therefore records this case as not yet measurable rather than
+# publishing a number that means something else. The case, the baseline and
+# the C twin are all in place, and the harness will measure them as soon as
+# the compiler can keep a call alive.
+
+fn noinline(x):
+    let mut a: [Int; 64] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    a[x % 64] = x + 1
+    return a[(x + 1) % 64] + x + 1
+
+fn main():
+    let mut acc = 0
+    let mut i = 0
+    while i < 10000000:
+        acc = acc + noinline(i)
+        i = i + 1
+    print(acc)

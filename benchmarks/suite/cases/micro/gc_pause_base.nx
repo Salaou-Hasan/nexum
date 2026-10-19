@@ -1,0 +1,22 @@
+# BENCH unit=ns-per-gc ops=30000 expect=4096 note="the paired baseline of gc_pause: the same allocations and the same live heap, without the collections"
+#
+# The same program without the explicit collections, so the harness can
+# subtract the allocations and the list work from gc_pause.
+
+fn main():
+    let live = list_new()
+    let mut i = 0
+    while i < 64:
+        list_push(live, concat("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef"))
+        i = i + 1
+    let mut j = 0
+    while j < 30000:
+        let tmp = concat("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcdef")
+        list_set(live, 0, tmp)
+        j = j + 1
+    let mut total = 0
+    let mut k = 0
+    while k < list_len(live):
+        total = total + len(list_get(live, k))
+        k = k + 1
+    print(total)
