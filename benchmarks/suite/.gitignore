@@ -1,0 +1,6 @@
+# The raw runs are not committed: they are the input to a number, not the
+# number. `baseline.json` is the artefact a pull request compares against.
+results/
+
+# The human-readable report is written by the harness on every run.
+RESULTS.md

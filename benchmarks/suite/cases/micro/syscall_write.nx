@@ -1,0 +1,20 @@
+# BENCH unit=ns-per-syscall ops=1000 expect=1000 status=blocked note="the runtime's write() is not exposed to a program, so a bare write(2) cannot be measured; this case writes one byte through the file API, which is three syscalls and not the claim. It becomes measurable when phase 11a exposes the runtime's write."
+#
+# The syscall overhead claim, and the one claim the suite cannot make yet.
+#
+# The runtime has a write wrapper, but no builtin exposes it, so a program
+# cannot issue a bare write(2): the closest it can get is write_file, which
+# opens a file, writes one byte and closes it. That is three syscalls, not
+# one, so this case does not measure the syscall overhead and the suite
+# records it as not yet measurable rather than publishing a number that
+# means something else.
+#
+# The C twin is in place and does the same three operations, so the
+# comparison is ready the day the builtin lands.
+
+fn main():
+    let mut i = 0
+    while i < 1000:
+        write_file("nx_bench_syscall.tmp", "x")
+        i = i + 1
+    print(i)
