@@ -44,8 +44,8 @@ list, so it can only get shorter.
 
 ## The research in flight
 
-Each of these is a pull request against `main`, written by one agent, in
-`specs/research/`.
+Each of these was a pull request against `main`, written by one agent, in
+`specs/research/`. All twenty-two are merged.
 
 | Document | Question |
 | -------- | -------- |
@@ -77,6 +77,23 @@ Each of these is a pull request against `main`, written by one agent, in
 | `interop-policy.md` | interoperability without a C binding |
 | `wasm-target.md` | WebAssembly as a target |
 
+## The implementation in flight
+
+Phase 11a.2, one pull request each, disjoint files:
+
+| Agent | Owns |
+| ----- | ---- |
+| the allocator | `crates/nexum-runtime/src/heap.rs`, `tests/allocator.rs` |
+| the output | `crates/nexum-runtime/src/format.rs`, the codegen's `print` block, `tests/output.rs` |
+| the maths | `crates/nexum-runtime/src/math.rs`, `tests/math.rs` |
+| the bytes | `crates/nexum-runtime/src/bytes.rs`, the sema's builtin dispatch |
+| the layout | `crates/nexum-target/src/lib.rs` and its tests |
+| the benchmarks | `crates/nexum-driver/src/bin/nx-bench.rs`, `benchmarks/suite/` |
+| the syscall tests | `crates/nexum-driver/tests/syscall_layer.rs` |
+
+The contract is `specs/contracts/phase-11a2.md`; the contract for the
+language phases is `specs/contracts/phase-11b-11f.md`.
+
 ## The decisions this programme has taken so far
 
 * **D012** - the runtime is freestanding: no libc.
@@ -84,6 +101,31 @@ Each of these is a pull request against `main`, written by one agent, in
 * **D014** - inline assembly is a first-class language feature.
 * **D015** - the numeric tower is f32 and f64.
 * **D016** - the program is linked by the Nexum toolchain, not by clang.
+* **D017** - the language grows no binary FFI.
+* **D018** - the numeric tower has distinct widths and no implicit conversions.
+* **D019** - printing a float is C's `%g`.
+* **D020** - the code generator keeps emitting textual LLVM IR.
+
+## What the research found, and what it cost
+
+The research was supposed to design the later phases. Instead it found
+**six live defects**, each confirmed by running the compiler rather than
+by reading it:
+
+| Defect | Found by |
+| ------- | -------- |
+| comparing two floats produced invalid LLVM | four agents independently |
+| an integer literal that does not fit `i64` silently became `0` | the numeric tower |
+| the most negative `i64` could not be written | the numeric tower |
+| the link step ignored `--target`, so a cross build produced a host binary | two agents |
+| the `mmap` wrapper put the descriptor in the flags register | three agents |
+| the write path passed a pointer where the wrapper wanted an integer | the test surface |
+
+And one fact about the gates themselves: **the LLVM verifier does not
+catch a call with mismatched argument types**, because clang passes
+`-disable-llvm-verifier` to the compiler proper. Every "the IR verifies"
+gate in the project was therefore weaker than it looked, and a unit test
+now checks the runtime's own calls.
 
 ## The lessons from the first slice
 
