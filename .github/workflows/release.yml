@@ -164,12 +164,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+      - name: Add the install scripts
+        # `iwr .../releases/latest/download/install.ps1 | iex` needs the
+        # script to be an asset of the release, otherwise the download gives
+        # the GitHub error page.
+        run: |
+          cp install.ps1 install.sh .
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ASSETS=""
-          for f in nx-* *.vsix *.msi *.deb; do
+          for f in nx-* *.vsix *.msi *.deb install.ps1 install.sh; do
             [ -f "$f" ] && ASSETS="$ASSETS $f"
           done
           TAG=${{ github.ref_name }}
