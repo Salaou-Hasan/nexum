@@ -9,13 +9,29 @@ pub struct TargetSpec {
 }
 
 impl TargetSpec {
+    /// The target the compiler runs on. It decides which runtime the
+    /// generated program gets, so it has to follow the host.
     pub fn host() -> Self {
-        // Windows x86_64
-        Self {
-            triple: "x86_64-pc-windows-msvc".to_string(),
-            pointer_width: 64,
-            os: "windows".to_string(),
-            arch: "x86_64".to_string(),
+        let arch = std::env::consts::ARCH;
+        match std::env::consts::OS {
+            "windows" => Self {
+                triple: format!("{arch}-pc-windows-msvc"),
+                pointer_width: 64,
+                os: "windows".to_string(),
+                arch: arch.to_string(),
+            },
+            "macos" => Self {
+                triple: format!("{arch}-apple-darwin"),
+                pointer_width: 64,
+                os: "macos".to_string(),
+                arch: arch.to_string(),
+            },
+            _ => Self {
+                triple: format!("{arch}-unknown-linux-gnu"),
+                pointer_width: 64,
+                os: "linux".to_string(),
+                arch: arch.to_string(),
+            },
         }
     }
 
