@@ -81,18 +81,36 @@ Each of these was a pull request against `main`, written by one agent, in
 
 Phase 11a.2, one pull request each, disjoint files:
 
-| Agent | Owns |
-| ----- | ---- |
-| the allocator | `crates/nexum-runtime/src/heap.rs`, `tests/allocator.rs` |
-| the output | `crates/nexum-runtime/src/format.rs`, the codegen's `print` block, `tests/output.rs` |
-| the maths | `crates/nexum-runtime/src/math.rs`, `tests/math.rs` |
-| the bytes | `crates/nexum-runtime/src/bytes.rs`, the sema's builtin dispatch |
-| the layout | `crates/nexum-target/src/lib.rs` and its tests |
-| the benchmarks | `crates/nexum-driver/src/bin/nx-bench.rs`, `benchmarks/suite/` |
-| the syscall tests | `crates/nexum-driver/tests/syscall_layer.rs` |
+| Agent | Owns | State |
+| ----- | ---- | ----- |
+| the allocator | `crates/nexum-runtime/src/heap.rs`, `tests/allocator.rs` | **merged** |
+| the output | `crates/nexum-runtime/src/format.rs`, the codegen's `print` block, `tests/output.rs` | in flight |
+| the maths | `crates/nexum-runtime/src/math.rs`, `tests/math.rs` | in flight |
+| the bytes | `crates/nexum-runtime/src/bytes.rs`, the sema's builtin dispatch | **merged** |
+| the layout | `crates/nexum-target/src/lib.rs` and its tests | **merged** |
+| the benchmarks | `crates/nexum-driver/src/bin/nx-bench.rs`, `benchmarks/suite/` | in flight |
+| the syscall tests | `crates/nexum-driver/tests/syscall_layer.rs` | **merged** |
 
 The contract is `specs/contracts/phase-11a2.md`; the contract for the
 language phases is `specs/contracts/phase-11b-11f.md`.
+
+### What the phase has achieved so far
+
+A Linux program declared seventeen external symbols when the programme
+started. It declares **four** now: `printf`, `fputs`, `fputc` and `exit` -
+all of them the output formatting, which is the last piece.
+
+| Piece | Before | Now |
+| ----- | ------ | --- |
+| the system call layer | none | Linux and macOS, x86-64 and AArch64 |
+| the string routines | libc | ours, on every platform |
+| the file routines | libc | the system calls, on the POSIX targets |
+| the heap | `malloc` | ours, on every platform |
+| the output | `printf` | the last piece, in flight |
+
+The Windows build is still on the C library for its output and its file
+routines. Its heap is ours now, though: the allocator uses `VirtualAlloc`,
+which is the kernel and not the C library.
 
 ## The decisions this programme has taken so far
 
