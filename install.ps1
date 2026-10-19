@@ -25,3 +25,22 @@ if ($process.ExitCode -ne 0) {
 $installed = Join-Path $env:LOCALAPPDATA "Programs\Nexum\nx.exe"
 Write-Host "Installed Nexum $version to $installed"
 Write-Host "The editor extension was installed if Visual Studio Code was found."
+
+# The LLVM toolchain is needed to build Nexum programs, so check for it and
+# offer to install it when it is missing.
+if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+    Write-Host ""
+    Write-Host "The LLVM toolchain (clang) is not installed. Nexum needs it to build programs." -ForegroundColor Yellow
+    Write-Host "  install it with: winget install LLVM.LLVM"
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        $answer = Read-Host "Install it now? [Y/n]"
+        if ($answer -eq "" -or $answer -match "^[Yy]") {
+            winget install --id LLVM.LLVM --accept-package-agreements --accept-source-agreements
+            if (Get-Command clang -ErrorAction SilentlyContinue) {
+                Write-Host "The LLVM toolchain is installed. Open a new shell so that it is on your PATH."
+            } else {
+                Write-Host "clang is still not on the PATH. Open a new shell and try again." -ForegroundColor Yellow
+            }
+        }
+    }
+}

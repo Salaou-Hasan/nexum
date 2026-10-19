@@ -70,6 +70,7 @@
       <File Id="NexumVsix" Name="nexum-language.vsix" KeyPath="yes" />
       <File Id="NexumInstallVsix" Name="install-vscode-extension.cmd" KeyPath="no" />
       <File Id="NexumAddToPath" Name="add-to-path.cmd" KeyPath="no" />
+      <File Id="NexumCheckLlvm" Name="check-llvm.cmd" KeyPath="no" />
     </Component>
 
     <Feature Id="Complete" Title="Nexum" Level="1" AllowAbsent="no">
@@ -110,9 +111,21 @@
                   Impersonate="yes"
                   Return="ignore" />
 
+    <!-- Check that the LLVM toolchain is installed, and tell the developer
+         how to install it when it is not. The user interface level is
+         passed along, so that a quiet install stays quiet. -->
+    <SetProperty Id="CustomActionData" Value="[UILevel]" Before="CheckLlvm" Sequence="execute" />
+    <CustomAction Id="CheckLlvm"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c check-llvm.cmd"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
     <InstallExecuteSequence>
       <Custom Action="AddToPath" After="InstallFiles" Condition="NOT REMOVE" />
       <Custom Action="InstallVsCodeExtension" After="AddToPath" Condition="NOT REMOVE" />
+      <Custom Action="CheckLlvm" After="InstallVsCodeExtension" Condition="NOT REMOVE" />
     </InstallExecuteSequence>
 
     <!-- The interface. It is written with the core elements so that the

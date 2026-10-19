@@ -874,12 +874,30 @@ fn run_tests(dir: &std::path::Path) {
 fn doctor() {
     println!("Nexum doctor");
     println!("============");
-    // rustc
+    println!("nx: {}", std::env::current_exe().unwrap().display());
+    println!();
+    println!("needed to build and run Nexum programs:");
+    // clang: the LLVM toolchain compiles the generated IR.
+    if nexum_toolchain::clang_installed() {
+        print_tool("clang", &["--version"]);
+    } else {
+        println!("  clang: NOT FOUND");
+        println!(
+            "    Nexum builds programs with the LLVM toolchain. Install it with:",
+        );
+        println!("      {}", nexum_toolchain::clang_install_hint());
+    }
+    println!();
+    println!("only needed to build Nexum itself from source:");
     print_tool("rustc", &["--version"]);
     print_tool("cargo", &["--version"]);
-    print_tool("clang", &["--version"]);
-    // nx itself
-    println!("nx: {}", std::env::current_exe().unwrap().display());
+    println!();
+    if nexum_toolchain::clang_installed() {
+        println!("Everything Nexum needs is installed.");
+    } else {
+        println!("Nexum is installed, but the LLVM toolchain is missing: it cannot");
+        println!("build programs until clang is installed.");
+    }
 }
 
 fn print_tool(name: &str, args: &[&str]) {

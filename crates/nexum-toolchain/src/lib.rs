@@ -11,7 +11,7 @@ pub struct Toolchain {
 impl Toolchain {
     pub fn discover() -> Result<Self, String> {
         // find clang
-        let clang = find_exe("clang").ok_or_else(|| "clang not found on PATH".to_string())?;
+        let clang = find_exe("clang").ok_or_else(missing_clang_message)?;
         // mold not available on windows; use clang's default linker
         let linker_kind = "system (clang default)".to_string();
         Ok(Self { clang, linker_kind })
@@ -21,18 +21,48 @@ impl Toolchain {
     }
 }
 
+/// Is the LLVM toolchain installed? The installers use this to tell the
+/// developer what is still missing.
+pub fn clang_installed() -> bool {
+    find_exe("clang").is_some()
+}
+
+/// How to install the LLVM toolchain on this platform.
+pub fn clang_install_hint() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "winget install LLVM.LLVM"
+    } else if cfg!(target_os = "macos") {
+        "brew install llvm"
+    } else {
+        "sudo apt install clang  (or: sudo dnf install clang)"
+    }
+}
+
+/// The message shown when the LLVM toolchain is missing. Nexum builds
+/// programs by handing the generated LLVM IR to clang, so it is needed to
+/// compile anything.
+pub fn missing_clang_message() -> String {
+    format!(
+        "clang not found on PATH.\n\
+         Nexum builds programs with the LLVM toolchain, so clang has to be installed.\n\
+         \x20 install it with: {}\n\
+         \x20 then run `nx doctor` to check that everything is in place.",
+        clang_install_hint()
+    )
+}
+
 fn find_exe(name: &str) -> Option<String> {
-    // check PATH
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(';') {
-            let cand = std::path::Path::new(dir).join(format!("{}.exe", name));
-            if cand.exists() {
-                return Some(cand.to_string_lossy().to_string());
-            }
-            let cand2 = std::path::Path::new(dir).join(name);
-            if cand2.exists() {
-                return Some(cand2.to_string_lossy().to_string());
-            }
+    // check PATH (the separator is ';' on Windows and ':' elsewhere, which
+    // `split_paths` takes care of)
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(format!("{}.exe", name));
+        if cand.exists() {
+            return Some(cand.to_string_lossy().to_string());
+        }
+        let cand2 = dir.join(name);
+        if cand2.exists() {
+            return Some(cand2.to_string_lossy().to_string());
         }
     }
     None
@@ -110,5 +140,31 @@ pub fn verify_ir(clang: &str, ll_path: &str) -> Result<(), String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("LLVM IR verification failed:\n{}", stderr.trim()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clang_install_hint, missing_clang_message};
+
+    #[test]
+    fn the_missing_clang_message_says_what_to_do() {
+        let message = missing_clang_message();
+        assert!(message.contains("clang not found"));
+        assert!(message.contains(clang_install_hint()));
+        assert!(message.contains("nx doctor"));
+    }
+
+    #[test]
+    fn the_install_hint_is_for_this_platform() {
+        let hint = clang_install_hint();
+        assert!(!hint.is_empty());
+        if cfg!(target_os = "windows") {
+            assert!(hint.contains("winget"));
+        } else if cfg!(target_os = "macos") {
+            assert!(hint.contains("brew"));
+        } else {
+            assert!(hint.contains("apt"));
+        }
     }
 }

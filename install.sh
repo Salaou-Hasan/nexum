@@ -58,16 +58,43 @@ if [ "$PLATFORM" = "linux" ]; then
   rm -f "$DEB_PATH"
   echo "Installed Nexum $VERSION."
   install_extension
-  exit 0
+else
+  ASSET="nx-${PLATFORM}-${ARCH}"
+  URL="https://github.com/$REPO/releases/latest/download/${ASSET}"
+  DEST="${HOME}/.local/bin"
+  mkdir -p "$DEST"
+  echo "Downloading $URL ..."
+  curl -fsSL "$URL" -o "$DEST/nx"
+  chmod +x "$DEST/nx"
+  echo "Installed nx to $DEST/nx"
+  echo "Ensure $DEST is on your PATH."
+  install_extension
 fi
 
-ASSET="nx-${PLATFORM}-${ARCH}"
-URL="https://github.com/$REPO/releases/latest/download/${ASSET}"
-DEST="${HOME}/.local/bin"
-mkdir -p "$DEST"
-echo "Downloading $URL ..."
-curl -fsSL "$URL" -o "$DEST/nx"
-chmod +x "$DEST/nx"
-echo "Installed nx to $DEST/nx"
-echo "Ensure $DEST is on your PATH."
-install_extension
+# The LLVM toolchain is needed to build Nexum programs, so check for it and
+# offer to install it when it is missing.
+if ! command -v clang >/dev/null 2>&1; then
+  echo ""
+  echo "The LLVM toolchain (clang) is not installed. Nexum needs it to build programs."
+  if [ "$PLATFORM" = "macos" ]; then
+    echo "  install it with: brew install llvm"
+    if command -v brew >/dev/null 2>&1; then
+      printf "Install it now? [Y/n] "
+      read -r answer
+      case "$answer" in
+        ""|[Yy]*) brew install llvm ;;
+      esac
+    fi
+  else
+    echo "  install it with: sudo apt install clang"
+    if command -v sudo >/dev/null 2>&1; then
+      printf "Install it now? [Y/n] "
+      read -r answer
+      case "$answer" in
+        ""|[Yy]*) sudo apt install -y clang ;;
+      esac
+    fi
+  fi
+  command -v clang >/dev/null 2>&1 || \
+    echo "clang is still not on the PATH: run 'nx doctor' to check."
+fi

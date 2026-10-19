@@ -3,6 +3,42 @@
 Every release ships the compiler for all supported platforms, an installer
 for Windows and Linux, and the Visual Studio Code extension.
 
+## What else is needed
+
+Nexum hands the generated LLVM IR to **clang**, so the LLVM toolchain has to
+be installed as well:
+
+```sh
+# Windows
+winget install LLVM.LLVM
+
+# macOS
+brew install llvm
+
+# Linux
+sudo apt install clang
+```
+
+The installers look for it: the Windows installer says so when it is missing
+(and offers to install it), and `nx doctor` reports what is present and what
+is missing:
+
+```sh
+$ nx doctor
+Nexum doctor
+============
+nx: /usr/local/bin/nx
+
+needed to build and run Nexum programs:
+  clang: clang version 18.1.8
+
+only needed to build Nexum itself from source:
+  rustc: rustc 1.83.0
+  cargo: cargo 1.83.0
+
+Everything Nexum needs is installed.
+```
+
 ## The quick way
 
 ```sh
