@@ -53,8 +53,28 @@ jobs:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
 
+  vsix:
+    # The editor extension is packaged separately from the compiler binaries.
+    # It is best-effort: a failure here must not block the compiler release.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Package the VS Code extension
+        working-directory: editors/vscode
+        run: |
+          npm install --no-audit --no-fund
+          npx vsce package --no-dependencies --out ../../nexum-language.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nexum-language.vsix
+          path: nexum-language.vsix
+
   publish:
-    needs: build
+    needs: [build, vsix]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -67,4 +87,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create ${{ github.ref_name }} nx-* --title "${{ github.ref_name }}" --notes "Nexum release ${{ github.ref_name }}"
+          ASSETS=""
+          for f in nx-* *.vsix; do
+            [ -f "$f" ] && ASSETS="$ASSETS $f"
+          done
+          gh release create ${{ github.ref_name }} $ASSETS --title "${{ github.ref_name }}" --notes "Nexum release ${{ github.ref_name }}"

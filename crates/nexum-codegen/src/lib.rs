@@ -296,15 +296,24 @@ fn emit_fn(
     let mut idx_plan: Vec<(usize, String, String)> = Vec::new(); // (ordinal, reg, llvm ty)
     let mut managed_temps: Vec<(usize, Ty)> = Vec::new(); // (dest, ty)
     let mut elem_temps: Vec<(usize, String, Ty)> = Vec::new(); // (ordinal, reg, elem ty)
+    let mut agg_temps: Vec<(usize, String, Ty)> = Vec::new(); // (ordinal, reg, ty)
     {
         let mut ord = 0usize;
         for b in &f.blocks {
             for in_ in &b.instrs {
                 match in_ {
                     Instr::Alloca { dest, ty } => hoisted.push((dest.0, ty.clone())),
-                    Instr::IndexGet { base, .. } | Instr::IndexSet { base, .. } => {
+                    Instr::IndexGet { base, .. } => {
                         let bt = vt.get(&base.0).cloned().unwrap_or(Ty::Unknown);
                         idx_plan.push((ord, format!("%isp{}", ord), llvm_ty(&bt)));
+                    }
+                    Instr::IndexSet { base, dest, .. } => {
+                        let bt = vt.get(&base.0).cloned().unwrap_or(Ty::Unknown);
+                        idx_plan.push((ord, format!("%isp{}", ord), llvm_ty(&bt)));
+                        let ty = vt.get(&dest.0).cloned().unwrap_or(Ty::Unknown);
+                        if has_refs(&ty, records) {
+                            agg_temps.push((ord, format!("%vag{}", ord), ty));
+                        }
                     }
                     Instr::Call {
                         dest,
@@ -322,6 +331,19 @@ fn emit_fn(
                             elem_temps.push((ord, format!("%vle{}", ord), elem));
                         }
                     }
+                    // An aggregate value that can hold references must live in
+                    // a rooted slot: while it is only in a register, a
+                    // collection triggered by a later allocation could free
+                    // the strings it points to.
+                    Instr::Record { dest, .. }
+                    | Instr::ArrayLit { dest, .. }
+                    | Instr::FieldSet { dest, .. }
+                    | Instr::Copy { dest, .. } => {
+                        let ty = vt.get(&dest.0).cloned().unwrap_or(Ty::Unknown);
+                        if has_refs(&ty, records) {
+                            agg_temps.push((ord, format!("%vag{}", ord), ty));
+                        }
+                    }
                     _ => {}
                 }
                 ord += 1;
@@ -330,27 +352,42 @@ fn emit_fn(
     }
     let idx_names: HashMap<usize, String> =
         idx_plan.iter().map(|(o, n, _t)| (*o, n.clone())).collect();
+    let agg_names: HashMap<usize, String> =
+        agg_temps.iter().map(|(o, n, _t)| (*o, n.clone())).collect();
     let elem_names: HashMap<usize, String> = elem_temps
         .iter()
         .map(|(o, n, _t)| (*o, n.clone()))
         .collect();
 
     // Root entries: (slot address, bytes to scan, type for zero-initialising).
+    //
+    // Every stack slot is registered, and scalars are scanned as a single
+    // word. Registering only the slots that *provably* hold a reference would
+    // be more precise, but a single missed slot is a use-after-free, and the
+    // collector cannot recover from that. Scanning a numeric slot can only
+    // retain an object one cycle too long, which is far cheaper than a
+    // dangling pointer. Aggregates are scanned in full.
     let mut root_entries: Vec<(String, u64, Ty)> = Vec::new();
     for (dest, ty) in &hoisted {
-        if has_refs(ty, records) {
-            root_entries.push((format!("%v{}", dest), scan_bytes(ty, records), ty.clone()));
-        }
+        let scan = match ty {
+            Ty::Str | Ty::List(_) => 8,
+            Ty::Array(_, _) | Ty::Record(_) => llvm_size(ty, records).max(8),
+            _ => 8,
+        };
+        root_entries.push((format!("%v{}", dest), scan, ty.clone()));
     }
     for (dest, ty) in &managed_temps {
         root_entries.push((
             format!("%v{}_mt", dest),
-            scan_bytes(ty, records),
+            scan_bytes(ty, records).max(8),
             ty.clone(),
         ));
     }
     for (_, reg, ty) in &elem_temps {
-        root_entries.push((reg.clone(), scan_bytes(ty, records), ty.clone()));
+        root_entries.push((reg.clone(), scan_bytes(ty, records).max(8), ty.clone()));
+    }
+    for (_, reg, ty) in &agg_temps {
+        root_entries.push((reg.clone(), scan_bytes(ty, records).max(8), ty.clone()));
     }
     let has_roots = !root_entries.is_empty();
 
@@ -376,17 +413,23 @@ fn emit_fn(
             for (_, reg, ty) in &elem_temps {
                 buf.push_str(&format!("  {} = alloca {}\n", reg, llvm_ty(ty)));
             }
+            for (_, reg, ty) in &agg_temps {
+                buf.push_str(&format!("  {} = alloca {}\n", reg, llvm_ty(ty)));
+            }
             // Zero every root slot so the collector never sees stale bytes,
             // and so the root set is deterministic.
             for (addr, _scan, ty) in &root_entries {
+                let lty = llvm_ty(ty);
+                if lty == "void" {
+                    continue;
+                }
                 match ty {
                     Ty::Str | Ty::List(_) => {
                         buf.push_str(&format!("  store ptr null, ptr {}\n", addr))
                     }
                     _ => buf.push_str(&format!(
                         "  store {} zeroinitializer, ptr {}\n",
-                        llvm_ty(ty),
-                        addr
+                        lty, addr
                     )),
                 }
             }
@@ -870,7 +913,10 @@ fn emit_fn(
                         cur = dst;
                     }
                     valreg.insert(dest.0, format!("%v{}", dest.0));
-                }
+                    if let Some(reg) = agg_names.get(&ordinal) {
+                        let v = format!("%v{}", dest.0);
+                        buf.push_str(&format!("  store %{} {}, ptr {}\n", name, v, reg));
+                    }                }
                 Instr::FieldGet {
                     dest,
                     base,
@@ -919,6 +965,9 @@ fn emit_fn(
                         v,
                         index
                     ));
+                    if let Some(reg) = agg_names.get(&ordinal) {
+                        buf.push_str(&format!("  store {} {}, ptr {}\n", llvm_ty(ty), r, reg));
+                    }
                 }
                 Instr::Panic { msg } => {
                     let m = valreg
@@ -953,6 +1002,10 @@ fn emit_fn(
                         cur = dst;
                     }
                     valreg.insert(dest.0, format!("%v{}", dest.0));
+                    if let Some(reg) = agg_names.get(&ordinal) {
+                        let v = format!("%v{}", dest.0);
+                        buf.push_str(&format!("  store {} {}, ptr {}\n", arr_ty, v, reg));
+                    }
                 }
                 Instr::IndexGet {
                     dest,
@@ -1057,6 +1110,14 @@ fn emit_fn(
                     let r = format!("%v{}", dest.0);
                     valreg.insert(dest.0, r.clone());
                     buf.push_str(&format!("  {} = load {}, ptr {}\n", r, arr_ty, slot));
+                    if let Some(reg) = agg_names.get(&ordinal) {
+                        buf.push_str(&format!(
+                            "  store {} {}, ptr {}\n",
+                            arr_ty,
+                            r,
+                            reg
+                        ));
+                    }
                 }
                 Instr::Copy { dest, src, ty } => {
                     let r = format!("%v{}", dest.0);
@@ -1072,6 +1133,9 @@ fn emit_fn(
                         llvm_ty(ty),
                         s
                     ));
+                    if let Some(reg) = agg_names.get(&ordinal) {
+                        buf.push_str(&format!("  store {} {}, ptr {}\n", llvm_ty(ty), r, reg));
+                    }
                 }
                 Instr::Alloca { .. } => {
                     // Hoisted to the prologue by the memory plan above.

@@ -490,6 +490,20 @@ impl Scope {
             None => false,
         }
     }
+    /// Copy back type refinements made to *pre-existing* bindings in a
+    /// nested scope (a loop body analyses against a clone, so that names
+    /// declared inside the loop do not leak out). Refinements of outer
+    /// bindings - such as a list's element type fixed by a `list_push` inside
+    /// the loop - must still be visible afterwards.
+    fn merge_refined(&mut self, other: &Scope) {
+        for (name, info) in other.vars.iter() {
+            if let Some(mine) = self.vars.get_mut(name)
+                && mine.ty != info.ty
+            {
+                mine.ty = info.ty.clone();
+            }
+        }
+    }
 }
 
 fn fty_name(t: &ATypeExpr) -> String {
@@ -714,9 +728,12 @@ fn analyze_block(ctx: &mut Ctx, scope: &mut Scope, stmts: &[Stmt]) -> Vec<HirStm
                 }
                 let mut sc = scope.clone();
                 let th = analyze_block(ctx, &mut sc, then_branch);
+                scope.merge_refined(&sc);
                 let el = else_branch.as_ref().map(|b| {
                     let mut sc2 = scope.clone();
-                    analyze_block(ctx, &mut sc2, b)
+                    let r = analyze_block(ctx, &mut sc2, b);
+                    scope.merge_refined(&sc2);
+                    r
                 });
                 out.push(HirStmt::If {
                     cond: c,
@@ -737,6 +754,7 @@ fn analyze_block(ctx: &mut Ctx, scope: &mut Scope, stmts: &[Stmt]) -> Vec<HirStm
                 }
                 let mut sc = scope.clone();
                 let b = analyze_block(ctx, &mut sc, body);
+                scope.merge_refined(&sc);
                 out.push(HirStmt::While { cond: c, body: b });
             }
             StmtKind::For { var, iter, body } => match iter {
@@ -764,6 +782,7 @@ fn analyze_block(ctx: &mut Ctx, scope: &mut Scope, stmts: &[Stmt]) -> Vec<HirStm
                     let mut sc = scope.clone();
                     sc.insert(var.clone(), Ty::Int, false);
                     let b = analyze_block(ctx, &mut sc, body);
+                    scope.merge_refined(&sc);
                     out.push(HirStmt::For {
                         var: var.clone(),
                         start: st,
@@ -793,6 +812,7 @@ fn analyze_block(ctx: &mut Ctx, scope: &mut Scope, stmts: &[Stmt]) -> Vec<HirStm
                     let mut sc = scope.clone();
                     sc.insert(var.clone(), elem_ty.clone(), false);
                     let b = analyze_block(ctx, &mut sc, body);
+                    scope.merge_refined(&sc);
                     let n = if let Ty::Array(_, n) = &at { *n } else { 0 };
                     let arr_name = format!("$fea{}", ctx.synthetic);
                     let idx_name = format!("$fei{}", ctx.synthetic);

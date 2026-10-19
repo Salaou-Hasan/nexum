@@ -78,11 +78,17 @@ for pointers.
 * **Root entry**: a pair describing one root:
   * `+0`  `addr` (ptr) - address of the root slot
   * `+8`  `scan_bytes` (i64) - bytes to scan; 0 means "not a root"
-* The compiler decides what to register: a local or temporary whose type can
-  hold a reference is registered with the number of bytes the collector must
-  scan - 8 for a `Str` or `List`, the whole size for a record or array that
-  contains references, 0 for everything else (a numeric local is not
-  registered at all).
+* The compiler registers **every** stack slot, not only the ones that
+  provably hold a reference: a `Str` or `List` local scans 8 bytes, a record
+  or array scans its whole size, and everything else scans a single word.
+  Registering only the provably-reference-holding slots is more precise, but a
+  single missed slot is a use-after-free that the collector cannot recover
+  from; scanning a numeric slot can only retain one object for an extra
+  cycle, which is far cheaper than a dangling pointer.
+* An aggregate value that can hold references is **spilled into a rooted
+  slot** right after it is produced, because while it only lives in a
+  register a collection triggered by a later allocation could free the strings
+  it points to.
 * **Registration**: a function with at least one root allocates the frame
   and its entry array in its entry block, zeroes every root slot, and calls
   `nexum_roots_push(frame)`; it calls `nexum_roots_pop()` before every

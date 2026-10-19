@@ -96,11 +96,12 @@ pub fn runtime_ir(msvc: bool) -> String {
         "define internal void @nexum_roots_pop() {\nentry:\n  %h = load ptr, ptr @nexum_roots_head\n  %p = load ptr, ptr %h\n  store ptr %p, ptr @nexum_roots_head\n  ret void\n}\n\n",
     );
 
-    // Allocation. `scan_bytes` says how many payload bytes hold references
-    // that the collector must trace; 0 means the object is a leaf.
-    // Returns the payload pointer.
+    // Allocation. Every object's *whole* payload is scanned for interior
+    // references by the collector, so the scan size is the payload size; the
+    // `scan_bytes` argument is kept for callers that know better and is
+    // currently the same value.
     s.push_str(
-        "define internal ptr @nexum_alloc_scanned(i64 %payload, i64 %scan_bytes) {\nentry:\n  %sz0 = add i64 %payload, 15\n  %sz = and i64 %sz0, -16\n  %total = add i64 %sz, 32\n  call void @nexum_gc_maybe()\n  %p = call ptr @malloc(i64 %total)\n  %isnull = icmp eq ptr %p, null\n  br i1 %isnull, label %oom, label %ok\noom:\n  call void @nexum_oom()\n  unreachable\nok:\n  store i64 %sz, ptr %p\n  %mp = getelementptr i8, ptr %p, i64 8\n  store i64 0, ptr %mp\n  %np = getelementptr i8, ptr %p, i64 16\n  %head = load ptr, ptr @nexum_obj_head\n  store ptr %head, ptr %np\n  store ptr %p, ptr @nexum_obj_head\n  %sbp = getelementptr i8, ptr %p, i64 24\n  store i64 %scan_bytes, ptr %sbp\n  %live = load i64, ptr @nexum_live\n  %live2 = add i64 %live, %sz\n  store i64 %live2, ptr @nexum_live\n  %since = load i64, ptr @nexum_since\n  %since2 = add i64 %since, %sz\n  store i64 %since2, ptr @nexum_since\n  %pay = getelementptr i8, ptr %p, i64 32\n  ret ptr %pay\n}\n\n",
+        "define internal ptr @nexum_alloc_scanned(i64 %payload, i64 %scan_bytes) {\nentry:\n  %sz0 = add i64 %payload, 15\n  %sz = and i64 %sz0, -16\n  %total = add i64 %sz, 32\n  call void @nexum_gc_maybe()\n  %p = call ptr @malloc(i64 %total)\n  %isnull = icmp eq ptr %p, null\n  br i1 %isnull, label %oom, label %ok\noom:\n  call void @nexum_oom()\n  unreachable\nok:\n  store i64 %sz, ptr %p\n  %mp = getelementptr i8, ptr %p, i64 8\n  store i64 0, ptr %mp\n  %np = getelementptr i8, ptr %p, i64 16\n  %head = load ptr, ptr @nexum_obj_head\n  store ptr %head, ptr %np\n  store ptr %p, ptr @nexum_obj_head\n  %sbp = getelementptr i8, ptr %p, i64 24\n  store i64 %sz, ptr %sbp\n  %live = load i64, ptr @nexum_live\n  %live2 = add i64 %live, %sz\n  store i64 %live2, ptr @nexum_live\n  %since = load i64, ptr @nexum_since\n  %since2 = add i64 %since, %sz\n  store i64 %since2, ptr @nexum_since\n  %pay = getelementptr i8, ptr %p, i64 32\n  ret ptr %pay\n}\n\n",
     );
     s.push_str(
         "define internal ptr @nexum_alloc(i64 %payload) {\nentry:\n  %p = call ptr @nexum_alloc_scanned(i64 %payload, i64 0)\n  ret ptr %p\n}\n\n",

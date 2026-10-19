@@ -62,6 +62,66 @@ pub enum TokenKind {
     Eof,
 }
 
+impl TokenKind {
+    /// Stable name of the token kind, used by `nx lex` so that the
+    /// self-hosted lexer can be compared against this one token by token.
+    pub fn name(&self) -> &'static str {
+        match self {
+            TokenKind::Ident => "Ident",
+            TokenKind::Int => "Int",
+            TokenKind::Float => "Float",
+            TokenKind::Str => "Str",
+            TokenKind::KwFn => "KwFn",
+            TokenKind::KwType => "KwType",
+            TokenKind::KwLet => "KwLet",
+            TokenKind::KwMut => "KwMut",
+            TokenKind::KwIf => "KwIf",
+            TokenKind::KwElse => "KwElse",
+            TokenKind::KwWhile => "KwWhile",
+            TokenKind::KwFor => "KwFor",
+            TokenKind::KwIn => "KwIn",
+            TokenKind::KwReturn => "KwReturn",
+            TokenKind::KwTrue => "KwTrue",
+            TokenKind::KwFalse => "KwFalse",
+            TokenKind::KwAnd => "KwAnd",
+            TokenKind::KwOr => "KwOr",
+            TokenKind::KwNot => "KwNot",
+            TokenKind::KwImport => "KwImport",
+            TokenKind::LParen => "LParen",
+            TokenKind::RParen => "RParen",
+            TokenKind::LBracket => "LBracket",
+            TokenKind::RBracket => "RBracket",
+            TokenKind::Comma => "Comma",
+            TokenKind::Colon => "Colon",
+            TokenKind::Dot => "Dot",
+            TokenKind::Arrow => "Arrow",
+            TokenKind::Range => "Range",
+            TokenKind::Semicolon => "Semicolon",
+            TokenKind::Plus => "Plus",
+            TokenKind::Minus => "Minus",
+            TokenKind::Star => "Star",
+            TokenKind::Slash => "Slash",
+            TokenKind::Percent => "Percent",
+            TokenKind::PlusEq => "PlusEq",
+            TokenKind::MinusEq => "MinusEq",
+            TokenKind::StarEq => "StarEq",
+            TokenKind::SlashEq => "SlashEq",
+            TokenKind::PercentEq => "PercentEq",
+            TokenKind::EqEq => "EqEq",
+            TokenKind::BangEq => "BangEq",
+            TokenKind::Lt => "Lt",
+            TokenKind::Gt => "Gt",
+            TokenKind::LtEq => "LtEq",
+            TokenKind::GtEq => "GtEq",
+            TokenKind::Eq => "Eq",
+            TokenKind::Newline => "Newline",
+            TokenKind::Indent => "Indent",
+            TokenKind::Dedent => "Dedent",
+            TokenKind::Eof => "Eof",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Token {
     pub kind: TokenKind,

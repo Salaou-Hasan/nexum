@@ -57,6 +57,9 @@ enum Commands {
         file: PathBuf,
     },
     Update,
+    Lex {
+        file: PathBuf,
+    },
     New {
         name: String,
     },
@@ -88,6 +91,12 @@ fn main() {
     match cli.cmd {
         Commands::Update => {
             update_nexum();
+        }
+        Commands::Lex { file } => {
+            if let Err(e) = lex_file(&file) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
         }
         Commands::New { name } => {
             new_project(&name);
@@ -305,7 +314,7 @@ fn update_nexum() {
         std::process::exit(1);
     }
     let _ = std::fs::remove_file(&old);
-    println!("updated to {} â€” restart nx to use the new version", tag);
+    println!("updated to {} ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â restart nx to use the new version", tag);
 }
 
 fn format_nx(text: &str) -> Result<String, String> {
@@ -844,6 +853,30 @@ fn compile_to_mir(
         eprintln!("{}", render(d, &sm));
     }
     Ok((sm, mir))
+}
+
+/// Dump the token stream of a file, one token per line, as
+/// `<kind>\t<text>`. The format is stable so that the self-hosted lexer can be
+/// compared against this one token by token.
+fn lex_file(file: &Path) -> Result<(), String> {
+    let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let mut sm = nexum_source::SourceMap::new();
+    let fid = sm.add(file.to_path_buf(), text);
+    let sf = sm.get(fid);
+    let out = nexum_lexer::lex(sf);
+    for d in &out.diagnostics {
+        eprintln!("{}", render(d, &sm));
+    }
+    let mut buf = String::new();
+    for t in &out.tokens {
+        buf.push_str(t.kind.name());
+        buf.push('\t');
+        buf.push('\n');
+        buf.push_str(&t.text);
+        buf.push('\n');
+    }
+    print!("{}", buf);
+    Ok(())
 }
 
 fn check_file(file: &Path, opt_level: u8) -> Result<(), String> {
