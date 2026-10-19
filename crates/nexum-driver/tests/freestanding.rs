@@ -48,20 +48,24 @@ fn posix_programs_need_only_the_remaining_libc() {
         let symbols = external_symbols(target);
         assert_eq!(
             symbols,
-            vec!["exit", "fputc", "fputs", "free", "malloc", "printf"],
+            vec!["exit", "fputc", "fputs", "printf"],
             "{target} declares {symbols:?}"
         );
     }
 }
 
-/// The Windows build is still on the C library: its kernel interface lives
-/// behind `ntdll`, and the system call stubs are phase 11a.2.
+/// The Windows build is still on the C library for its output and its file
+/// routines: its kernel interface lives behind `ntdll`, and the system call
+/// stubs are phase 11a.2. Its heap is ours, though: the allocator uses
+/// `VirtualAlloc`, which is the kernel and not the C library.
 #[test]
 fn windows_still_needs_the_c_library() {
     let symbols = external_symbols("windows-x86_64");
     assert_eq!(
         symbols,
         vec![
+            "VirtualAlloc",
+            "VirtualFree",
             "__acrt_iob_func",
             "exit",
             "fclose",
@@ -69,11 +73,9 @@ fn windows_still_needs_the_c_library() {
             "fputc",
             "fputs",
             "fread",
-            "free",
             "fseek",
             "ftell",
             "fwrite",
-            "malloc",
             "printf",
         ],
         "windows declares {symbols:?}"

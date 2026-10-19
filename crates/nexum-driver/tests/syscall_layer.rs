@@ -159,6 +159,10 @@ struct Layout {
     clobbers: &'static [&'static str],
     /// True when the wrapper has to align the stack itself.
     aligns_stack: bool,
+    /// The high half of the number, where the number needs two
+    /// instructions to build. Darwin on AArch64 puts the BSD number in
+    /// the high bits.
+    number_high: Option<i64>,
 }
 
 /// The layout of a target.
@@ -174,6 +178,7 @@ fn layout(target: &str) -> Layout {
                 result: "x0",
                 clobbers: &["x16"],
                 aligns_stack: false,
+                number_high: Some(0x2000),
             }
         } else {
             Layout {
@@ -185,6 +190,7 @@ fn layout(target: &str) -> Layout {
                 result: "x0",
                 clobbers: &["x8"],
                 aligns_stack: false,
+                number_high: None,
             }
         }
     } else {
@@ -197,6 +203,7 @@ fn layout(target: &str) -> Layout {
             result: "rax",
             clobbers: &["rcx", "r11", "r12"],
             aligns_stack: true,
+            number_high: None,
         }
     }
 }
@@ -331,10 +338,21 @@ fn module_for(target: &str) -> &'static str {
 
 /// The body of a function definition, by its name.
 fn function_body(ir: &str, name: &str) -> String {
+    // The definition, not a call to it: a call site has the same name and
+    // no body. The return type does not matter.
     let marker = format!("@{name}(");
-    let start = ir
-        .find(&marker)
-        .unwrap_or_else(|| panic!("the module has no {name}"));
+    let mut from = 0;
+    let start = loop {
+        let i = ir[from..]
+            .find(&marker)
+            .unwrap_or_else(|| panic!("the module has no {name}"));
+        let abs = from + i;
+        let line_start = ir[..abs].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        if ir[line_start..abs].trim_start().starts_with("define") {
+            break abs;
+        }
+        from = abs + marker.len();
+    };
     let rest = &ir[start..];
     let end = rest
         .find("\n}\n")
@@ -420,23 +438,35 @@ fn number_in(target: &str, name: &str) -> i64 {
     let lay = layout(target);
     let block = only_asm_block(target, name);
     // On x86-64 the number is an immediate: `movq $$60, %rax`. On AArch64
-    // it is `mov x8, #60`.
+    // it is `mov x8, #60`, or, where the number has bits above the
+    // sixteenth, the two instructions `movz` and `movk` that build it.
+    if lay.number_high.is_some() {
+        let movz = format!("movz {}, #", lay.number);
+        let movk = format!("movk {}, #", lay.number);
+        let hi = parse_after(&block.text, &movz, target, name);
+        let lo = parse_after(&block.text, &movk, target, name);
+        return (hi << 16) | lo;
+    }
     let prefix = if lay.aligns_stack {
         "movq $$".to_string()
     } else {
         format!("mov {}, #", lay.number)
     };
-    let i = block
-        .text
-        .find(&prefix)
-        .unwrap_or_else(|| panic!("{target}/{name}: no number in {:?}", block.text));
-    let rest = &block.text[i + prefix.len()..];
+    parse_after(&block.text, &prefix, target, name)
+}
+
+/// The number that follows a prefix in the assembly text.
+fn parse_after(text: &str, prefix: &str, target: &str, name: &str) -> i64 {
+    let i = text
+        .find(prefix)
+        .unwrap_or_else(|| panic!("{target}/{name}: no number in {text:?}"));
+    let rest = &text[i + prefix.len()..];
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
     rest[..end]
         .parse()
-        .unwrap_or_else(|e| panic!("{target}/{name}: {e} in {:?}", block.text))
+        .unwrap_or_else(|e| panic!("{target}/{name}: {e} in {text:?}"))
 }
 
 /// The arguments of every call to a system call wrapper, in the module.
@@ -634,11 +664,26 @@ fn the_number_is_an_immediate() {
                     block.text
                 );
             } else {
-                assert!(
-                    block.text.contains(&format!("mov {}, #{n}", lay.number)),
-                    "{target}/{name}: the number is not an immediate:\n{}",
-                    block.text
-                );
+                if lay.number_high.is_some() {
+                    // The number has bits above the sixteenth, so it is
+                    // built by two instructions.
+                    assert!(
+                        block.text.contains(&format!("movz {}, #", lay.number)),
+                        "{target}/{name}: the number is not an immediate:\n{}",
+                        block.text
+                    );
+                    assert!(
+                        block.text.contains(&format!("movk {}, #", lay.number)),
+                        "{target}/{name}: the number is not an immediate:\n{}",
+                        block.text
+                    );
+                } else {
+                    assert!(
+                        block.text.contains(&format!("mov {}, #{n}", lay.number)),
+                        "{target}/{name}: the number is not an immediate:\n{}",
+                        block.text
+                    );
+                }
                 assert!(
                     !block.text.contains(&format!("mov {}, {n}", lay.number)),
                     "{target}/{name}: the number is read from memory:\n{}",
@@ -707,17 +752,23 @@ fn the_numbers_are_per_system() {
     assert_eq!(number_in("macos-x86_64", "mmap"), 197);
     assert_eq!(number_in("macos-x86_64", "munmap"), 198);
 
-    // The number belongs to the system, not to the architecture.
+    // The number belongs to the system, not to the architecture - with one
+    // exception: Darwin on AArch64 puts the BSD number in the high bits, so
+    // the same call has a different number there.
     assert_eq!(
         number_in("linux-aarch64", "read"),
         number_in("linux-x86_64", "read")
     );
     assert_eq!(
-        number_in("macos-aarch64", "read"),
+        number_in("linux-aarch64", "exit"),
+        number_in("linux-x86_64", "exit")
+    );
+    assert_eq!(
+        number_in("macos-aarch64", "read") - 0x2000000,
         number_in("macos-x86_64", "read")
     );
     assert_eq!(
-        number_in("macos-aarch64", "exit"),
+        number_in("macos-aarch64", "exit") - 0x2000000,
         number_in("macos-x86_64", "exit")
     );
 
