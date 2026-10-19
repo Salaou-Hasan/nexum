@@ -1,0 +1,28 @@
+type Row:
+    key: Str
+    value: Str
+
+fn main():
+    let source = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#$%^&*()_+"
+    let rows = list_new()
+    let mut i = 0
+    while i < 64:
+        # Every field is a distinct heap string, and the list keeps growing,
+        # so its element buffer is reallocated several times.
+        list_push(rows, Row(slice(source, i, i + 3), slice(source, i + 5, i + 9)))
+        i = i + 1
+    # Collect repeatedly while the list is live.
+    let mut j = 0
+    while j < 200:
+        let junk = concat("j", "unk")
+        collect()
+        j = j + 1
+    # Every row must still be intact.
+    let mut k = 0
+    let n = list_len(rows)
+    while k < n:
+        let r = list_get(rows, k)
+        print(r.key)
+        print(r.value)
+        k = k + 1
+    print(n)
