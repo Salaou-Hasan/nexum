@@ -22,10 +22,14 @@ The parts that still come from the C library, and when they go:
 | ----- | ----- | ----- |
 | `strlen`, `memcpy`, `strcmp` | the runtime's own | done |
 | file reading and writing | the system calls | done (POSIX) |
-| `malloc`, `free` | the C library | 11a.2 |
-| `printf`, `fputs`, `fputc` | the C library | 11a.2 |
-| `exit` | the C library | 11a.2 |
-| the file routines on Windows | the C library | 11a.2 (Windows has no direct system call instruction) |
+| `malloc`, `free` | the runtime's own allocator | done |
+| `printf`, `fputs`, `fputc` | the runtime's own formatters | done (POSIX) |
+| `exit` | the system call | done (POSIX) |
+| the file routines and the output on Windows | the C library | 11a.2 (Windows has no direct system call instruction) |
+
+**A program built for Linux or macOS declares no external symbol at all.**
+The gate `crates/nexum-driver/tests/freestanding.rs` pins that, so the
+list cannot grow back.
 
 The Windows build needs its own system call stubs: its kernel interface
 lives behind `ntdll`, so the stubs have to be generated rather than

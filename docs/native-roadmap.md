@@ -36,16 +36,16 @@ seventeen external symbols:
 | raw POSIX | `write` |
 | files | `fopen`, `fclose`, `fseek`, `ftell`, `fread`, `fwrite` |
 
-The system call layer, the runtime's own string routines and the runtime's
-own file routines have taken ten of them away. A program built for Linux
-now *declares* six - `printf`, `fputs`, `fputc`, `exit`, `malloc` and
-`free` - and *depends* on four, because `fputs` and `fputc` are only
-called on the Windows panic path and the optimiser drops them. The count
-that matters is the one in the object file, and the gate
-`crates/nexum-driver/tests/freestanding.rs` pins it.
+The system call layer, the runtime's own string routines, the runtime's
+own file routines, the allocator and the output formatting have taken all
+of them away. **A program built for Linux or macOS now declares no
+external symbol at all.** The gate
+`crates/nexum-driver/tests/freestanding.rs` pins that, so the list cannot
+grow back.
 
-What is left is the allocator and the output formatting, and phase 11a.2
-takes both away.
+Windows is still on the C library for its output and its file routines:
+its kernel interface lives behind `ntdll`, so the system call stubs have
+to be generated rather than assembled, and that is phase 11a.2.
 
 So every program Nexum builds today is a C program with a Nexum front end.
 The collector allocates through `malloc`, prints through `printf`, and
