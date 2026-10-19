@@ -176,7 +176,7 @@ fn layout(target: &str) -> Layout {
                 call: &["x0", "x1", "x2", "x3", "x4", "x5"],
                 staging: &["x9", "x10", "x11", "x12", "x13", "x14"],
                 result: "x0",
-                clobbers: &["x16"],
+                clobbers: &["x16", "x19"],
                 aligns_stack: false,
                 number_high: Some(0x2000),
             }
@@ -188,7 +188,7 @@ fn layout(target: &str) -> Layout {
                 call: &["x0", "x1", "x2", "x3", "x4", "x5"],
                 staging: &["x9", "x10", "x11", "x12", "x13", "x14"],
                 result: "x0",
-                clobbers: &["x8"],
+                clobbers: &["x8", "x19"],
                 aligns_stack: false,
                 number_high: None,
             }

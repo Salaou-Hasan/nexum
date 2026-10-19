@@ -50,16 +50,21 @@ pub mod syscalls;
 pub fn runtime_ir(os: &str, arch: &str) -> String {
     let mut s = String::new();
     let msvc = os.contains("windows");
-    s.push_str("declare i32 @printf(ptr, ...)\n");
-    s.push_str("declare i32 @fputs(ptr, ptr)\n");
-    s.push_str("declare i32 @fputc(i32, ptr)\n");
-    s.push_str("declare void @exit(i32)\n");
+    // The output formatting is ours on the POSIX targets, so the C
+    // library's stdio is not needed there. Windows still uses it.
+    if msvc {
+        s.push_str("declare i32 @printf(ptr, ...)\n");
+        s.push_str("declare i32 @fputs(ptr, ptr)\n");
+        s.push_str("declare i32 @fputc(i32, ptr)\n");
+        s.push_str("declare void @exit(i32)\n");
+    }
 
     // The string routines are ours on every platform: a program should not
     // need the C library for a byte copy.
     s.push_str(&strings::string_routines());
     s.push_str(&heap::allocator_ir(os, arch));
     s.push_str(&bytes::byte_routines());
+    s.push_str(&format::format_routines(!msvc));
 
     if msvc {
         // The UCRT exposes stdio streams through __acrt_iob_func; the classic
@@ -125,7 +130,7 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
         s.push_str(
             "define internal void @nexum_panic(ptr %msg) {\n  %len = call i64 @nexum_strlen(ptr %msg)\n  %msgi = ptrtoint ptr %msg to i64
   %w = call i64 @nexum_sys_write(i64 2, i64 %msgi, i64 %len)\n  %nli = ptrtoint ptr @nexum_nl to i64
-  %n = call i64 @nexum_sys_write(i64 2, i64 %nli, i64 1)\n  call void @exit(i32 1)\n  unreachable\n}\n\n",
+  %n = call i64 @nexum_sys_write(i64 2, i64 %nli, i64 1)\n  call void @nexum_sys_exit(i64 1)\n  unreachable\n}\n\n",
         );
     }
 

@@ -167,7 +167,8 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             result: "x0",
             number: "x8",
             instruction: "svc #0",
-            clobbers: &["x8"],
+            // x19 holds the aligned stack pointer across the call.
+            clobbers: &["x8", "x19"],
             number_base: 0,
             error_in_carry: false,
         },
@@ -177,7 +178,8 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             result: "x0",
             number: "x16",
             instruction: "svc #0x80",
-            clobbers: &["x16"],
+            // x19 holds the aligned stack pointer across the call.
+            clobbers: &["x16", "x19"],
             // Darwin on AArch64 puts the BSD number in the high bits.
             number_base: 0x2000000,
             error_in_carry: true,
@@ -212,7 +214,12 @@ fn call_body(os: SysOs, arch: SysArch, nr: i64, args: &[Arg]) -> String {
             // single one starts an operand reference.
             text.push_str("mov %rsp, %r12; and $$-16, %rsp; ");
         }
-        SysArch::Aarch64 => {}
+        SysArch::Aarch64 => {
+            // The same dance, with a callee-saved register: the system
+            // call preserves it, and the compiler saves it around the
+            // block because it is declared clobbered.
+            text.push_str("mov x19, sp; and x19, x19, #-16; mov sp, x19; ");
+        }
     }
     // The number goes into the register the convention uses. It is a
     // constant in the text: it differs per system and per call. A literal
@@ -265,7 +272,7 @@ fn call_body(os: SysOs, arch: SysArch, nr: i64, args: &[Arg]) -> String {
     // The stack is restored after the call.
     match arch {
         SysArch::X86_64 => text.push_str("mov %r12, %rsp"),
-        SysArch::Aarch64 => {}
+        SysArch::Aarch64 => text.push_str("mov sp, x19"),
     }
     // The text of an assembly block is one line: the newlines are escapes.
     let text = text.replace('\n', "\\0A");
