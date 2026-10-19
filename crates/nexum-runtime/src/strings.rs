@@ -41,8 +41,7 @@ pub fn file_routines(posix: bool, open_write: i64, open_mode: i64) -> String {
   %rd = call i64 @nexum_sys_read(i64 %fd, i64 %bufi, i64 %size)\n  %nulp = getelementptr i8, ptr %buf, i64 %size\n  store i8 0, ptr %nulp\n  %cl = call i64 @nexum_sys_close(i64 %fd)\n  ret ptr %buf\n}\n\n",
         );
         // Write a whole file.
-        s.push_str(&format!("define internal void @nexum_write_file(ptr %path, ptr %content) {{\nentry:\n  %fd = call i64 @nexum_sys_open(ptr %path, i64 {open_write}, i64 {open_mode})\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_notfound)\n  unreachable\nok:\n  %len = call i64 @nexum_strlen(ptr %content)\n  %contenti = ptrtoint ptr %content to i64
-  %wr = call i64 @nexum_sys_write(i64 %fd, i64 %contenti, i64 %len)\n  %cl = call i64 @nexum_sys_close(i64 %fd)\n  ret void\n}}\n\n"));
+        s.push_str(&format!("define internal void @nexum_write_file(ptr %path, ptr %content) {{\nentry:\n  %pathi = ptrtoint ptr %path to i64\n  %fd = call i64 @nexum_sys_open(i64 %pathi, i64 {open_write}, i64 {open_mode})\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_notfound)\n  unreachable\nok:\n  %len = call i64 @nexum_strlen(ptr %content)\n  %contenti = ptrtoint ptr %content to i64\n  %wr = call i64 @nexum_sys_write(i64 %fd, i64 %contenti, i64 %len)\n  %cl = call i64 @nexum_sys_close(i64 %fd)\n  ret void\n}}\n\n"));
     } else {
         s.push_str(
             "define internal ptr @nexum_read_file(ptr %path) {\nentry:\n  %f = call ptr @fopen(ptr %path, ptr @nexum_mode_r)\n  %isnull = icmp eq ptr %f, null\n  br i1 %isnull, label %fail, label %ok\nfail:\n  call void @nexum_panic(ptr @nexum_msg_notfound)\n  unreachable\nok:\n  %s1 = call i32 @fseek(ptr %f, i64 0, i32 2)\n  %size = call i64 @ftell(ptr %f)\n  %s2 = call i32 @fseek(ptr %f, i64 0, i32 0)\n  %n1 = add i64 %size, 1\n  %buf = call ptr @nexum_alloc(i64 %n1)\n  %rd = call i64 @fread(ptr %buf, i64 1, i64 %size, ptr %f)\n  %nulp = getelementptr i8, ptr %buf, i64 %size\n  store i8 0, ptr %nulp\n  %cl = call i32 @fclose(ptr %f)\n  ret ptr %buf\n}\n\n",
@@ -52,4 +51,31 @@ pub fn file_routines(posix: bool, open_write: i64, open_mode: i64) -> String {
         );
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    /// The system call wrappers take their arguments as integers, so a
+    /// pointer has to be converted before it is passed.
+    ///
+    /// The LLVM verifier does not catch a call with mismatched argument
+    /// types - clang compiles it without complaint, because it passes
+    /// `-disable-llvm-verifier` to the compiler proper - so this check is
+    /// what stands between a mistyped call and the kernel.
+    #[test]
+    fn the_system_calls_are_passed_integers() {
+        let ir = crate::runtime_ir("linux-x86_64", "x86_64");
+        let mut checked = 0;
+        for line in ir.lines() {
+            if !line.contains("call i64 @nexum_sys_") {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                !line.contains("(ptr "),
+                "a pointer is passed to a system call: {line}"
+            );
+        }
+        assert!(checked > 0, "no system calls in the runtime");
+    }
 }

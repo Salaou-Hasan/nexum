@@ -169,6 +169,9 @@ pub struct BuildOpts {
     pub pgo_generate: bool,
     /// PGO: use profile data from this path.
     pub pgo_use: Option<String>,
+    /// The target triple to build for. Without it, clang builds for the
+    /// host, which silently produces a host binary for a cross build.
+    pub target: Option<String>,
 }
 
 pub fn run_clang(clang: &str, ll_path: &str, out_path: &str) -> Result<(), String> {
@@ -183,6 +186,11 @@ pub fn run_clang_with(
 ) -> Result<(), String> {
     let mut cmd = Command::new(clang);
     cmd.arg("-Wno-override-module");
+    // The target comes first: without it clang builds for the host, and a
+    // cross build silently produces a host binary.
+    if let Some(t) = &opts.target {
+        cmd.arg(format!("--target={t}"));
+    }
     let o = opts.opt.min(3);
     cmd.arg(format!("-O{}", o));
     if opts.lto {
@@ -218,11 +226,7 @@ pub fn verify_ir(clang: &str, ll_path: &str) -> Result<(), String> {
 /// Verify a module for a given target. The target matters: the module may
 /// contain assembly for a foreign instruction set, which the host assembler
 /// cannot check.
-pub fn verify_ir_for(
-    clang: &str,
-    ll_path: &str,
-    target: Option<&str>,
-) -> Result<(), String> {
+pub fn verify_ir_for(clang: &str, ll_path: &str, target: Option<&str>) -> Result<(), String> {
     let obj_path = format!("{}.verify.obj", ll_path);
     let mut command = Command::new(clang);
     command.arg("-Wno-override-module");

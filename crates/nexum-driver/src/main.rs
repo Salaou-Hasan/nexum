@@ -186,6 +186,7 @@ fn main() {
                 sysroot,
                 pgo_generate,
                 pgo_use,
+                target: None,
             };
             if let Err(e) = build_file(&file, output, opt_level) {
                 eprintln!("{}", e);
@@ -998,6 +999,7 @@ static BUILD_OPTS: std::sync::Mutex<nexum_toolchain::BuildOpts> =
         sysroot: None,
         pgo_generate: false,
         pgo_use: None,
+        target: None,
     });
 
 fn current_build_opts() -> nexum_toolchain::BuildOpts {
@@ -1139,11 +1141,15 @@ fn build_file(file: &Path, output: Option<PathBuf>, opt_level: u8) -> Result<(),
     let ll_path = std::env::temp_dir().join("nexum_out.ll");
     fs::write(&ll_path, ir).map_err(|e| e.to_string())?;
     nexum_toolchain::verify_ir_for(&tc.clang, ll_path.to_str().unwrap(), Some(&target.triple))?;
+    // The link step has to know the target too: without it, a cross build
+    // silently produces a binary for the host.
+    let mut opts = current_build_opts();
+    opts.target = Some(target.triple.clone());
     nexum_toolchain::run_clang_with(
         &tc.clang,
         ll_path.to_str().unwrap(),
         out_exe.to_str().unwrap(),
-        &current_build_opts(),
+        &opts,
     )
     .map_err(|e| e.to_string())?;
     println!("built: {}", out_exe.display());

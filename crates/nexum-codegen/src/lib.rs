@@ -621,10 +621,13 @@ fn emit_fn(
                                     c, l, rr
                                 ));
                                 buf.push_str(&format!("  {} = icmp eq i32 {}, 0\n", r, c));
-                            } else if *ty == Ty::Float {
+                            } else if oty_str == "double" {
+                                // The operand type, not the result type: a
+                                // comparison yields a Bool, so the result
+                                // type says nothing about the operands.
                                 buf.push_str(&format!(
                                     "  {} = fcmp oeq {} {}, {}\n",
-                                    r, "double", l, rr
+                                    r, oty_str, l, rr
                                 ));
                             } else {
                                 buf.push_str(&format!(
@@ -641,6 +644,14 @@ fn emit_fn(
                                     c, l, rr
                                 ));
                                 buf.push_str(&format!("  {} = icmp ne i32 {}, 0\n", r, c));
+                            } else if oty_str == "double" {
+                                // Unordered, so a NaN is not equal to
+                                // anything: `a != b` is true when one of
+                                // them is a NaN, as IEEE says.
+                                buf.push_str(&format!(
+                                    "  {} = fcmp une {} {}, {}\n",
+                                    r, oty_str, l, rr
+                                ));
                             } else {
                                 buf.push_str(&format!(
                                     "  {} = icmp ne {} {}, {}\n",
@@ -649,16 +660,48 @@ fn emit_fn(
                             }
                         }
                         MBin::Lt => {
-                            buf.push_str(&format!("  {} = icmp slt {} {}, {}\n", r, oty_str, l, rr))
+                            let (op, pred) = if oty_str == "double" {
+                                ("fcmp", "olt")
+                            } else {
+                                ("icmp", "slt")
+                            };
+                            buf.push_str(&format!(
+                                "  {} = {} {} {} {}, {}\n",
+                                r, op, pred, oty_str, l, rr
+                            ))
                         }
                         MBin::Gt => {
-                            buf.push_str(&format!("  {} = icmp sgt {} {}, {}\n", r, oty_str, l, rr))
+                            let (op, pred) = if oty_str == "double" {
+                                ("fcmp", "ogt")
+                            } else {
+                                ("icmp", "sgt")
+                            };
+                            buf.push_str(&format!(
+                                "  {} = {} {} {} {}, {}\n",
+                                r, op, pred, oty_str, l, rr
+                            ))
                         }
                         MBin::Le => {
-                            buf.push_str(&format!("  {} = icmp sle {} {}, {}\n", r, oty_str, l, rr))
+                            let (op, pred) = if oty_str == "double" {
+                                ("fcmp", "ole")
+                            } else {
+                                ("icmp", "sle")
+                            };
+                            buf.push_str(&format!(
+                                "  {} = {} {} {} {}, {}\n",
+                                r, op, pred, oty_str, l, rr
+                            ))
                         }
                         MBin::Ge => {
-                            buf.push_str(&format!("  {} = icmp sge {} {}, {}\n", r, oty_str, l, rr))
+                            let (op, pred) = if oty_str == "double" {
+                                ("fcmp", "oge")
+                            } else {
+                                ("icmp", "sge")
+                            };
+                            buf.push_str(&format!(
+                                "  {} = {} {} {} {}, {}\n",
+                                r, op, pred, oty_str, l, rr
+                            ))
                         }
                         MBin::And => buf.push_str(&format!("  {} = and {} {}, {}\n", r, t, l, rr)),
                         MBin::Or => buf.push_str(&format!("  {} = or {} {}, {}\n", r, t, l, rr)),
