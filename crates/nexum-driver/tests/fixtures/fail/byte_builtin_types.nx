@@ -1,0 +1,9 @@
+# EXPECT: T050
+# The byte primitives check their arguments: a string and an index for
+# `byte_value`, a number in 0..255 for `byte_from_value`.
+fn main():
+    print(byte_value(1, 0))
+    print(byte_value("a", "b"))
+    print(byte_from_value("a"))
+    print(byte_from_value(300))
+    print(byte_from_value(-1))

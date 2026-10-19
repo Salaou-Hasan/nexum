@@ -1217,6 +1217,107 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     ty: Ty::Str,
                 };
             }
+            // The byte primitives. `byte_value(s, i)` is the numeric value
+            // of the byte at index `i`, and `byte_from_value(v)` is the byte
+            // with the numeric value `v`, as a one-byte string. They are the
+            // primitives the standard library's collections are built on: the
+            // map's hash, the sort's comparison and the interning table all
+            // need the numeric value of a byte, and `s[i]` yields a `Str`,
+            // which has no ordering and no conversion to `Int`.
+            if callee == "byte_value" {
+                if ha.len() != 2 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T050",
+                            format!(
+                                "byte_value expects 2 arguments (str, index), got {}",
+                                ha.len()
+                            ),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                if let Some(a0) = ha.first()
+                    && !a0.ty().compatible(&Ty::Str) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T050",
+                                format!("byte_value expects Str, found {}", a0.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                if let Some(a1) = ha.get(1)
+                    && !a1.ty().compatible(&Ty::Int) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T050",
+                                format!("byte_value expects Int index, found {}", a1.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                return HirExpr::Call {
+                    callee: "nexum_byte_value".to_string(),
+                    args: ha,
+                    ty: Ty::Int,
+                };
+            }
+            if callee == "byte_from_value" {
+                if ha.len() != 1 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T050",
+                            format!("byte_from_value expects 1 argument, got {}", ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                if let Some(a0) = ha.first() {
+                    if !a0.ty().compatible(&Ty::Int) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T050",
+                                format!("byte_from_value expects Int, found {}", a0.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    } else {
+                        // A constant that is not a byte is caught here, the
+                        // way a constant index out of bounds is (T033). A
+                        // value that is only known at run time is the
+                        // runtime's business: it panics.
+                        let constant = match a0 {
+                            HirExpr::Int(v, _) => Some(*v),
+                            HirExpr::Unary {
+                                op: UnOp::Neg,
+                                expr,
+                                ..
+                            } => match expr.as_ref() {
+                                HirExpr::Int(v, _) => Some(v.wrapping_neg()),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(v) = constant
+                            && !(0..=255).contains(&v)
+                        {
+                            ctx.diagnostics.push(
+                                Diagnostic::error(
+                                    "T050",
+                                    format!("byte value {} is out of range (0..255)", v),
+                                )
+                                .with_span(args[0].span),
+                            );
+                        }
+                    }
+                }
+                return HirExpr::Call {
+                    callee: "nexum_byte_from_value".to_string(),
+                    args: ha,
+                    ty: Ty::Str,
+                };
+            }
             if callee == "slice" {
                 if ha.len() != 3 {
                     ctx.diagnostics.push(

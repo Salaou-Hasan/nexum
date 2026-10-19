@@ -1,0 +1,16 @@
+# The byte primitives: a byte's numeric value, and a numeric value's byte.
+
+fn main():
+    let s = "Hello, world"
+    print(byte_value(s, 0))
+    print(byte_value(s, 4))
+    print(byte_value(s, 11))
+    print(len(s))
+    let a = byte_from_value(72)
+    print(a)
+    print(byte_value(a, 0))
+    print(byte_from_value(97) == "a")
+    print(byte_value(byte_from_value(255), 0))
+    # A NUL byte ends the string: the runtime's strings are NUL-terminated
+    # (docs/runtime-abi.md, section 8), so the byte 0 has no string.
+    print(len(byte_from_value(0)))
