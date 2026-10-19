@@ -82,20 +82,35 @@ impl TargetSpec {
         ]
     }
 
+    /// The data layout of the target, the string the toolchain writes into
+    /// `target datalayout = "..."` in every module it emits.
+    ///
+    /// These are the layouts clang computes for the same triples, and
+    /// they have to stay the same: a layout that disagrees with clang's
+    /// makes the backend lay the data out differently from the way the C
+    /// compiler lays it out for the same target, and nothing in the build
+    /// reports it.
+    ///
+    /// `clang -target <triple> -S -emit-llvm -x c - -o -` prints the
+    /// layout clang uses. `tests/data_layout.rs` checks these against it.
     pub fn data_layout_str(&self) -> &'static str {
         match (self.arch.as_str(), self.os.as_str()) {
             ("x86_64", "windows") => {
-                "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+                "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
             }
             ("x86_64", "linux") => {
-                "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+                "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
             }
             ("x86_64", "macos") => {
-                "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+                "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
             }
-            ("aarch64", "linux") => "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128",
-            ("aarch64", "macos") => "e-m:o-i64:64-i128:128-n32:64-S128",
-            _ => "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128",
+            ("aarch64", "linux") => {
+                "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"
+            }
+            ("aarch64", "macos") => {
+                "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+            }
+            _ => "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
         }
     }
 
