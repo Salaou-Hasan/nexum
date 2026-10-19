@@ -984,6 +984,7 @@ fn explain(code: &str) {
         "T047" => "cannot import a module (missing or unreadable file).",
         "T048" => "list builtin arity/type error.",
         "T049" => "list element type error (mismatch or not inferable).",
+        "T050" => "byte builtin arity/type error.",
         _ => "unknown diagnostic code.",
     };
     println!("{}: {}", code, msg);
