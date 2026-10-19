@@ -60,6 +60,9 @@ enum Commands {
     Lex {
         file: PathBuf,
     },
+    Parse {
+        file: PathBuf,
+    },
     New {
         name: String,
     },
@@ -94,6 +97,12 @@ fn main() {
         }
         Commands::Lex { file } => {
             if let Err(e) = lex_file(&file) {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Parse { file } => {
+            if let Err(e) = parse_file(&file) {
                 eprintln!("{}", e);
                 std::process::exit(1);
             }
@@ -876,6 +885,25 @@ fn lex_file(file: &Path) -> Result<(), String> {
         buf.push('\n');
     }
     print!("{}", buf);
+    Ok(())
+}
+
+/// Print the normalized form of a parsed module. The format is stable so that
+/// the self-hosted parser can be compared against this one statement by
+/// statement.
+fn parse_file(file: &Path) -> Result<(), String> {
+    let mut sm = nexum_source::SourceMap::new();
+    let (module, load_diags) = nexum_parser::load_module(&mut sm, file);
+    for d in &load_diags {
+        eprintln!("{}", render(d, &sm));
+    }
+    if load_diags
+        .iter()
+        .any(|d| d.severity == nexum_diagnostics::Severity::Error)
+    {
+        return Err("parse errors".into());
+    }
+    print!("{}", nexum_parser::normalize::normalize(&module));
     Ok(())
 }
 

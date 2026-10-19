@@ -19,6 +19,14 @@ fn tmp_dir() -> std::path::PathBuf {
     d
 }
 
+/// A private work directory. Tests that run a self-hosted program share the
+/// fixed input file name, so they must not share a directory.
+fn work_dir(name: &str) -> std::path::PathBuf {
+    let d = tmp_dir().join(name);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
 fn ir_verifies(path: &Path, tc: &nexum_toolchain::Toolchain) {
     let p = common::compile_file(path);
     let mir = p.mir.expect("mir");
@@ -134,7 +142,7 @@ fn run_outputs_match_fixtures() {
 #[test]
 fn selfhosted_lexer_matches_rust_lexer() {
     let Some(tc) = toolchain() else { return };
-    let work = tmp_dir();
+    let work = work_dir("lexer");
     let input = work.join("nexum_selfhost_input.nx");
 
     // Compile the self-hosted lexer once.
@@ -180,6 +188,61 @@ fn selfhosted_lexer_matches_rust_lexer() {
             actual,
             expected,
             "{}: the self-hosted lexer disagrees with the Rust lexer",
+            f.display()
+        );
+    }
+}
+
+/// The self-hosted parser (stage 10c) must produce the same normalized form
+/// as the Rust parser for every parse fixture.
+#[test]
+fn selfhosted_parser_matches_rust_parser() {
+    let Some(tc) = toolchain() else { return };
+    let work = work_dir("parser");
+    let input = work.join("nexum_selfhost_input.nx");
+
+    // Compile the self-hosted parser once.
+    let parser_src = examples_dir().join("selfhost").join("parser.nx");
+    let p = compile_file(&parser_src);
+    let errs = error_lines(&p.diagnostics);
+    assert!(errs.is_empty(), "self-hosted parser must compile: {errs:?}");
+    let mir = p.mir.expect("mir");
+    let ir = emit_ir(&mir);
+    let ll_path = work.join("selfhost_parser.ll");
+    let exe_path = work.join("selfhost_parser.exe");
+    std::fs::write(&ll_path, ir).expect("write ir");
+    nexum_toolchain::verify_ir(&tc.clang, ll_path.to_str().unwrap()).expect("verify ir");
+    nexum_toolchain::run_clang(
+        &tc.clang,
+        ll_path.to_str().unwrap(),
+        exe_path.to_str().unwrap(),
+    )
+    .expect("link");
+
+    let fixtures = fixtures_dir("parse");
+    for f in nx_files(&fixtures) {
+        // The reference form, produced by the Rust parser.
+        let mut sm = nexum_source::SourceMap::new();
+        let (module, diags) = nexum_parser::load_module(&mut sm, &f);
+        let errs: Vec<String> = diags
+            .iter()
+            .filter(|d| d.severity == nexum_diagnostics::Severity::Error)
+            .map(|d| d.code.0.to_string())
+            .collect();
+        assert!(errs.is_empty(), "{}: must parse: {errs:?}", f.display());
+        let expected = nexum_parser::normalize::normalize(&module);
+
+        // The self-hosted form.
+        std::fs::copy(&f, &input).expect("copy input");
+        let run = Command::new(&exe_path)
+            .current_dir(&work)
+            .output()
+            .expect("run self-hosted parser");
+        let actual = String::from_utf8_lossy(&run.stdout).replace("\r\n", "\n");
+        assert_eq!(
+            actual,
+            expected,
+            "{}: the self-hosted parser disagrees with the Rust parser",
             f.display()
         );
     }

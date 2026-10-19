@@ -37,7 +37,7 @@ implementation; the conformance fixtures
 | ----- | ----------- | ------------ |
 | 10a | Port the lexer to Nexum (single file, string input). **Done** - see `examples/selfhost/lexer.nx`. | String indexing + a small token type. (Done) |
 | 10b | Lexer with a token stream, validated against the Rust lexer. **Done** - the self-hosted lexer builds a `List` of tokens and the differential gate compares it with `nx lex` token by token. | Growable lists, file I/O. (Done) |
-| 10c | Port the parser (recursive descent) onto a flat AST arena. | `List` (Done); node arena needs index-based records. |
+| 10c | Port the parser (recursive descent) onto a flat AST arena. **Partly done** - the expression parser is ported and validated against the Rust parser; statements, types and imports are still to come. | `List` (Done); node arena needs index-based records. (Done) |
 | 10d | Port name resolution + type checking. | Hash maps in std. |
 | 10e | Port MIR lowering + optimization passes. | - |
 | 10f | Port codegen (LLVM IR text emission). | String building (already have concat). |
@@ -64,13 +64,24 @@ the Rust bootstrap compiler remains the reference implementation.
 * The matching differential test
   (`selfhosted_lexer_matches_rust_lexer`) compares the two token streams for
   every example program and is part of the normal test suite.
+* **Stage 10c is partly demonstrated**: `examples/selfhost/parser.nx` parses
+  the source file into a flat AST arena (a `List` of `Node` records whose
+  children are indices, plus a side table for variable-length child lists)
+  and prints it in the same normalized form as `nx parse`. The differential
+  test `selfhosted_parser_matches_rust_parser` compares the two parsers over
+  the fixtures in `crates/nexum-driver/tests/fixtures/parse/`.
 
-Two language-level lessons came out of writing it:
+Three language-level lessons came out of writing them:
 
 * `and` and `or` do **not** short-circuit, so `i < n and src[i] != "\n"`
   reads out of bounds. Code that indexes has to test the bound first.
 * Strings are byte strings and `s[i]` yields one byte, so the lexer is
   byte-oriented; sources are expected to be ASCII.
+* A record cannot contain itself, so a tree of records is not expressible.
+  The AST is an arena of flat records with integer child indices, which is
+  the data-oriented shape the spec prefers anyway. A list's element type is
+  fixed by its first `list_push`, so the arena is seeded with a placeholder
+  node to fix the type before the parser fills it in.
 
 ## Collector defect found by the self-hosted lexer, and fixed
 

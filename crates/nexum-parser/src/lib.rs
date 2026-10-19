@@ -7,6 +7,8 @@ use nexum_source::{SourceMap, Span};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+pub mod normalize;
+
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Named(String),

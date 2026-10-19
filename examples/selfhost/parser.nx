@@ -1,0 +1,397 @@
+# Self-hosted parser for Nexum (stage 10c of the self-hosting plan).
+#
+# Parses the source file named by INPUT_FILE and prints it in the same
+# normalized form as `nx parse`, so the two parsers can be compared
+# statement by statement by the differential test in
+# `crates/nexum-driver/tests/backend.rs`.
+#
+# The AST is a flat arena: a `List` of `Node` records whose children are
+# referenced by index, plus a side table for the child lists that have a
+# variable length (call arguments, array elements). A record cannot contain
+# itself, so a tree of records is not expressible; an arena with indices is,
+# and it is the data-oriented shape the spec prefers anyway.
+#
+# Scope: expressions. A program is a single expression statement, which is
+# what exercises the parts of a parser that are easy to get wrong -
+# precedence, associativity and postfix chains.
+
+import "lexer_lib.nx"
+
+type Node:
+    kind: Str
+    text: Str
+    a: Int
+    b: Int
+    c: Int
+
+fn spaces(n: Int) -> Str:
+    let mut out = ""
+    let mut i = 0
+    while i < n:
+        out = concat(out, " ")
+        i = i + 1
+    return out
+
+# Escape a string so that it occupies exactly one line.
+fn escape(s: Str) -> Str:
+    let n = len(s)
+    let mut out = ""
+    let mut i = 0
+    while i < n:
+        let c = s[i]
+        if c == "\\":
+            out = concat(out, "\\\\")
+        else:
+            if c == "\n":
+                out = concat(out, "\\n")
+            else:
+                if c == "\t":
+                    out = concat(out, "\\t")
+                else:
+                    out = concat(out, c)
+        i = i + 1
+    return out
+
+fn add_node(nodes: List, kind: Str, text: Str, a: Int, b: Int, c: Int) -> Int:
+    list_push(nodes, Node(kind, text, a, b, c))
+    return list_len(nodes) - 1
+
+fn kind_at(tokens: List, i: Int) -> Str:
+    let t = list_get(tokens, i)
+    return t.kind
+
+fn text_at(tokens: List, i: Int) -> Str:
+    let t = list_get(tokens, i)
+    return t.text
+
+# Layout tokens carry no meaning for an expression.
+fn is_layout(k: Str) -> Bool:
+    return k == "Newline" or k == "Indent" or k == "Dedent"
+
+fn skip_layout(tokens: List, mut pos: Int):
+    let mut more = true
+    while more:
+        if is_layout(kind_at(tokens, pos)):
+            pos = pos + 1
+        else:
+            more = false
+
+# --- operator tables, one per precedence level ---
+
+fn or_op(k: Str) -> Str:
+    if k == "KwOr":
+        return "or"
+    return ""
+
+fn and_op(k: Str) -> Str:
+    if k == "KwAnd":
+        return "and"
+    return ""
+
+fn eq_op(k: Str) -> Str:
+    if k == "EqEq":
+        return "eq"
+    if k == "BangEq":
+        return "ne"
+    return ""
+
+fn cmp_op(k: Str) -> Str:
+    if k == "Lt":
+        return "lt"
+    if k == "Gt":
+        return "gt"
+    if k == "LtEq":
+        return "le"
+    if k == "GtEq":
+        return "ge"
+    return ""
+
+fn add_op(k: Str) -> Str:
+    if k == "Plus":
+        return "add"
+    if k == "Minus":
+        return "sub"
+    return ""
+
+fn mul_op(k: Str) -> Str:
+    if k == "Star":
+        return "mul"
+    if k == "Slash":
+        return "div"
+    if k == "Percent":
+        return "mod"
+    return ""
+
+# --- the parser ---
+
+fn parse_or(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let mut lhs = parse_and(nodes, extra, tokens, pos)
+    let mut more = true
+    while more:
+        let op = or_op(kind_at(tokens, pos))
+        if op == "":
+            more = false
+        else:
+            pos = pos + 1
+            let rhs = parse_and(nodes, extra, tokens, pos)
+            lhs = add_node(nodes, "binop", op, lhs, rhs, 0)
+    return lhs
+
+fn parse_and(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let mut lhs = parse_eq(nodes, extra, tokens, pos)
+    let mut more = true
+    while more:
+        let op = and_op(kind_at(tokens, pos))
+        if op == "":
+            more = false
+        else:
+            pos = pos + 1
+            let rhs = parse_eq(nodes, extra, tokens, pos)
+            lhs = add_node(nodes, "binop", op, lhs, rhs, 0)
+    return lhs
+
+fn parse_eq(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let mut lhs = parse_cmp(nodes, extra, tokens, pos)
+    let mut more = true
+    while more:
+        let op = eq_op(kind_at(tokens, pos))
+        if op == "":
+            more = false
+        else:
+            pos = pos + 1
+            let rhs = parse_cmp(nodes, extra, tokens, pos)
+            lhs = add_node(nodes, "binop", op, lhs, rhs, 0)
+    return lhs
+
+fn parse_cmp(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let mut lhs = parse_add(nodes, extra, tokens, pos)
+    let mut more = true
+    while more:
+        let op = cmp_op(kind_at(tokens, pos))
+        if op == "":
+            more = false
+        else:
+            pos = pos + 1
+            let rhs = parse_add(nodes, extra, tokens, pos)
+            lhs = add_node(nodes, "binop", op, lhs, rhs, 0)
+    return lhs
+
+fn parse_add(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let mut lhs = parse_mul(nodes, extra, tokens, pos)
+    let mut more = true
+    while more:
+        let op = add_op(kind_at(tokens, pos))
+        if op == "":
+            more = false
+        else:
+            pos = pos + 1
+            let rhs = parse_mul(nodes, extra, tokens, pos)
+            lhs = add_node(nodes, "binop", op, lhs, rhs, 0)
+    return lhs
+
+fn parse_mul(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let mut lhs = parse_unary(nodes, extra, tokens, pos)
+    let mut more = true
+    while more:
+        let op = mul_op(kind_at(tokens, pos))
+        if op == "":
+            more = false
+        else:
+            pos = pos + 1
+            let rhs = parse_unary(nodes, extra, tokens, pos)
+            lhs = add_node(nodes, "binop", op, lhs, rhs, 0)
+    return lhs
+
+fn parse_unary(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let k = kind_at(tokens, pos)
+    if k == "Minus":
+        pos = pos + 1
+        let e = parse_unary(nodes, extra, tokens, pos)
+        return add_node(nodes, "unop", "neg", e, 0, 0)
+    if k == "KwNot":
+        pos = pos + 1
+        let e = parse_unary(nodes, extra, tokens, pos)
+        return add_node(nodes, "unop", "not", e, 0, 0)
+    return parse_postfix(nodes, extra, tokens, pos)
+
+# Postfix chains: field access `expr.field` and indexing `expr[index]`.
+fn parse_postfix(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let mut e = parse_primary(nodes, extra, tokens, pos)
+    let mut more = true
+    while more:
+        let k = kind_at(tokens, pos)
+        if k == "Dot":
+            pos = pos + 1
+            let name = text_at(tokens, pos)
+            pos = pos + 1
+            e = add_node(nodes, "field", name, e, 0, 0)
+        else:
+            if k == "LBracket":
+                pos = pos + 1
+                let ix = parse_or(nodes, extra, tokens, pos)
+                if kind_at(tokens, pos) == "RBracket":
+                    pos = pos + 1
+                e = add_node(nodes, "index", "", e, ix, 0)
+            else:
+                more = false
+    return e
+
+fn parse_primary(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    let k = kind_at(tokens, pos)
+    if k == "Int":
+        let t = text_at(tokens, pos)
+        pos = pos + 1
+        return add_node(nodes, "int", t, 0, 0, 0)
+    if k == "Float":
+        let t = text_at(tokens, pos)
+        pos = pos + 1
+        return add_node(nodes, "float", t, 0, 0, 0)
+    if k == "KwTrue":
+        pos = pos + 1
+        return add_node(nodes, "bool", "true", 0, 0, 0)
+    if k == "KwFalse":
+        pos = pos + 1
+        return add_node(nodes, "bool", "false", 0, 0, 0)
+    if k == "Str":
+        let t = text_at(tokens, pos)
+        pos = pos + 1
+        return add_node(nodes, "str", t, 0, 0, 0)
+    if k == "Ident":
+        let name = text_at(tokens, pos)
+        pos = pos + 1
+        if kind_at(tokens, pos) == "LParen":
+            pos = pos + 1
+            # The arguments are collected in a local list first: a nested
+            # call appends its own arguments to the side table while this one
+            # is being parsed, so the arguments of a call are only
+            # contiguous once the whole list has been parsed.
+            let args = list_new()
+            list_push(args, 0)
+            let mut more = true
+            while more:
+                let kk = kind_at(tokens, pos)
+                if kk == "RParen":
+                    more = false
+                else:
+                    if kk == "Eof":
+                        more = false
+                    else:
+                        let arg = parse_or(nodes, extra, tokens, pos)
+                        list_push(args, arg)
+                        if kind_at(tokens, pos) == "Comma":
+                            pos = pos + 1
+                        else:
+                            more = false
+            if kind_at(tokens, pos) == "RParen":
+                pos = pos + 1
+            let start = list_len(extra)
+            let mut count = 0
+            let mut i = 1
+            let total = list_len(args)
+            while i < total:
+                list_push(extra, list_get(args, i))
+                count = count + 1
+                i = i + 1
+            return add_node(nodes, "call", name, start, count, 0)
+        return add_node(nodes, "var", name, 0, 0, 0)
+    if k == "LParen":
+        pos = pos + 1
+        let e = parse_or(nodes, extra, tokens, pos)
+        if kind_at(tokens, pos) == "RParen":
+            pos = pos + 1
+        return e
+    if k == "LBracket":
+        pos = pos + 1
+        # As with call arguments, the elements are collected in a local list
+        # so that they end up contiguous in the side table.
+        let elems = list_new()
+        list_push(elems, 0)
+        let mut more = true
+        while more:
+            let kk = kind_at(tokens, pos)
+            if kk == "RBracket":
+                more = false
+            else:
+                if kk == "Eof":
+                    more = false
+                else:
+                    let el = parse_or(nodes, extra, tokens, pos)
+                    list_push(elems, el)
+                    if kind_at(tokens, pos) == "Comma":
+                        pos = pos + 1
+                    else:
+                        more = false
+        if kind_at(tokens, pos) == "RBracket":
+            pos = pos + 1
+        let start = list_len(extra)
+        let mut count = 0
+        let mut i = 1
+        let total = list_len(elems)
+        while i < total:
+            list_push(extra, list_get(elems, i))
+            count = count + 1
+            i = i + 1
+        return add_node(nodes, "array", "", start, count, 0)
+    # Not an expression: consume the token and yield an empty name.
+    pos = pos + 1
+    return add_node(nodes, "var", "", 0, 0, 0)
+
+# --- the normalized form ---
+
+fn print_node(nodes: List, extra: List, idx: Int, depth: Int):
+    let n = list_get(nodes, idx)
+    let pad = spaces(depth)
+    if n.kind == "binop":
+        print(concat(concat(pad, "binop "), n.text))
+        print_node(nodes, extra, n.a, depth + 2)
+        print_node(nodes, extra, n.b, depth + 2)
+    else:
+        if n.kind == "unop":
+            print(concat(concat(pad, "unop "), n.text))
+            print_node(nodes, extra, n.a, depth + 2)
+        else:
+            if n.kind == "call":
+                print(concat(concat(pad, "call "), n.text))
+                let mut i = 0
+                while i < n.b:
+                    let child = list_get(extra, n.a + i)
+                    print_node(nodes, extra, child, depth + 2)
+                    i = i + 1
+            else:
+                if n.kind == "field":
+                    print(concat(concat(pad, "field "), n.text))
+                    print_node(nodes, extra, n.a, depth + 2)
+                else:
+                    if n.kind == "index":
+                        print(concat(pad, "index"))
+                        print_node(nodes, extra, n.a, depth + 2)
+                        print_node(nodes, extra, n.b, depth + 2)
+                    else:
+                        if n.kind == "array":
+                            print(concat(pad, "array"))
+                            let mut i = 0
+                            while i < n.b:
+                                let child = list_get(extra, n.a + i)
+                                print_node(nodes, extra, child, depth + 2)
+                                i = i + 1
+                        else:
+                            if n.kind == "str":
+                                print(concat(concat(pad, "str "), escape(n.text)))
+                            else:
+                                print(concat(concat(pad, n.kind), concat(" ", n.text)))
+
+fn main():
+    let src = read_file("nexum_selfhost_input.nx")
+    let tokens = lex_tokens(src)
+    # The element type of a list is fixed by its first push, and the first
+    # push happens inside `add_node`, so it is fixed here with a placeholder.
+    # Real nodes start at index 1.
+    let nodes = list_new()
+    list_push(nodes, Node("", "", 0, 0, 0))
+    let extra = list_new()
+    list_push(extra, 0)
+    let mut pos = 0
+    skip_layout(tokens, pos)
+    let root = parse_or(nodes, extra, tokens, pos)
+    print("expr")
+    print_node(nodes, extra, root, 2)

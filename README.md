@@ -92,6 +92,12 @@ nx run examples/hello.nx
 # Print the generated LLVM IR
 nx emit-ir examples/hello.nx
 
+# Dump the token stream
+nx lex examples/hello.nx
+
+# Dump the parsed program in a normalized form
+nx parse examples/hello.nx
+
 # Show discovered toolchain
 nx explain-toolchain
 ```
@@ -111,6 +117,10 @@ Includes:
 - backend gate: every pass fixture and example is emitted to IR, verified by
   clang, and run fixtures are executed and compared against expected stdout and
   exit codes (`crates/nexum-driver/tests/backend.rs`)
+- self-hosting gates: the self-hosted lexer and parser (Phase 10) are compared
+  against the Rust lexer and parser, token by token and node by node
+  (`selfhosted_lexer_matches_rust_lexer`,
+  `selfhosted_parser_matches_rust_parser`)
 
 Backend tests skip gracefully when clang is not installed.
 
