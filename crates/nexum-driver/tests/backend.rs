@@ -146,6 +146,7 @@ fn differential_opt_levels_agree() {
         fixtures_dir("run").join("list.nx"),
         fixtures_dir("run").join("list_gc.nx"),
         fixtures_dir("run").join("gc_reclaim.nx"),
+        fixtures_dir("run").join("io_roundtrip.nx"),
     ];
     for f in files {
         if !f.exists() {

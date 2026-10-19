@@ -1,0 +1,7 @@
+# File I/O round trip: the bytes on disk are read back and compared.
+fn main():
+    write_file("nexum_io_roundtrip.tmp", concat("hello ", "file"))
+    let s = read_file("nexum_io_roundtrip.tmp")
+    print(s)
+    print(len(s))
+    print(s == "hello file")
