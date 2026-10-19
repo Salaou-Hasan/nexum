@@ -1,0 +1,8 @@
+# A byte's index out of bounds stops the program with a panic (message on
+# stderr, exit code 1), the way an array index out of bounds does.
+
+fn main():
+    let s = "Hello"
+    print("before")
+    print(byte_value(s, 5))
+    print("unreachable")
