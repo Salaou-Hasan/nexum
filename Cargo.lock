@@ -118,7 +118,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "nexum-codegen"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-diagnostics",
  "nexum-mir",
@@ -130,14 +130,14 @@ dependencies = [
 
 [[package]]
 name = "nexum-diagnostics"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-source",
 ]
 
 [[package]]
 name = "nexum-driver"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "nexum-lexer"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-diagnostics",
  "nexum-source",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "nexum-mir"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-diagnostics",
  "nexum-parser",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "nexum-parser"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-diagnostics",
  "nexum-lexer",
@@ -181,11 +181,11 @@ dependencies = [
 
 [[package]]
 name = "nexum-runtime"
-version = "0.3.4"
+version = "0.3.5"
 
 [[package]]
 name = "nexum-sema"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-diagnostics",
  "nexum-parser",
@@ -194,18 +194,18 @@ dependencies = [
 
 [[package]]
 name = "nexum-source"
-version = "0.3.4"
+version = "0.3.5"
 
 [[package]]
 name = "nexum-target"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-diagnostics",
 ]
 
 [[package]]
 name = "nexum-toolchain"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nexum-diagnostics",
  "nexum-target",

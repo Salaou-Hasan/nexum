@@ -1,46 +1,16 @@
 # Nexum installer (Windows). Usage: iwr .../install.ps1 | iex
 #
-# It installs the Nexum MSI: the compiler, the file icon and the editor
-# extension. The installer is per user, so it needs no administrator rights.
+# It downloads the compiler and hands over to `nx setup`, which asks about
+# everything that is needed and then does it: the LLVM toolchain, the
+# compiler with the file icon and the file association, and the Visual
+# Studio Code extension.
 $ErrorActionPreference = "Stop"
 $repo = "Salaou-Hasan/nexum"
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
-$release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-$tag = $release.tag_name
-$version = $tag.TrimStart("v")
-$msi = "Nexum-$version-x64.msi"
-$url = "https://github.com/$repo/releases/download/$tag/$msi"
-$dest = Join-Path $env:TEMP $msi
-Write-Host "Downloading $url ..."
-Invoke-WebRequest -Uri $url -OutFile $dest
-Write-Host "Installing Nexum $version ..."
-# The MSI installs the compiler into %LOCALAPPDATA%\Programs\Nexum, puts it
-# on the PATH, registers the icon for .nx files and installs the editor
-# extension.
-$process = Start-Process msiexec.exe -ArgumentList "/i", "$dest", "/quiet", "/norestart" -Wait -PassThru
-if ($process.ExitCode -ne 0) {
-    Write-Host "The installer failed (exit code $($process.ExitCode))." -ForegroundColor Red
-    exit $process.ExitCode
-}
-$installed = Join-Path $env:LOCALAPPDATA "Programs\Nexum\nx.exe"
-Write-Host "Installed Nexum $version to $installed"
-Write-Host "The editor extension was installed if Visual Studio Code was found."
-
-# The LLVM toolchain is needed to build Nexum programs, so check for it and
-# offer to install it when it is missing.
-if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
-    Write-Host ""
-    Write-Host "The LLVM toolchain (clang) is not installed. Nexum needs it to build programs." -ForegroundColor Yellow
-    Write-Host "  install it with: winget install LLVM.LLVM"
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        $answer = Read-Host "Install it now? [Y/n]"
-        if ($answer -eq "" -or $answer -match "^[Yy]") {
-            winget install --id LLVM.LLVM --accept-package-agreements --accept-source-agreements
-            if (Get-Command clang -ErrorAction SilentlyContinue) {
-                Write-Host "The LLVM toolchain is installed. Open a new shell so that it is on your PATH."
-            } else {
-                Write-Host "clang is still not on the PATH. Open a new shell and try again." -ForegroundColor Yellow
-            }
-        }
-    }
-}
+$exe = Join-Path $env:TEMP "nx-setup-$arch.exe"
+Write-Host "Downloading the Nexum setup program ..."
+Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest/download/nx-windows-$arch.exe" -OutFile $exe
+& $exe setup
+$code = $LASTEXITCODE
+Remove-Item $exe -Force -ErrorAction SilentlyContinue
+exit $code

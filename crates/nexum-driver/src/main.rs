@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use nexum_diagnostics::render;
+mod setup;
 use nexum_mir::{lower, optimize_level, verify};
 use nexum_sema::analyze;
 use nexum_target::TargetSpec;
@@ -77,6 +78,8 @@ enum Commands {
         dir: PathBuf,
     },
     Doctor,
+    /// The interactive setup: install everything Nexum needs.
+    Setup,
     Explain {
         code: String,
     },
@@ -139,6 +142,9 @@ fn main() {
         }
         Commands::Doctor => {
             doctor();
+        }
+        Commands::Setup => {
+            setup::setup();
         }
         Commands::Explain { code } => {
             explain(&code);

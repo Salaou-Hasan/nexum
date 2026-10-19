@@ -27,6 +27,11 @@ pub fn clang_installed() -> bool {
     find_exe("clang").is_some()
 }
 
+/// Find a program on the PATH.
+pub fn find_program(name: &str) -> Option<String> {
+    find_exe(name)
+}
+
 /// How to install the LLVM toolchain on this platform.
 pub fn clang_install_hint() -> &'static str {
     if cfg!(target_os = "windows") {

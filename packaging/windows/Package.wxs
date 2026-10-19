@@ -111,10 +111,9 @@
                   Impersonate="yes"
                   Return="ignore" />
 
-    <!-- Check that the LLVM toolchain is installed, and tell the developer
-         how to install it when it is not. The user interface level is
-         passed along, so that a quiet install stays quiet. -->
-    <SetProperty Id="CustomActionData" Value="[UILevel]" Before="CheckLlvm" Sequence="execute" />
+    <!-- Check that the LLVM toolchain is installed. The installer cannot
+         install a system-wide toolchain itself, so it records what is
+         missing; `nx setup` asks about it when it is run. -->
     <CustomAction Id="CheckLlvm"
                   Directory="INSTALLFOLDER"
                   ExeCommand="cmd.exe /c check-llvm.cmd"

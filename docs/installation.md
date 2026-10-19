@@ -3,6 +3,56 @@
 Every release ships the compiler for all supported platforms, an installer
 for Windows and Linux, and the Visual Studio Code extension.
 
+## The setup program
+
+`nx setup` is the one place that installs everything Nexum needs. It runs in
+a console, asks about every step, and then does it:
+
+```
+$ nx setup
+Nexum setup
+===========
+
+This installs everything Nexum needs:
+  * the compiler, on your PATH
+  * the file icon for .nx files, and the file association
+  * the Visual Studio Code extension
+  * the LLVM toolchain, when it is missing
+
+[*] checking the LLVM toolchain
+    the LLVM toolchain is installed
+
+[*] checking the editor extension
+    Visual Studio Code is installed
+
+[*] installing Nexum
+    the latest release is v0.3.5
+  install it now? [Y/n]
+    downloading https://github.com/Salaou-Hasan/nexum/releases/download/v0.3.5/Nexum-0.3.5-x64.msi
+    running the installer ...
+    Nexum is installed
+    the extension is installed
+
+[*] checking the installation
+    the LLVM toolchain is installed
+```
+
+Every question can be answered with `n` to skip that step, and the setup can
+be run again at any time.
+
+## The quick way
+
+```sh
+# Windows (PowerShell)
+irm https://github.com/Salaou-Hasan/nexum/releases/latest/download/install.ps1 | iex
+
+# Linux and macOS
+curl -fsSL https://github.com/Salaou-Hasan/nexum/releases/latest/download/install.sh | sh
+```
+
+Both download the compiler and hand over to `nx setup`, so there is one
+implementation of the questions and one of the installation.
+
 ## What else is needed
 
 Nexum hands the generated LLVM IR to **clang**, so the LLVM toolchain has to
@@ -19,9 +69,8 @@ brew install llvm
 sudo apt install clang
 ```
 
-The installers look for it: the Windows installer says so when it is missing
-(and offers to install it), and `nx doctor` reports what is present and what
-is missing:
+`nx setup` offers to install it when it is missing, and `nx doctor` reports
+what is present and what is missing:
 
 ```sh
 $ nx doctor
@@ -73,7 +122,7 @@ and installing Nexum never changes the icon theme you already have.
 To install it by hand, double-click the MSI, or:
 
 ```powershell
-msiexec /i Nexum-0.3.2-x64.msi
+msiexec /i Nexum-0.3.5-x64.msi
 ```
 
 ## Linux: the package
@@ -84,7 +133,7 @@ into `/usr/bin`, the icon into the icon theme directory, registers the
 Studio Code is installed.
 
 ```sh
-sudo dpkg -i nexum-0.3.2-amd64.deb
+sudo dpkg -i nexum-0.3.5-amd64.deb
 ```
 
 ## The portable binaries

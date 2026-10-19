@@ -7,16 +7,19 @@ design blueprint (Phase 10, optional self-hosting, is planned).
 ## Install
 
 ```sh
-# Windows (PowerShell) - installs the MSI: the compiler, the file icon and
-# the editor extension, per user, with no administrator rights
+# Windows (PowerShell) - downloads the setup program and runs it
 iwr https://github.com/Salaou-Hasan/nexum/releases/latest/download/install.ps1 | iex
 
-# Linux and macOS - installs the package (Linux) or the compiler (macOS)
+# Linux and macOS - downloads the setup program and runs it
 curl -fsSL https://github.com/Salaou-Hasan/nexum/releases/latest/download/install.sh | sh
 
 # Or build from source
 cargo build --release -p nexum-driver
 ```
+
+`nx setup` is the interactive installer: it asks about every step in the
+console and then does it - the LLVM toolchain, the compiler with the file
+icon and the file association, and the editor extension.
 
 Each release ships a plain compiler binary for every platform as well, an
 installer for Windows (`.msi`) and Linux (`.deb`), and the Visual Studio
