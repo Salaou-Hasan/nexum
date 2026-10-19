@@ -240,3 +240,73 @@ the toolchain's business.
   system is the link step, and it is the step that decides the ABI and the
   layout of the binary.
 * Status: phase 11g. Until then the toolchain calls `clang` to link.
+## D017 - The language grows no binary FFI (decided)
+
+A Nexum program cannot call into C, and the language does not grow a way
+to. Interop is either the machine - inline assembly, raw pointers, the
+runtime's own system call layer - or a binary protocol to an external
+process or device over a channel the program owns, which is a message ABI
+rather than a calling convention and has no callbacks, which is why it
+fits a language with no closures.
+
+* Rationale: a binary FFI puts the C library and the system compiler back
+  onto a program that phase 11a exists to free, and it is the route by
+  which every other language's runtime dependency comes home.
+* The one bounded exception: a device link - a closed set of entry points
+  in a Nexum-defined ABI, off by default, never required by the standard
+  library, reachable only from `unsafe` code. It exists because Metal on
+  Apple silicon has no protocol-level route.
+* Status: decided. The mechanism is in phases 11b, 11d and 11h.
+
+## D018 - The numeric tower has distinct widths and no implicit conversions (decided)
+
+The numeric types are `F32`, `F64`, `I8`, `I16`, `I32`, `I64`, `U8`,
+`U16`, `U32` and `U64`. `Int` is `I64` and `Float` is `F64`, both kept as
+synonyms. A width is a distinct type, because a width that is not a type
+cannot be a field of a packed record.
+
+Conversions are explicit, through `to_*` builtins, with a `to_*_checked`
+form that traps. Integer arithmetic wraps. Division truncates toward zero
+and the remainder follows the dividend, which is what LLVM's `sdiv` and
+`srem` do, so it costs nothing. There is one rounding mode, round to
+nearest, and it is not programmable. IEEE floats never trap, a NaN
+propagates, and signed zero is preserved.
+
+* Rationale: a width that is not a type cannot be laid out, and implicit
+  conversions hide the difference between an f32 and an f64 at exactly
+  the point where it costs the most.
+* Status: decided. The implementation is phase 11c.
+
+## D019 - Printing a float is C's `%g` (decided)
+
+`print` of a `Float` produces exactly what the C library's `%g` produces,
+with the precision of 6: six significant digits, the exponential form when
+the exponent is below -4 or not below the precision, the trailing zeros
+removed, and the exponent written with at least two digits. The special
+values are `inf`, `-inf` and `nan`; the C library's spelling of NaN is
+platform dependent, so the language fixes it.
+
+* Rationale: the run fixtures depend on the output, and a language that
+  changes its own output format with every release cannot be compared
+  against anything. `%g` is the format the language has always used, and
+  it is a format a reader can predict.
+* The conversion is an exact six significant digit conversion, done with a
+  small bignum in 64-bit operations. The shortest round-trip form is a
+  different format, and it needs a 128-bit division, which would put a C
+  library call back into the runtime.
+* Status: decided. The implementation is phase 11a.2.
+
+## D020 - The code generator keeps emitting textual LLVM IR (decided)
+
+The code generator emits LLVM IR as text and the toolchain hands it to a
+compiler. It does not move to LLVM as a library.
+
+* Rationale: the self-hosted compiler of phase 11j cannot call LLVM's C++
+  API - the language has no FFI, no `extern` and no pointer type - so it
+  must emit textual IR and shell out. A Rust-only LLVM binding would have
+  to be built, paid for, and discarded at the end of the programme.
+* The textual form is also an advantage: it is debuggable, and the tests
+  compare it directly.
+* Consequence: the link step is separable from the compile step, and
+  phase 11g takes the link step first.
+* Status: decided.
