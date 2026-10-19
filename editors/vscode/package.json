@@ -2,7 +2,7 @@
   "name": "nexum",
   "displayName": "Nexum Language",
   "description": "Language support for Nexum: syntax highlighting, formatting, and tooling.",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "publisher": "nexum",
   "license": "Apache-2.0",
   "engines": {
@@ -27,6 +27,13 @@
         "language": "nexum",
         "scopeName": "source.nexum",
         "path": "./syntaxes/nexum.tmLanguage.json"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "nexum",
+        "label": "Nexum",
+        "path": "./icons/nexum-icon-theme.json"
       }
     ],
     "commands": [

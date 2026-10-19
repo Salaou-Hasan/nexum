@@ -272,58 +272,160 @@ fn update_nexum() {
         println!("already up to date");
         return;
     }
-    // Determine host target.
-    let target = if cfg!(target_os = "windows") {
-        "windows-x86_64"
-    } else if cfg!(target_os = "macos") {
-        if cfg!(target_arch = "aarch64") {
-            "macos-aarch64"
-        } else {
-            "macos-x86_64"
-        }
-    } else if cfg!(target_arch = "aarch64") {
-        "linux-aarch64"
+    // The editor extension travels with the release, so an update brings the
+    // language and the extension back in step.
+    let vsix = download_release_asset(&tag, "nexum-language.vsix");
+    if cfg!(target_os = "windows") {
+        update_windows(&tag);
     } else {
-        "linux-x86_64"
-    };
-    let ext = if cfg!(target_os = "windows") {
-        ".exe"
-    } else {
-        ""
-    };
-    let asset = format!("nx-{}{}", target, ext);
-    let url = format!(
+        update_portable(&tag);
+    }
+    install_vscode_extension(&vsix);
+    println!("updated to {} - restart nx to use the new version", tag);
+}
+
+/// The URL of a release asset.
+fn release_asset_url(tag: &str, asset: &str) -> String {
+    format!(
         "https://github.com/Salaou-Hasan/nexum/releases/download/{}/{}",
         tag, asset
-    );
-    let tmp = std::env::temp_dir().join(&asset);
+    )
+}
+
+/// Download a release asset into the temporary directory.
+fn download_release_asset(tag: &str, asset: &str) -> std::path::PathBuf {
+    use std::process::Command;
+    let url = release_asset_url(tag, asset);
+    let tmp = std::env::temp_dir().join(asset);
     println!("downloading {} ...", url);
     let status = Command::new("curl")
-        .args(["-sL", "-o", tmp.to_str().unwrap(), &url])
+        .args(["-sL", "-f", "-o", tmp.to_str().unwrap(), &url])
         .status();
     match status {
-        Ok(s) if s.success() && tmp.exists() => {}
+        Ok(s) if s.success() && tmp.exists() => tmp,
         _ => {
-            eprintln!("error: download failed");
+            eprintln!("error: download failed: {url}");
             std::process::exit(1);
         }
     }
-    // Replace current binary.
-    let current_exe = std::env::current_exe().unwrap();
+}
+
+/// The name of the portable binary for the host.
+fn host_asset() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "nx-windows-x86_64.exe"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "nx-macos-aarch64"
+        } else {
+            "nx-macos-x86_64"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "nx-linux-aarch64"
+    } else {
+        "nx-linux-x86_64"
+    }
+}
+
+/// Replace the running executable with a freshly downloaded one.
+fn replace_running_binary(new_binary: &std::path::Path) {
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: could not locate the running binary: {e}");
+            std::process::exit(1);
+        }
+    };
     let old = current_exe.with_extension("old");
     let _ = std::fs::remove_file(&old);
     if std::fs::rename(&current_exe, &old).is_err() {
         eprintln!("error: could not rename current binary (try running as admin)");
         std::process::exit(1);
     }
-    if std::fs::rename(&tmp, &current_exe).is_err() {
+    if std::fs::copy(new_binary, &current_exe).is_err() {
         // restore
         let _ = std::fs::rename(&old, &current_exe);
         eprintln!("error: could not install new binary");
         std::process::exit(1);
     }
     let _ = std::fs::remove_file(&old);
-    println!("updated to {} - restart nx to use the new version", tag);
+}
+
+/// Update on Windows: the installer keeps the compiler, the icon, the file
+/// association and the editor extension in step, so the update goes through
+/// it. A copy of the compiler that was installed outside the standard
+/// location is updated in place as well.
+fn update_windows(tag: &str) {
+    use std::process::Command;
+    let version = tag.trim_start_matches('v');
+    let msi = download_release_asset(tag, &format!("Nexum-{version}-x64.msi"));
+    let current_exe = std::env::current_exe().unwrap_or_default();
+    let standard = std::env::var("LOCALAPPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("Programs").join("Nexum").join("nx.exe"))
+        .unwrap_or_default();
+    let running_in_place = current_exe == standard;
+    if running_in_place {
+        // Windows locks a running executable: move it aside first, the
+        // installer then writes a fresh one.
+        let old = current_exe.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        if std::fs::rename(&current_exe, &old).is_err() {
+            eprintln!("error: could not rename current binary (try running as admin)");
+            std::process::exit(1);
+        }
+    }
+    println!("running the installer ...");
+    let status = Command::new("msiexec.exe")
+        .args([
+            "/i",
+            msi.to_str().unwrap(),
+            "/quiet",
+            "/norestart",
+        ])
+        .status();
+    if running_in_place {
+        let _ = std::fs::remove_file(current_exe.with_extension("old"));
+    }
+    match status {
+        Ok(s) if s.success() => {}
+        _ => {
+            eprintln!("error: the installer failed; see the Windows installer log");
+        }
+    }
+    if !running_in_place {
+        // The compiler was not installed with the installer: update the copy
+        // the developer is running as well.
+        let asset = download_release_asset(tag, host_asset());
+        replace_running_binary(&asset);
+    }
+}
+
+/// Update on the platforms that ship a portable binary.
+fn update_portable(tag: &str) {
+    let asset = download_release_asset(tag, host_asset());
+    replace_running_binary(&asset);
+}
+
+/// Install (or update) the editor extension.
+fn install_vscode_extension(vsix: &std::path::Path) {
+    use std::process::Command;
+    let out = Command::new("code")
+        .args([
+            "--install-extension",
+            vsix.to_str().unwrap_or_default(),
+            "--force",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            println!("editor extension updated");
+        }
+        _ => {
+            println!(
+                "note: the editor extension was not updated (is `code` on your PATH?)"
+            );
+        }
+    }
 }
 
 fn format_nx(text: &str) -> Result<String, String> {

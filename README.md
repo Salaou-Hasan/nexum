@@ -7,24 +7,33 @@ design blueprint (Phase 10, optional self-hosting, is planned).
 ## Install
 
 ```sh
-# Unix
-curl -fsSL https://raw.githubusercontent.com/Salaou-Hasan/nexum/main/install.sh | sh
+# Windows (PowerShell) - installs the MSI: the compiler, the file icon and
+# the editor extension, per user, with no administrator rights
+iwr https://github.com/Salaou-Hasan/nexum/releases/latest/download/install.ps1 | iex
 
-# Windows (PowerShell)
-iwr https://raw.githubusercontent.com/Salaou-Hasan/nexum/main/install.ps1 | iex
+# Linux and macOS - installs the package (Linux) or the compiler (macOS)
+curl -fsSL https://github.com/Salaou-Hasan/nexum/releases/latest/download/install.sh | sh
 
 # Or build from source
 cargo build --release -p nexum-driver
 ```
 
-Or download a prebuilt binary from the
-[releases page](https://github.com/Salaou-Hasan/nexum/releases).
+Each release ships a plain compiler binary for every platform as well, an
+installer for Windows (`.msi`) and Linux (`.deb`), and the Visual Studio
+Code extension (`.vsix`). See [docs/installation.md](docs/installation.md)
+for the details, and the
+[releases page](https://github.com/Salaou-Hasan/nexum/releases) to download
+them.
+
+`nx update` brings the compiler and the editor extension back in step.
 
 ## Editor support
 
-A VS Code extension lives in `editors/vscode/` (syntax highlighting + format
-on save via `nx fmt`). Build the VSIX with `npm run package` in that
-directory.
+A VS Code extension lives in `editors/vscode/` (syntax highlighting, format
+on save via `nx fmt`, and the Nexum file icon theme). Build the VSIX with
+`npm run package` in that directory. The installers install it for you, and
+the icon is also registered with the shell, so a `.nx` file shows the Nexum
+icon whatever icon theme you use in the editor.
 
 Working vertical slice: a `.nx` source file compiles to a native executable on
 Windows (x86_64) using LLVM/clang. Supported today:

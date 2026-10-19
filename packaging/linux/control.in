@@ -1,0 +1,10 @@
+Package: nexum
+Version: @VERSION@
+Section: devel
+Priority: optional
+Architecture: amd64
+Maintainer: Nexum <nexum@example.invalid>
+Description: The Nexum programming language
+ Nexum is a small, fast, statically typed language for systems programming.
+ .
+ This package installs the compiler, the file icon and the editor extension.

@@ -1,19 +1,27 @@
 # Nexum installer (Windows). Usage: iwr .../install.ps1 | iex
+#
+# It installs the Nexum MSI: the compiler, the file icon and the editor
+# extension. The installer is per user, so it needs no administrator rights.
 $ErrorActionPreference = "Stop"
 $repo = "Salaou-Hasan/nexum"
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
-$asset = "nx-windows-$arch.exe"
-$latest = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest").tag_name
-$url = "https://github.com/$repo/releases/download/$latest/$asset"
-$dest = Join-Path $env:LOCALAPPDATA "Nexum"
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-$out = Join-Path $dest "nx.exe"
+$release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
+$tag = $release.tag_name
+$version = $tag.TrimStart("v")
+$msi = "Nexum-$version-x64.msi"
+$url = "https://github.com/$repo/releases/download/$tag/$msi"
+$dest = Join-Path $env:TEMP $msi
 Write-Host "Downloading $url ..."
-Invoke-WebRequest -Uri $url -OutFile $out
-# Add to user PATH if missing
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (-not ($userPath -split ";" | Where-Object { $_ -eq $dest })) {
-    [Environment]::SetEnvironmentVariable("Path", "$userPath;$dest", "User")
-    Write-Host "Added $dest to user PATH (restart shell to take effect)."
+Invoke-WebRequest -Uri $url -OutFile $dest
+Write-Host "Installing Nexum $version ..."
+# The MSI installs the compiler into %LOCALAPPDATA%\Programs\Nexum, puts it
+# on the PATH, registers the icon for .nx files and installs the editor
+# extension.
+$process = Start-Process msiexec.exe -ArgumentList "/i", "$dest", "/quiet", "/norestart" -Wait -PassThru
+if ($process.ExitCode -ne 0) {
+    Write-Host "The installer failed (exit code $($process.ExitCode))." -ForegroundColor Red
+    exit $process.ExitCode
 }
-Write-Host "Installed nx to $out"
+$installed = Join-Path $env:LOCALAPPDATA "Programs\Nexum\nx.exe"
+Write-Host "Installed Nexum $version to $installed"
+Write-Host "The editor extension was installed if Visual Studio Code was found."

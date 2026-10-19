@@ -55,8 +55,6 @@ jobs:
 
   vsix:
     # The editor extension is packaged separately from the compiler binaries.
-    # It is best-effort: a failure here must not block the compiler release.
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,15 +64,95 @@ jobs:
       - name: Package the VS Code extension
         working-directory: editors/vscode
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npx vsce package --no-dependencies --out ../../nexum-language.vsix
       - uses: actions/upload-artifact@v4
         with:
           name: nexum-language.vsix
           path: nexum-language.vsix
 
-  publish:
+  msi:
+    # The Windows installer: the compiler, the icon and the file association,
+    # and it installs the editor extension automatically.
     needs: [build, vsix]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build the compiler
+        run: cargo build --release -p nexum-driver --target x86_64-pc-windows-msvc
+      - uses: actions/download-artifact@v4
+        with:
+          name: nexum-language.vsix
+      - name: Install WiX
+        # The version is pinned: the interface and the PATH are done with
+        # the core elements, so no WiX extension is needed, and later
+        # releases ask for a maintenance-fee agreement to be accepted.
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          echo "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/nx.exe" "stage/nx.exe"
+          Copy-Item "packaging/windows/nexum.ico" "stage/nexum.ico"
+          Copy-Item "packaging/windows/add-to-path.cmd" "stage/"
+          Copy-Item "packaging/windows/install-vscode-extension.cmd" "stage/"
+          Copy-Item "packaging/windows/Package.wxs" "stage/"
+          Copy-Item "nexum-language.vsix" "stage/"
+          Push-Location stage
+          wix build Package.wxs -d NexumVersion=$version -o "../Nexum-$version-x64.msi"
+          Pop-Location
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexum-x64.msi
+          path: Nexum-*.msi
+
+  deb:
+    # The Linux installer: the compiler, the icon and the file association,
+    # and it installs the editor extension automatically.
+    needs: [build, vsix]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: nx-linux-x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: nexum-language.vsix
+      - name: Build the .deb
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          root="root"
+          rm -rf "$root"
+          mkdir -p "$root/DEBIAN" "$root/usr/bin" \
+                   "$root/usr/share/nexum" \
+                   "$root/usr/share/icons/hicolor/256x256/apps" \
+                   "$root/usr/share/applications" \
+                   "$root/usr/share/mime/packages"
+          install -m 0755 nx-linux-x86_64 "$root/usr/bin/nx"
+          install -m 0644 icon/icon.png "$root/usr/share/icons/hicolor/256x256/apps/nexum.png"
+          install -m 0644 nexum-language.vsix "$root/usr/share/nexum/nexum-language.vsix"
+          sed "s/@VERSION@/$version/g" packaging/linux/nexum.desktop.in \
+            > "$root/usr/share/applications/nexum.desktop"
+          sed "s/@VERSION@/$version/g" packaging/linux/control.in > "$root/DEBIAN/control"
+          sed "s/@VERSION@/$version/g" packaging/linux/postinst.in > "$root/DEBIAN/postinst"
+          chmod 0755 "$root/DEBIAN/postinst"
+          dpkg-deb --build --root-owner-group "$root" "nexum-${version}-amd64.deb"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nexum-amd64.deb
+          path: nexum-*.deb
+
+  publish:
+    needs: [build, vsix, msi, deb]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -88,7 +166,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ASSETS=""
-          for f in nx-* *.vsix; do
+          for f in nx-* *.vsix *.msi *.deb; do
             [ -f "$f" ] && ASSETS="$ASSETS $f"
           done
           TAG=${{ github.ref_name }}

@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Nexum installer for Windows.
+
+  It installs, per user (so it needs no administrator rights):
+
+    * the compiler, `nx.exe`, into %LOCALAPPDATA%\Programs\Nexum, and puts
+      that directory on the user's PATH;
+    * the project icon, and registers it for `.nx` files, so a Nexum source
+      file always shows the Nexum icon in Explorer - whatever icon theme the
+      developer uses in the editor;
+    * the Visual Studio Code extension, and installs it automatically.
+
+  The version is passed in by the release workflow:
+    wix build Package.wxs -d NexumVersion=0.2.1
+
+  It deliberately does not use the WiX extensions: the interface and the
+  PATH are done with the core elements and two small scripts, so the build
+  needs nothing but the tool itself.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Nexum"
+    Manufacturer="Nexum"
+    Version="$(var.NexumVersion)"
+    UpgradeCode="6F1B2C4E-9A3D-4C77-9E51-2C0B7A5D3E11"
+    Scope="perUser"
+    Compressed="yes">
+
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of Nexum is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- %LOCALAPPDATA%\Programs\Nexum -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="Programs\Nexum" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ShortcutFolder" Name="Nexum" />
+    </StandardDirectory>
+
+    <!-- The compiler. -->
+    <Component Id="NexumCompiler" Directory="INSTALLFOLDER" Guid="1B9D5C33-6F2A-4E58-9E0C-7A44B1D9C201">
+      <File Id="NexumExe" Name="nx.exe" Source="nx.exe" KeyPath="yes" />
+    </Component>
+
+    <!-- The icon, and the `.nx` file association that shows it. -->
+    <Component Id="NexumIcon" Directory="INSTALLFOLDER" Guid="2C8E6D44-7A3B-4F69-8F1D-6B55C2EAD312">
+      <File Id="NexumIco" Name="nexum.ico" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\.nx" Type="string"
+                     Value="Nexum.Source" KeyPath="no" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\Nexum.Source" Name="DefaultIcon" Type="string"
+                     Value="[INSTALLFOLDER]nexum.ico" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\Nexum.Source" Type="string"
+                     Value="Nexum source file" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\Nexum.Source\shell\open\command" Type="string"
+                     Value="&quot;[INSTALLFOLDER]nx.exe&quot; &quot;%1&quot;" />
+      <RegistryValue Root="HKCU" Key="Software\Classes\Nexum.Source\shell" Name="OpenCommandHandler" Type="string"
+                     Value="" />
+      <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.nx\OpenWithProgids" Name="Nexum.Source" Type="string"
+                     Value="" />
+    </Component>
+
+    <!-- The editor extension, plus the scripts that install it and update
+         the PATH. -->
+    <Component Id="NexumExtension" Directory="INSTALLFOLDER" Guid="3D9F7E55-8B4C-4A7A-902E-7C66D3FBE423">
+      <File Id="NexumVsix" Name="nexum-language.vsix" KeyPath="yes" />
+      <File Id="NexumInstallVsix" Name="install-vscode-extension.cmd" KeyPath="no" />
+      <File Id="NexumAddToPath" Name="add-to-path.cmd" KeyPath="no" />
+    </Component>
+
+    <Feature Id="Complete" Title="Nexum" Level="1" AllowAbsent="no">
+      <ComponentRef Id="NexumCompiler" />
+      <ComponentRef Id="NexumIcon" />
+      <ComponentRef Id="NexumExtension" />
+    </Feature>
+
+    <!-- Start menu shortcut. -->
+    <DirectoryRef Id="ShortcutFolder">
+      <Component Id="NexumShortcut" Guid="4EA08F66-9C5D-4B8B-A13F-8D77E40CF534">
+        <Shortcut Id="NexumStartMenu" Name="Nexum" Description="The Nexum language"
+                  Target="[INSTALLFOLDER]nx.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveShortcutFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Nexum" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="StartMenu" Title="Start menu shortcut" Level="1">
+      <ComponentRef Id="NexumShortcut" />
+    </Feature>
+
+    <!-- Put the install directory on the user's PATH, and install the
+         Visual Studio Code extension. Both are best effort: a developer
+         without the `code` command still gets the compiler, and a failure
+         here must not roll the installation back. -->
+    <CustomAction Id="AddToPath"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c add-to-path.cmd"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <CustomAction Id="InstallVsCodeExtension"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="cmd.exe /c install-vscode-extension.cmd"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="AddToPath" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="InstallVsCodeExtension" After="AddToPath" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <!-- The interface. It is written with the core elements so that the
+         build does not need the WiX extensions. -->
+    <UI Id="NexumUI">
+      <Dialog Id="NexumWelcomeDlg" Width="370" Height="270" Title="Nexum $(var.NexumVersion) Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes" Text="Nexum" />
+        <Control Id="Description" Type="Text" X="25" Y="70" Width="320" Height="40" Transparent="yes" NoPrefix="yes" Text="Installs the Nexum compiler, the file icon for .nx files, and the Visual Studio Code extension." />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install">
+          <Publish Event="NewPage" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="180" Y="243" Width="56" Height="17" Cancel="yes">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+      <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="Nexum $(var.NexumVersion) Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15" Transparent="yes" NoPrefix="yes" Text="Nexum" />
+        <Control Id="Description" Type="Text" X="25" Y="70" Width="320" Height="30" Transparent="yes" NoPrefix="yes" Text="Choose where Nexum is installed." />
+        <Control Id="FolderLabel" Type="Text" X="20" Y="123" Width="105" Height="15" Transparent="yes" NoPrefix="yes" Text="Install folder:" />
+        <Control Id="Folder" Type="PathEdit" X="130" Y="120" Width="200" Height="18" Property="INSTALLFOLDER" />
+        <Control Id="Back" Type="PushButton" X="123" Y="243" Width="56" Height="17">
+          <Publish Event="NewPage" Value="NexumWelcomeDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Install">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="180" Y="243" Width="56" Height="17" Cancel="yes">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+      <Dialog Id="CancelDlg" Width="195" Height="85" Title="Nexum $(var.NexumVersion) Setup">
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="132" Height="30" Text="Cancel the Nexum installation?" />
+        <Control Id="Yes" Type="PushButton" X="36" Y="57" Width="56" Height="17" Text="Yes">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="No" Type="PushButton" X="108" Y="57" Width="56" Height="17" Default="yes" Text="No">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+      </Dialog>
+      <InstallUISequence>
+        <Show Dialog="NexumWelcomeDlg" Sequence="1" />
+        <Show Dialog="InstallDirDlg" Sequence="2" />
+      </InstallUISequence>
+    </UI>
+  </Package>
+</Wix>

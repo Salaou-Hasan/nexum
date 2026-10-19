@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=@VERSION@
+Name=Nexum
+GenericName=Nexum Program
+Comment=Run a Nexum program
+Exec=nx %f
+Icon=nexum
+Terminal=true
+Categories=Development;IDE;
+MimeType=text/x-nexum;

@@ -28,3 +28,7 @@ nexum_selfhost_input.nx
 self_err.txt
 rust_lex.txt
 self_lex.txt
+
+editors/vscode/node_modules/
+editors/vscode/out/
+*.vsix

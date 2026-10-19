@@ -1,0 +1,13 @@
+#!/bin/sh
+# Install the Nexum extension into Visual Studio Code.
+#
+# It is best effort: a developer without the `code` command still gets the
+# compiler, the icon and the file association, and a failure here must not
+# stop the package from being installed.
+set -e
+
+if command -v code >/dev/null 2>&1; then
+  code --install-extension /usr/share/nexum/nexum-language.vsix --force >/dev/null 2>&1 || true
+fi
+
+exit 0

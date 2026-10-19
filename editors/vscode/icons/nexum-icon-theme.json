@@ -1,0 +1,16 @@
+{
+	"id": "nexum",
+	"label": "Nexum",
+	"iconDefinitions": {
+		"file": {
+			"fileLight": "nexum.png",
+			"fileDark": "nexum.png"
+		}
+	},
+	"files": {
+		"nx": "file"
+	},
+	"fileExtensions": {
+		"nx": "file"
+	}
+}
