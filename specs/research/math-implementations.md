@@ -45,7 +45,7 @@ Then, in a later phase, and only if the framework asks for them:
 
 | Function | Algorithm | Accuracy | Difficulty | Note |
 | -------- | --------- | -------- | ---------- | ---- |
-| `erf`   | FDLIBM `s_erf`: two rational approximations (`pp/qq`, `pa/qa`) plus two asymptotic series (`ra/sa`, `rb/sb`) | ≤ 1 ULP | hard: 40+ constants, four regimes | needed only for exact GELU; the tanh approximation of GELU is 1e-4 accurate and needs nothing |
+| `erf`   | FDLIBM `s_erf`: two rational approximations (`pp/qq`, `pa/qa`) plus two asymptotic series (`ra/sa`, `rb/sb`) | ≤ 1 ULP | hard: 40+ constants, four regimes | needed only for exact GELU; the tanh approximation of GELU is 3e-4 accurate and needs nothing |
 | `erfc`  | `1 − erf` below 1, the `rb/sb` asymptotic series above | ≤ 1 ULP (absolute) | hard | rarely needed |
 | `pow`   | FDLIBM `__ieee754_pow`: a double-double logarithm, an exponential, and ~40 special cases | ≤ 1 ULP, **not** correctly rounded | very hard: ~150 lines | for a learning-rate schedule use `exp(step * log(decay))` instead, which is exact to ~1 ULP for the values that matter |
 | `log2`  | `log(x) · (1/ln2)`, with the constant split `ivln2hi + ivln2lo` | ≤ 2 ULP | trivial | `log2` is a multiply away from `log` |
@@ -321,7 +321,7 @@ t = 3 − r1·(r/2) ;  e = hxs·((r1 − t)/(6 − r·t))
 and the correction term `c = (hi − r) − lo` added back, because the
 reduction rounds `r`.
 
-`expm1` has four more branches that `exp` does not have, and they are the
+`expm1` has six branches that `exp` does not have, and they are the
 reason it is the hardest of the five to write:
 
 * `k == 0` → `r − (r·e − hxs)`;
@@ -381,10 +381,10 @@ ra0..ra7, sa1..sa8   (the 1.25 <= |x| < 2.857 asymptotic series)
 rb0..rb6, sb1..sb7   (the |x| >= 2.857 asymptotic series, also used by erfc)
 ```
 
-The full tables are in the source file; the point of listing them here is
-that `erf` is a *different kind of job* from `exp` and `log`: it is four
-regimes and a lot of constants, and it is worth it only if the framework
-needs the exact GELU.
+The full tables are in the source file (openlibm `src/s_erf.c`); the point
+of listing them here is that `erf` is a *different kind of job* from `exp`
+and `log`: it is four regimes and a lot of constants, and it is worth it
+only if the framework needs the exact GELU.
 
 ### 3. The special cases
 
@@ -493,7 +493,7 @@ The trade-off to be aware of: **a standard-library implementation is
 slower**, because the call is not inlined and the interpreter overhead
 dominates a 20-instruction polynomial. For `erf` in a GELU that is
 irrelevant (it is called once per element and the whole point of GELU is
-that it is 1e-4 accurate anyway). For `exp` it would be fatal.
+that it is 3e-4 accurate anyway). For `exp` it would be fatal.
 
 There is one more consideration, and it is the reason I would not put `erf`
 in the runtime even though the roadmap names it: **the runtime IR is written
@@ -502,7 +502,7 @@ in the prototype were in the bit-level plumbing of the runtime-style code,
 not in the mathematics. `erf` is four regimes and 40 constants; the
 probability of getting it right by hand on the first try is not high, and
 the cost of a wrong `erf` in a GELU is a silently different model. The
-tanh-approximation of GELU is 1e-4 accurate and needs nothing at all.
+tanh-approximation of GELU is 3e-4 accurate and needs nothing at all.
 
 ### 6. What the IR text costs
 
@@ -646,7 +646,7 @@ and that is a separate piece of work.
    phase-11i item and it should be written *once*, carefully, with the
    asymptotic series (which are the part that is easy to get wrong) checked
    against a high-precision reference over the whole range. If no — and the
-   tanh approximation is 1e-4 accurate, which is below any training
+   tanh approximation is 3e-4 accurate, which is below any training
    signal — `erf` can be dropped entirely. **Recommendation: ask the
    framework's owner; assume "no" for now.**
 2. **Do we want `pow` at all?** The FDLIBM `pow` is the largest single
