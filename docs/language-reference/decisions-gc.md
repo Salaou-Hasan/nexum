@@ -97,7 +97,12 @@ unscanned stack aggregates." Both halves are therefore covered:
 
 Marking is a fixpoint: marking an object can reveal further objects, so the
 collector alternates between tracing the heap and sweeping until no new
-object is marked.
+object is marked. "New" is the operative word: the mark phase reports
+whether it marked an object *for the first time*, and the trace repeats its
+pass over the heap while that is still happening. An object that is only
+reachable through another object (a `List` element buffer, for example) is
+discovered after its referrer, so a trace that stopped after one pass would
+leave it - and everything it points to - unmarked and reclaimable.
 
 ## Dynamic collection design
 

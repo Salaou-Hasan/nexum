@@ -361,33 +361,31 @@ fn emit_fn(
 
     // Root entries: (slot address, bytes to scan, type for zero-initialising).
     //
-    // Every stack slot is registered, and scalars are scanned as a single
-    // word. Registering only the slots that *provably* hold a reference would
-    // be more precise, but a single missed slot is a use-after-free, and the
-    // collector cannot recover from that. Scanning a numeric slot can only
-    // retain an object one cycle too long, which is far cheaper than a
-    // dangling pointer. Aggregates are scanned in full.
+    // A slot is registered when its type can hold a reference: 8 bytes for a
+    // `Str` or `List`, the whole size for a record or array that contains
+    // references, nothing for everything else (a numeric local is not
+    // registered at all). Aggregates that are produced by an instruction are
+    // spilled into a rooted slot as well, because while such a value only
+    // lives in a register a collection triggered by a later allocation could
+    // free the strings it points to.
     let mut root_entries: Vec<(String, u64, Ty)> = Vec::new();
     for (dest, ty) in &hoisted {
-        let scan = match ty {
-            Ty::Str | Ty::List(_) => 8,
-            Ty::Array(_, _) | Ty::Record(_) => llvm_size(ty, records).max(8),
-            _ => 8,
-        };
-        root_entries.push((format!("%v{}", dest), scan, ty.clone()));
+        if has_refs(ty, records) {
+            root_entries.push((format!("%v{}", dest), scan_bytes(ty, records), ty.clone()));
+        }
     }
     for (dest, ty) in &managed_temps {
         root_entries.push((
             format!("%v{}_mt", dest),
-            scan_bytes(ty, records).max(8),
+            scan_bytes(ty, records),
             ty.clone(),
         ));
     }
     for (_, reg, ty) in &elem_temps {
-        root_entries.push((reg.clone(), scan_bytes(ty, records).max(8), ty.clone()));
+        root_entries.push((reg.clone(), scan_bytes(ty, records), ty.clone()));
     }
     for (_, reg, ty) in &agg_temps {
-        root_entries.push((reg.clone(), scan_bytes(ty, records).max(8), ty.clone()));
+        root_entries.push((reg.clone(), scan_bytes(ty, records), ty.clone()));
     }
     let has_roots = !root_entries.is_empty();
 

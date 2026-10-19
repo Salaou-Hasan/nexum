@@ -59,7 +59,13 @@ character; lengths are byte counts.
 * **Mark phase**: for every root entry of every registered frame, scan the
   described byte range for candidate pointers and mark the objects they
   address. Then trace the heap to a fixpoint, because a marked object can
-  reference further objects.
+  reference further objects. The trace repeats its pass over the heap until a
+  pass marks nothing new; `nexum_mark_ptr` therefore reports **"this object
+  was newly marked"** (not "this object was already marked"), which is what
+  drives the fixpoint. The distinction matters: an object that is only
+  reachable *through* another object (a `List` element buffer, for example)
+  is discovered after its referrer, so a single pass would leave it - and
+  everything it points to - unmarked and reclaimable.
 * **Sweep phase**: walk the global list; unmarked blocks are unlinked, their
   size subtracted from `@nexum_live`, and `free`d; marked blocks have their
   mark bit reset to 0.
@@ -78,13 +84,11 @@ for pointers.
 * **Root entry**: a pair describing one root:
   * `+0`  `addr` (ptr) - address of the root slot
   * `+8`  `scan_bytes` (i64) - bytes to scan; 0 means "not a root"
-* The compiler registers **every** stack slot, not only the ones that
-  provably hold a reference: a `Str` or `List` local scans 8 bytes, a record
-  or array scans its whole size, and everything else scans a single word.
-  Registering only the provably-reference-holding slots is more precise, but a
-  single missed slot is a use-after-free that the collector cannot recover
-  from; scanning a numeric slot can only retain one object for an extra
-  cycle, which is far cheaper than a dangling pointer.
+* The compiler decides what to register: a local or temporary whose type can
+  hold a reference is registered with the number of bytes the collector must
+  scan - 8 for a `Str` or `List`, the whole size for a record or array that
+  contains references, 0 for everything else (a numeric local is not
+  registered at all).
 * An aggregate value that can hold references is **spilled into a rooted
   slot** right after it is produced, because while it only lives in a
   register a collection triggered by a later allocation could free the strings

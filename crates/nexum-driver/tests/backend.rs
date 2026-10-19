@@ -131,15 +131,7 @@ fn run_outputs_match_fixtures() {
 
 /// The self-hosted lexer (stage 10b) must produce exactly the same token
 /// stream as the Rust lexer for every example program.
-///
-/// Known defect: the collector can lose a heap string that is only reachable
-/// through a `List` element buffer when the program allocates heavily while
-/// printing (a large source file triggers it; a small one does not). The
-/// defect is tracked in `docs/self-hosting.md`; the gate is disabled until it
-/// is fixed so the rest of the suite stays green and the failure stays
-/// visible.
 #[test]
-#[ignore = "known collector defect: heap strings held only by a List buffer are reclaimed too early"]
 fn selfhosted_lexer_matches_rust_lexer() {
     let Some(tc) = toolchain() else { return };
     let work = tmp_dir();

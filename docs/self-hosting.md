@@ -55,41 +55,34 @@ specification.
   prints the token stream in the same format as `nx lex`, so the two can be
   compared token by token.
 * The matching differential test
-  (`selfhosted_lexer_matches_rust_lexer`) is currently **disabled** because
-  it exposed a collector defect (see below).
+  (`selfhosted_lexer_matches_rust_lexer`) compares the two token streams for
+  every example program and is part of the normal test suite.
 
-## Open defect: heap strings held only by a `List` buffer
+## Collector defect found by the self-hosted lexer, and fixed
 
-**Symptom.** A program that builds a `List` of records whose fields are heap
-strings, and then allocates heavily while reading the list back (for example
-printing every element), can observe reclaimed strings: the printed text is
-garbage, and a large enough program crashes with an access violation.
+The self-hosted lexer was the first program to build a `List` of records
+whose fields are heap strings and then allocate heavily while reading the
+list back. It exposed a defect in the collector: the printed text of the
+tokens came out as garbage, and a large enough program crashed with an
+access violation.
 
-**Reproduction.** `examples/selfhost/lexer.nx` on a source file of roughly
-ten lines or more reproduces it; smaller inputs do not. Raising the
-collector watermark (`@nexum_threshold`) makes the symptom disappear, which
-shows the collector is involved rather than the lexer.
+**Cause.** `nexum_mark_ptr` reported "this object was **already** marked"
+where the trace loop expected "this object was **newly** marked". The
+fixpoint that propagates marks through the heap therefore stopped after a
+single pass. An object that is reachable only *through* another object - a
+`List` element buffer, for instance - is discovered after its referrer in
+the allocation-ordered heap, so it was never traced: the buffer and the
+strings it held were reclaimed while still in use. Small programs did not
+show the defect because they never reached the collection watermark.
 
-**What was ruled out.**
+**Fix.** `nexum_mark_ptr` now reports "newly marked", so the trace repeats
+its pass over the heap until a pass marks nothing new. The collector's
+contract is documented in `docs/runtime-abi.md`.
 
-* The element size and the element scan size passed to `list_push` are
-  correct (24 bytes for a three-field record).
-* The list's growth path copies the old elements before publishing the new
-  buffer, and the old buffer is only reclaimed after it is unreachable.
-* The list object itself is never reclaimed (it does not appear in the
-  sweep's drop list).
-* Registering every stack slot (instead of only the ones that provably hold
-  a reference) and scanning the whole payload of every heap object did not
-  fix it.
-
-**Status.** Not yet root-caused. The most likely remaining suspects are the
-interior layout of the element buffer versus the element stride, and the
-ordering of the collector's mark phase relative to the list's growth. The
-test is `#[ignore]`d with this reason so the failure stays visible.
-
-**Impact.** Programs that only use `Str` in locals, parameters and returns
-are unaffected (the conformance suite is green). The affected pattern is a
-`List` of records containing heap strings, combined with heavy allocation.
+**Regression coverage.** `selfhosted_lexer_matches_rust_lexer` is the
+differential gate: it runs the self-hosted lexer and the Rust lexer over
+every example program and requires the token streams to be identical, so a
+regression in either the collector or the lexer fails the build.
 
 ## Recommendation
 

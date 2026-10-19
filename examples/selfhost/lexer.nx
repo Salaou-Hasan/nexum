@@ -69,28 +69,29 @@ fn keyword_kind(w: Str) -> Str:
         return "KwImport"
     return "Ident"
 
-fn two_char_kind(a: Str, b: Str) -> Str:
-    if a == "=" and b == "=":
+# The kind of a two-character operator, or "" if the pair is not one.
+fn two_char_kind(pair: Str) -> Str:
+    if pair == "==":
         return "EqEq"
-    if a == "!" and b == "=":
+    if pair == "!=":
         return "BangEq"
-    if a == "<" and b == "=":
+    if pair == "<=":
         return "LtEq"
-    if a == ">" and b == "=":
+    if pair == ">=":
         return "GtEq"
-    if a == "-" and b == ">":
+    if pair == "->":
         return "Arrow"
-    if a == "." and b == ".":
+    if pair == "..":
         return "Range"
-    if a == "+" and b == "=":
+    if pair == "+=":
         return "PlusEq"
-    if a == "-" and b == "=":
+    if pair == "-=":
         return "MinusEq"
-    if a == "*" and b == "=":
+    if pair == "*=":
         return "StarEq"
-    if a == "/" and b == "=":
+    if pair == "/=":
         return "SlashEq"
-    if a == "%" and b == "=":
+    if pair == "%=":
         return "PercentEq"
     return ""
 
@@ -287,7 +288,7 @@ fn main():
                                         let mut two = ""
                                         if i + 1 < n:
                                             two = slice(src, i, i + 2)
-                                        let kind2 = two_char_kind(c, two)
+                                        let kind2 = two_char_kind(two)
                                         if kind2 != "":
                                             list_push(tokens, Token(kind2, two, line))
                                             i = i + 2
