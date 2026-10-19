@@ -40,6 +40,10 @@
 //! scanned conservatively. A collection runs only inside an allocation when
 //! the watermark is exceeded, or when a program calls the `collect()` builtin.
 
+pub mod bytes;
+pub mod format;
+pub mod heap;
+pub mod math;
 pub mod strings;
 pub mod syscalls;
 

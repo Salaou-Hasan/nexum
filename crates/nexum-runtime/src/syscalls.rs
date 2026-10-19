@@ -51,6 +51,10 @@ pub struct Syscalls {
     pub open_write: i64,
     /// The permissions for a file that is created.
     pub open_mode: i64,
+    /// The protection an anonymous mapping asks for: read and write.
+    pub map_prot: i64,
+    /// The flags of an anonymous mapping: private, and not backed by a file.
+    pub map_flags: i64,
 }
 
 impl Syscalls {
@@ -69,6 +73,8 @@ impl Syscalls {
                 open_read: 0,
                 open_write: 1 | 64 | 512,
                 open_mode: 0o644,
+                map_prot: 1 | 2,
+                map_flags: 0x02 | 0x20,
             },
             SysOs::Macos => Self {
                 // Darwin numbers its system calls from the BSD master table,
@@ -85,8 +91,22 @@ impl Syscalls {
                 open_read: 0,
                 open_write: 1 | 512 | 1024,
                 open_mode: 0o644,
+                map_prot: 1 | 2,
+                map_flags: 0x2 | 0x1000,
             },
         }
+    }
+}
+
+/// The page size of a target.
+///
+/// It is not the same everywhere: macOS on Apple Silicon has 16 KiB pages,
+/// and its munmap refuses a length that is not a multiple of the page
+/// size, so the wrong constant leaks every large block.
+pub fn page_size(os: SysOs, arch: SysArch) -> i64 {
+    match (os, arch) {
+        (SysOs::Macos, SysArch::Aarch64) => 16384,
+        _ => 4096,
     }
 }
 
@@ -238,7 +258,7 @@ pub fn wrappers(os: SysOs, arch: SysArch, sys: &Syscalls) -> String {
     let mut s = String::new();
     let mut push = |name: &str, nr: i64, args: &[Arg]| {
         s.push_str(&format!(
-            "define internal i64 @nexum_sys_{name}(i64 %a0, i64 %a1, i64 %a2, i64 %a3) {{\nentry:\n{}  ret i64 %r\n}}\n\n",
+            "define internal i64 @nexum_sys_{name}(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {{\nentry:\n{}  ret i64 %r\n}}\n\n",
             call_body(os, arch, nr, args)
         ));
     };
@@ -273,17 +293,21 @@ pub fn wrappers(os: SysOs, arch: SysArch, sys: &Syscalls) -> String {
         &[arg(0, "%a0"), arg(1, "%a1"), arg(2, "%a2")],
     );
     push("close", sys.close, &[arg(0, "%a0")]);
-    // mmap: the file descriptor is -1 (the mapping is anonymous) and the
-    // offset is 0, so both are constants.
+    // mmap: the arguments are (address, length, protection, flags, file
+    // descriptor, offset). The descriptor is -1 and the offset is 0, so the
+    // mapping is anonymous, and the protection and the flags come from the
+    // system. The order matters: the flags go in the fourth register and
+    // the descriptor in the fifth, and swapping them maps the world.
     push(
         "mmap",
         sys.mmap,
         &[
             arg(0, "%a0"),
             arg(1, "%a1"),
-            arg(2, "%a2"),
-            const_arg(3, -1),
-            const_arg(4, 0),
+            const_arg(2, sys.map_prot),
+            const_arg(3, sys.map_flags),
+            const_arg(4, -1),
+            const_arg(5, 0),
         ],
     );
     push("munmap", sys.munmap, &[arg(0, "%a0"), arg(1, "%a1")]);
@@ -381,5 +405,35 @@ mod tests {
         let ir = wrappers(SysOs::Macos, SysArch::Aarch64, &darwin);
         assert!(ir.contains("mov x16, #"), "{ir}");
         assert!(ir.contains("svc #0x80"), "{ir}");
+    }
+
+    /// The mapping arguments are in the order the system call expects:
+    /// address, length, protection, flags, descriptor, offset. The flags go
+    /// in the fourth register and the descriptor in the fifth, and swapping
+    /// them maps the world with the wrong flags.
+    #[test]
+    fn the_mapping_arguments_are_in_order() {
+        let linux = Syscalls::for_os(SysOs::Linux);
+        let ir = wrappers(SysOs::Linux, SysArch::X86_64, &linux);
+        let mmap = ir
+            .split("define internal i64 @nexum_sys_mmap")
+            .nth(1)
+            .expect("no mmap wrapper");
+        let mmap = mmap.split("}\n\n").next().unwrap_or(mmap);
+        // Six arguments, six registers.
+        assert!(mmap.contains("{rdi},{rsi},{rdx},{r10},{r8},{r9}"), "{mmap}");
+        // The protection, the flags, the descriptor and the offset.
+        assert!(mmap.contains("i64 3, i64 34, i64 -1, i64 0"), "{mmap}");
+    }
+
+    /// The page size is not the same everywhere: macOS on Apple Silicon has
+    /// 16 KiB pages, and its `munmap` refuses a length that is not a
+    /// multiple of the page size.
+    #[test]
+    fn the_page_size_is_per_target() {
+        assert_eq!(page_size(SysOs::Linux, SysArch::X86_64), 4096);
+        assert_eq!(page_size(SysOs::Linux, SysArch::Aarch64), 4096);
+        assert_eq!(page_size(SysOs::Macos, SysArch::X86_64), 4096);
+        assert_eq!(page_size(SysOs::Macos, SysArch::Aarch64), 16384);
     }
 }
