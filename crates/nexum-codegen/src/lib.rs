@@ -116,7 +116,18 @@ pub fn emit(mir: &MirModule, target: &TargetSpec) -> String {
     ));
     // The runtime slice (panic, managed heap, collector, roots, string
     // helpers) lives in the nexum-runtime crate; see docs/runtime-abi.md.
-    out.push_str(&nexum_runtime::runtime_ir(&target.os, &target.arch));
+    let runtime = nexum_runtime::runtime_ir(&target.os, &target.arch);
+    out.push_str(&runtime);
+    // The print path: the runtime's formatters, which replace `printf`.
+    // They belong in `nexum_runtime::runtime_ir` - every module that wants
+    // the runtime has to get them - but the runtime's own module is not
+    // this crate's to change, so they are added here. The check keeps the
+    // two from defining the same functions twice.
+    if !runtime.contains("@nexum_print_int(") {
+        out.push_str(&nexum_runtime::format::format_routines(
+            !target.os.contains("windows"),
+        ));
+    }
 
     // record type definitions
     for (name, fields) in &mir.records {
@@ -165,10 +176,6 @@ pub fn emit(mir: &MirModule, target: &TargetSpec) -> String {
             name, n, escaped
         ));
     }
-    // format strings
-    // (we'll embed format globals as needed; track separately)
-    // For simplicity, ensure format globals exist
-    // We'll add them during emit into globals list with special names; handle below by checking names starting fmt_
     out.push('\n');
     out.push_str(&func_buf);
     out
@@ -205,23 +212,6 @@ fn get_str_global(
     *counter += 1;
     globals.push((name.clone(), content.to_string()));
     map.insert(content.to_string(), name.clone());
-    name
-}
-
-fn get_fmt_global(
-    fmt: &str,
-    globals: &mut Vec<(String, String)>,
-    counter: &mut usize,
-    map: &mut HashMap<String, String>,
-) -> String {
-    // fmt includes no trailing? We'll store full format string
-    if let Some(n) = map.get(fmt) {
-        return n.clone();
-    }
-    let name = format!("fmt_{}", *counter);
-    *counter += 1;
-    globals.push((name.clone(), fmt.to_string()));
-    map.insert(fmt.to_string(), name.clone());
     name
 }
 
@@ -757,20 +747,14 @@ fn emit_fn(
                         })
                         .collect();
                     if callee == "print" {
-                        // determine arg type
+                        // The runtime formats the value and writes it to
+                        // stdout; there is no format string and no varargs
+                        // call any more, so a program does not need the C
+                        // library to print.
                         let argty = args
                             .first()
                             .and_then(|a| vt.get(&a.0).cloned())
                             .unwrap_or(Ty::Int);
-                        // Use a format global. We need the actual format string content (with \n). Let's build content string.
-                        let fmt_content = match argty {
-                            Ty::Int => "%lld\n",
-                            Ty::Float => "%g\n",
-                            Ty::Bool => "%d\n",
-                            Ty::Str => "%s\n",
-                            _ => "%lld\n",
-                        };
-                        let gname = get_fmt_global(fmt_content, globals, gcounter, strmap);
                         let argreg0 = args
                             .first()
                             .map(|a| {
@@ -780,17 +764,45 @@ fn emit_fn(
                                     .unwrap_or_else(|| format!("%v{}", a.0))
                             })
                             .unwrap_or_default();
-                        let (argreg, argtystr) = if argty == Ty::Bool {
-                            let zr = format!("%v{}_z", args.first().map(|a| a.0).unwrap_or(0));
-                            buf.push_str(&format!("  {} = zext i1 {} to i64\n", zr, argreg0));
-                            (zr, "i64".to_string())
-                        } else {
-                            (argreg0, llvm_ty(&argty))
-                        };
-                        buf.push_str(&format!(
-                            "  call i32 (ptr, ...) @printf(ptr @{}, {} {})\n",
-                            gname, argtystr, argreg
-                        ));
+                        let arg0 = args.first().map(|a| a.0).unwrap_or(0);
+                        match argty {
+                            Ty::Float => buf.push_str(&format!(
+                                "  call void @nexum_print_float(double {})\n",
+                                argreg0
+                            )),
+                            Ty::Bool => {
+                                // The runtime takes the widened value, the
+                                // way `printf`'s variadic arguments were
+                                // promoted.
+                                let zr = format!("%v{}_z", arg0);
+                                buf.push_str(&format!("  {} = zext i1 {} to i64\n", zr, argreg0));
+                                buf.push_str(&format!(
+                                    "  call void @nexum_print_bool(i64 {})\n",
+                                    zr
+                                ));
+                            }
+                            Ty::Str => buf.push_str(&format!(
+                                "  call void @nexum_print_str(ptr {})\n",
+                                argreg0
+                            )),
+                            Ty::List(_) => {
+                                // A list is a pointer, and the type checker
+                                // does not reject it for `print` yet, so the
+                                // address is printed as a number - the
+                                // behaviour the old varargs call had, but
+                                // with a well typed call.
+                                let p = format!("%v{}_i", arg0);
+                                buf.push_str(&format!(
+                                    "  {} = ptrtoint ptr {} to i64\n",
+                                    p, argreg0
+                                ));
+                                buf.push_str(&format!("  call void @nexum_print_int(i64 {})\n", p));
+                            }
+                            _ => buf.push_str(&format!(
+                                "  call void @nexum_print_int(i64 {})\n",
+                                argreg0
+                            )),
+                        }
                         if let Some(d) = dest {
                             let r = format!("%v{}", d.0);
                             valreg.insert(d.0, r.clone());
