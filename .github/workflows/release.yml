@@ -101,6 +101,7 @@ jobs:
           Copy-Item "target/x86_64-pc-windows-msvc/release/nx.exe" "stage/nx.exe"
           Copy-Item "packaging/windows/nexum.ico" "stage/nexum.ico"
           Copy-Item "packaging/windows/add-to-path.cmd" "stage/"
+          Copy-Item "packaging/windows/check-llvm.cmd" "stage/"
           Copy-Item "packaging/windows/install-vscode-extension.cmd" "stage/"
           Copy-Item "packaging/windows/Package.wxs" "stage/"
           Copy-Item "nexum-language.vsix" "stage/"
