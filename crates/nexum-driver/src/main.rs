@@ -4,6 +4,7 @@ use nexum_mir::{lower, optimize_level, verify};
 use nexum_sema::analyze;
 use nexum_target::TargetSpec;
 use nexum_toolchain::Toolchain;
+use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -268,13 +269,30 @@ fn update_nexum() {
     }
     let latest = tag.trim_start_matches('v');
     println!("latest release: {}", tag);
-    if latest == current {
-        println!("already up to date");
-        return;
+    match compare_versions(latest, current) {
+        Some(Ordering::Equal) => {
+            println!("already up to date");
+            return;
+        }
+        Some(Ordering::Less) => {
+            println!(
+                "the latest release ({}) is older than this copy ({}); nothing to do",
+                latest, current
+            );
+            return;
+        }
+        _ => {}
     }
     // The editor extension travels with the release, so an update brings the
-    // language and the extension back in step.
-    let vsix = download_release_asset(&tag, "nexum-language.vsix");
+    // language and the extension back in step. It is not fatal if the
+    // release has no extension: the compiler is still updated.
+    let vsix = match try_download_release_asset(&tag, "nexum-language.vsix") {
+        Some(p) => p,
+        None => {
+            eprintln!("note: this release has no editor extension");
+            std::env::temp_dir().join("nexum-language.vsix")
+        }
+    };
     if cfg!(target_os = "windows") {
         update_windows(&tag);
     } else {
@@ -282,6 +300,28 @@ fn update_nexum() {
     }
     install_vscode_extension(&vsix);
     println!("updated to {} - restart nx to use the new version", tag);
+}
+
+/// Compare two `major.minor.patch` versions.
+fn compare_versions(a: &str, b: &str) -> Option<Ordering> {
+    fn parts(v: &str) -> Option<Vec<u64>> {
+        let mut out = Vec::new();
+        for p in v.split('.') {
+            out.push(p.trim().parse::<u64>().ok()?);
+        }
+        Some(out)
+    }
+    let a = parts(a)?;
+    let b = parts(b)?;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        match x.cmp(&y) {
+            Ordering::Equal => {}
+            other => return Some(other),
+        }
+    }
+    Some(Ordering::Equal)
 }
 
 /// The URL of a release asset.
@@ -292,8 +332,20 @@ fn release_asset_url(tag: &str, asset: &str) -> String {
     )
 }
 
-/// Download a release asset into the temporary directory.
+/// Download a release asset into the temporary directory. A failure is
+/// fatal: the update cannot go on without it.
 fn download_release_asset(tag: &str, asset: &str) -> std::path::PathBuf {
+    match try_download_release_asset(tag, asset) {
+        Some(p) => p,
+        None => {
+            eprintln!("error: download failed: {}", release_asset_url(tag, asset));
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Download a release asset, returning `None` when it is not there.
+fn try_download_release_asset(tag: &str, asset: &str) -> Option<std::path::PathBuf> {
     use std::process::Command;
     let url = release_asset_url(tag, asset);
     let tmp = std::env::temp_dir().join(asset);
@@ -302,10 +354,10 @@ fn download_release_asset(tag: &str, asset: &str) -> std::path::PathBuf {
         .args(["-sL", "-f", "-o", tmp.to_str().unwrap(), &url])
         .status();
     match status {
-        Ok(s) if s.success() && tmp.exists() => tmp,
+        Ok(s) if s.success() && tmp.exists() => Some(tmp),
         _ => {
-            eprintln!("error: download failed: {url}");
-            std::process::exit(1);
+            let _ = std::fs::remove_file(&tmp);
+            None
         }
     }
 }
@@ -1064,4 +1116,20 @@ fn build_to(file: &Path, exe: &Path, opt_level: u8) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compare_versions;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn versions_compare_by_number() {
+        assert_eq!(compare_versions("0.3.0", "0.2.1"), Some(Ordering::Greater));
+        assert_eq!(compare_versions("0.2.1", "0.3.0"), Some(Ordering::Less));
+        assert_eq!(compare_versions("0.3.0", "0.3.0"), Some(Ordering::Equal));
+        assert_eq!(compare_versions("0.3", "0.3.0"), Some(Ordering::Equal));
+        assert_eq!(compare_versions("1.0.0", "0.9.9"), Some(Ordering::Greater));
+        assert_eq!(compare_versions("not-a-version", "0.1.0"), None);
+    }
 }
