@@ -60,6 +60,7 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
     // The string routines are ours on every platform: a program should not
     // need the C library for a byte copy.
     s.push_str(&strings::string_routines());
+    s.push_str(&bytes::byte_routines());
 
     if msvc {
         // The UCRT exposes stdio streams through __acrt_iob_func; the classic
