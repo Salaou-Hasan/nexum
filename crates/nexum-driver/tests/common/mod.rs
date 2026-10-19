@@ -22,31 +22,11 @@ pub struct Frontend {
 }
 
 pub fn run_frontend(path: &Path) -> Frontend {
-    let text = std::fs::read_to_string(path).unwrap();
     let mut sm = nexum_source::SourceMap::new();
-    let fid = sm.add(path.to_path_buf(), text);
-    let sf = sm.get(fid);
-    let mut diagnostics = Vec::new();
+    let (module, load_diags) = nexum_parser::load_module(&mut sm, path);
+    let mut diagnostics = load_diags;
 
-    let lexed = nexum_lexer::lex(sf);
-    diagnostics.extend(lexed.diagnostics.clone());
-    if has_errors(&diagnostics) {
-        return Frontend {
-            diagnostics,
-            hir: None,
-        };
-    }
-
-    let parsed = nexum_parser::parse(&lexed.tokens);
-    diagnostics.extend(parsed.diagnostics.clone());
-    if has_errors(&diagnostics) {
-        return Frontend {
-            diagnostics,
-            hir: None,
-        };
-    }
-
-    let sema = nexum_sema::analyze(&parsed.module);
+    let sema = nexum_sema::analyze(&module);
     let nexum_sema::SemaResult {
         hir,
         diagnostics: sema_diags,

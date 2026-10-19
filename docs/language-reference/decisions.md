@@ -31,9 +31,12 @@ examples are explanatory labels, not import syntax.
 * Rationale: the spec explicitly defers a module system; defining imports
   before name resolution across files is specified would freeze the wrong
   shape.
-* Consequences: no circular-module concerns; `nx` is single-file in and single
-  binary out. A later phase introduces explicit import syntax and this document
-  will record it.
+* Consequences: `import "path.nx"` (top level only) loads another file into
+  the same program, resolved relative to the importing file. Every file is
+  loaded once, so diamond imports and import cycles are safe. Imported
+  declarations share one namespace with the importing file; there is no
+  per-module visibility yet, and no separate compilation. A later phase
+  introduces qualified names and this document will record it.
 
 ## D003 — Error handling is `panic` plus static diagnostics (decided)
 
@@ -122,24 +125,45 @@ wrong shape.
   `collect`) for dynamic strings. The decision is recorded here so it is not
   a silent skip.
 
-## D010 — `Str` is the only managed type; GC is precise and non-moving (decided)
+## D010 - `Str` and `List` are the managed types; tracing is mostly precise (decided)
 
-The bootstrap has exactly one managed type, `Str`. Strings produced by
-`concat` live on the managed heap and are collected by a precise,
-non-moving, single-threaded mark-sweep collector (`nexum_alloc`,
-`nexum_collect`, `nexum_gc_maybe`). Native values (Int, Float, Bool,
-records, arrays) are unboxed and never allocate.
+The bootstrap has exactly two managed types, `Str` and `List`. Strings
+produced by `concat` and lists produced by `list_new` live on the managed
+heap and are collected by a non-moving, single-threaded mark-sweep collector
+(`nexum_alloc`, `nexum_collect`, `nexum_gc_maybe`). Native values (Int,
+Float, Bool, records, arrays) are unboxed and never allocate.
 
-* Roots: compiler-generated root frames holding the *addresses* of `Str`
-  alloca slots, so the collector reads slot contents at collection time.
+* Roots: compiler-generated root frames. Each root entry names an address
+  and the number of bytes the collector must scan there, so the collector
+  reads slot contents at collection time.
+* Tracing is *mostly precise*: the compiler knows exactly which slots hold
+  references and how large they are; the contents of an aggregate are
+  scanned conservatively. See `decisions-gc.md` for the alternatives that
+  were considered and why this one was chosen.
 * Safepoints: every allocation and the `collect()` builtin.
-* Temporary roots: a `Str`-returning call spills its result into a registered
-  slot immediately, so nested constructions stay sound.
-* Restriction: `Str` may not be stored in record fields or array elements
-  yet (T039), because the collector has no type descriptors; this is
-  enforced statically and recorded here, not left implicit.
-* Open: type descriptors and in-aggregate strings, arenas, deterministic
-  cleanup, concurrency, and a moving/compacting collector are later phases.
+* Temporary roots: a call whose result holds references spills its result
+  into a registered slot immediately, so nested constructions stay sound.
+* `Str` may be stored in record fields and array elements: the collector
+  traces references inside aggregates. The former T039 restriction is
+  therefore withdrawn.
+* Open: arenas, deterministic cleanup, concurrency, and a moving/compacting
+  collector are later phases.
+
+## D011 - `List` is a monomorphic growable collection (decided)
+
+`List` is the dynamic collection type. It is deliberately separate from the
+fixed-size array type, whose value semantics are unchanged.
+
+* The element type is fixed by the first `list_push`; a later push of a
+  different type is a compile error (T049), and a list whose element type
+  was never established cannot be read (T049).
+* A list is a reference: two names may refer to the same list.
+* Growth doubles the capacity; the list object itself never moves, so
+  handles stay valid across growth.
+* The element buffer is a separate heap object, which lets the collector
+  trace the elements it holds.
+* Open: lists of lists, slicing, iteration helpers, and a generalisation
+  to other element types.
 ## D008 — For-each iterates a snapshot (decided)
 
 `for v in xs:` evaluates `xs` once, then binds `v` (immutable, by value) to

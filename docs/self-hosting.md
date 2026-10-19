@@ -27,7 +27,7 @@ language features that do not exist yet:
 | Stage | Deliverable | Prerequisite |
 | ----- | ----------- | ------------ |
 | 10a | Port the lexer to Nexum (single file, string input). **Done** — see `examples/selfhost_lexer.nx`. | String indexing + a small token type. (Done) |
-| 10b | Port the parser (recursive descent). | Dynamic arrays or arena-allocated nodes. |
+| 10b | Port the parser (recursive descent). | Growable lists, modules. (Largely done: `List`, `import` and file I/O now exist.) |
 | 10c | Port name resolution + type checking. | Hash maps in std. |
 | 10d | Port MIR lowering + optimization passes. | — |
 | 10e | Port codegen (LLVM IR text emission). | String building (already have concat). |

@@ -46,8 +46,13 @@ Windows (x86_64) using LLVM/clang. Supported today:
 - `if` / `else`
 - `while`, `for x in a..b`, and `for v in xs:` (for-each over an array)
 - Managed strings: `concat(a, b)`, `collect()`, `heap_used()`, string
-  equality (`==`/`!=`); precise non-moving mark-sweep GC; see
-  `docs/runtime-abi.md`
+  equality (`==`/`!=`), indexing (`s[i]`), slicing (`slice(s, lo, hi)`);
+  precise non-moving mark-sweep GC that also traces references inside
+  records and arrays; see `docs/runtime-abi.md`
+- Growable `List` collections: `list_new`, `list_push`, `list_len`,
+  `list_get`, `list_set` (element type fixed by the first push)
+- Modules: `import "file.nx"` (top level, relative to the importing file)
+- File I/O: `read_file(path)`, `write_file(path, content)`
 - Arithmetic, comparisons, `and`/`or`/`not`
 - Function calls (including recursion)
 - `print(...)` builtin

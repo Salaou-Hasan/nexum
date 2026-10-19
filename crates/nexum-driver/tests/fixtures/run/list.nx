@@ -1,0 +1,27 @@
+type Token:
+    kind: Str
+    text: Str
+
+fn main():
+    let ts = list_new()
+    list_push(ts, Token("IDENT", "let"))
+    list_push(ts, Token("INT", "42"))
+    list_push(ts, Token("OP", "+"))
+    print(list_len(ts))
+    let mut i = 0
+    while i < list_len(ts):
+        let t = list_get(ts, i)
+        print(t.kind)
+        print(t.text)
+        i = i + 1
+    list_set(ts, 1, Token("NUM", "42"))
+    let u = list_get(ts, 1)
+    print(u.kind)
+    print(u.text)
+    # growth past the initial capacity
+    let mut k = 0
+    while k < 20:
+        list_push(ts, Token("X", "y"))
+        k = k + 1
+    print(list_len(ts))
+    print(list_get(ts, 22).kind)

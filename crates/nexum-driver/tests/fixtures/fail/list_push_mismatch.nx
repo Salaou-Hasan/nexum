@@ -1,0 +1,6 @@
+# EXPECT: T049
+# The element type is fixed by the first push.
+fn main():
+    let xs = list_new()
+    list_push(xs, 1)
+    list_push(xs, "text")

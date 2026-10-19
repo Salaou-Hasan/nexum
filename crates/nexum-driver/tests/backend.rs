@@ -10,10 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 fn toolchain() -> Option<nexum_toolchain::Toolchain> {
-    match nexum_toolchain::Toolchain::discover() {
-        Ok(tc) => Some(tc),
-        Err(_) => None,
-    }
+    nexum_toolchain::Toolchain::discover().ok()
 }
 
 fn tmp_dir() -> std::path::PathBuf {
@@ -146,6 +143,9 @@ fn differential_opt_levels_agree() {
         fixtures_dir("run").join("int_wrap.nx"),
         fixtures_dir("run").join("foreach.nx"),
         fixtures_dir("run").join("compound.nx"),
+        fixtures_dir("run").join("list.nx"),
+        fixtures_dir("run").join("list_gc.nx"),
+        fixtures_dir("run").join("gc_reclaim.nx"),
     ];
     for f in files {
         if !f.exists() {

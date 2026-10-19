@@ -1,0 +1,18 @@
+type Box:
+    label: Str
+    payload: Str
+
+fn main():
+    let keep = list_new()
+    list_push(keep, Box("keep", "alive"))
+    let mut i = 0
+    while i < 200:
+        let tmp = list_new()
+        list_push(tmp, Box("temp", concat("gar", "bage")))
+        collect()
+        i = i + 1
+    # `keep` must be intact after all those collections
+    let k = list_get(keep, 0)
+    print(k.label)
+    print(k.payload)
+    print(list_len(keep))

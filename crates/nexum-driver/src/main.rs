@@ -1,13 +1,11 @@
 use clap::{Parser, Subcommand};
 use nexum_diagnostics::render;
-use nexum_lexer::lex;
 use nexum_mir::{lower, optimize_level, verify};
-use nexum_parser::parse;
 use nexum_sema::analyze;
 use nexum_target::TargetSpec;
-use nexum_toolchain::{run_clang, Toolchain};
+use nexum_toolchain::Toolchain;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser)]
@@ -307,7 +305,7 @@ fn update_nexum() {
         std::process::exit(1);
     }
     let _ = std::fs::remove_file(&old);
-    println!("updated to {} — restart nx to use the new version", tag);
+    println!("updated to {} â€” restart nx to use the new version", tag);
 }
 
 fn format_nx(text: &str) -> Result<String, String> {
@@ -623,6 +621,12 @@ fn format_nx(text: &str) -> Result<String, String> {
                 ind(out, level);
                 fmt_expr(out, e);
             }
+            StmtKind::Import { path } => {
+                ind(out, level);
+                out.push_str("import \"");
+                out.push_str(path);
+                out.push('"');
+            }
         }
     }
 
@@ -739,10 +743,17 @@ fn explain(code: &str) {
         "T036" => "invalid array element type (Unit/Never).",
         "T037" => "`mut` argument is not a mutable variable.",
         "T038" => "for-each over a non-array value.",
-        "T039" => "managed Str cannot be stored in records or arrays yet.",
+        "T039" => "reserved (managed Str in aggregates is now supported).",
         "T040" => "concat expects two Str arguments.",
         "T041" => "collect expects no arguments.",
         "T042" => "heap_used expects no arguments.",
+        "T043" => "str_char_at arity/type error.",
+        "T044" => "slice arity/type error.",
+        "T045" => "read_file arity/type error.",
+        "T046" => "write_file arity/type error.",
+        "T047" => "cannot import a module (missing or unreadable file).",
+        "T048" => "list builtin arity/type error.",
+        "T049" => "list element type error (mismatch or not inferable).",
         _ => "unknown diagnostic code.",
     };
     println!("{}: {}", code, msg);
@@ -751,20 +762,6 @@ fn explain(code: &str) {
 
 static TARGET_NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-fn resolve_target(name: &str) -> TargetSpec {
-    if name == "host" {
-        TargetSpec::host()
-    } else {
-        TargetSpec::by_name(name).unwrap_or_else(|| {
-            eprintln!(
-                "unknown target `{}`; valid: host, {}",
-                name,
-                TargetSpec::list().join(", ")
-            );
-            std::process::exit(1);
-        })
-    }
-}
 static BUILD_OPTS: std::sync::Mutex<nexum_toolchain::BuildOpts> =
     std::sync::Mutex::new(nexum_toolchain::BuildOpts {
         opt: 2,
@@ -784,8 +781,8 @@ fn resolve_entry(file: Option<PathBuf>) -> PathBuf {
     }
     // Auto-detect from nexum.toml in the current directory.
     let manifest = std::path::Path::new("nexum.toml");
-    if manifest.exists() {
-        if let Ok(text) = std::fs::read_to_string(manifest) {
+    if manifest.exists()
+        && let Ok(text) = std::fs::read_to_string(manifest) {
             for line in text.lines() {
                 let line = line.trim();
                 if let Some(rest) = line.strip_prefix("entry") {
@@ -797,7 +794,6 @@ fn resolve_entry(file: Option<PathBuf>) -> PathBuf {
                 }
             }
         }
-    }
     eprintln!("error: no input file and no nexum.toml found");
     std::process::exit(1);
 }
@@ -811,42 +807,24 @@ fn current_target() -> TargetSpec {
     }
 }
 
-fn read_source(file: &PathBuf) -> Result<(nexum_source::SourceMap, nexum_source::FileId), String> {
-    let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
-    let mut sm = nexum_source::SourceMap::new();
-    let fid = sm.add(file.clone(), text);
-    Ok((sm, fid))
-}
-
 fn compile_to_mir(
-    file: &PathBuf,
+    file: &Path,
     opt_level: u8,
 ) -> Result<(nexum_source::SourceMap, nexum_mir::MirModule), String> {
-    let (sm, fid) = read_source(file)?;
-    let sf = sm.get(fid);
-    let lexed = lex(sf);
-    for d in &lexed.diagnostics {
+    // Load the file and every module it imports into one source map, so that
+    // diagnostics always point at the file they came from.
+    let mut sm = nexum_source::SourceMap::new();
+    let (module, load_diags) = nexum_parser::load_module(&mut sm, file);
+    for d in &load_diags {
         eprintln!("{}", render(d, &sm));
     }
-    if lexed
-        .diagnostics
-        .iter()
-        .any(|d| d.severity == nexum_diagnostics::Severity::Error)
-    {
-        return Err("lex errors".into());
-    }
-    let parsed = parse(&lexed.tokens);
-    for d in &parsed.diagnostics {
-        eprintln!("{}", render(d, &sm));
-    }
-    if parsed
-        .diagnostics
+    if load_diags
         .iter()
         .any(|d| d.severity == nexum_diagnostics::Severity::Error)
     {
         return Err("parse errors".into());
     }
-    let sema = analyze(&parsed.module);
+    let sema = analyze(&module);
     for d in &sema.diagnostics {
         eprintln!("{}", render(d, &sm));
     }
@@ -868,21 +846,21 @@ fn compile_to_mir(
     Ok((sm, mir))
 }
 
-fn check_file(file: &PathBuf, opt_level: u8) -> Result<(), String> {
+fn check_file(file: &Path, opt_level: u8) -> Result<(), String> {
     let (sm, _mir) = compile_to_mir(file, opt_level)?;
     println!("check: ok");
     let _ = sm;
     Ok(())
 }
 
-fn build_file(file: &PathBuf, output: Option<PathBuf>, opt_level: u8) -> Result<(), String> {
+fn build_file(file: &Path, output: Option<PathBuf>, opt_level: u8) -> Result<(), String> {
     let (_sm, mir) = compile_to_mir(file, opt_level)?;
     let tc = Toolchain::discover().map_err(|e| e.to_string())?;
     let target = current_target();
     let ir = nexum_codegen::emit(&mir, &target);
     // write .ll
     let out_exe = output.unwrap_or_else(|| {
-        let mut p = file.clone();
+        let mut p = file.to_path_buf();
         p.set_extension("exe");
         p
     });
@@ -900,14 +878,14 @@ fn build_file(file: &PathBuf, output: Option<PathBuf>, opt_level: u8) -> Result<
     Ok(())
 }
 
-fn run_file(file: &PathBuf, opt_level: u8) -> Result<(), String> {
+fn run_file(file: &Path, opt_level: u8) -> Result<(), String> {
     let exe = std::env::temp_dir().join("nexum_run.exe");
     build_to(file, &exe, opt_level)?;
     let status = Command::new(&exe).status().map_err(|e| e.to_string())?;
     std::process::exit(status.code().unwrap_or(0));
 }
 
-fn build_to(file: &PathBuf, exe: &PathBuf, opt_level: u8) -> Result<(), String> {
+fn build_to(file: &Path, exe: &Path, opt_level: u8) -> Result<(), String> {
     let (_sm, mir) = compile_to_mir(file, opt_level)?;
     let tc = Toolchain::discover().map_err(|e| e.to_string())?;
     let target = current_target();

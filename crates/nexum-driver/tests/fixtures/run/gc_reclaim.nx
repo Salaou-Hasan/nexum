@@ -1,0 +1,12 @@
+# Reclamation: temporaries that become unreachable are collected, while the
+# live string survives.
+fn main():
+    let s = concat("aaaa", "bbbb")
+    let mut i = 0
+    while i < 50:
+        let tmp = concat("x", "y")
+        i = i + 1
+    let before = heap_used()
+    collect()
+    print(heap_used() < before)
+    print(s)

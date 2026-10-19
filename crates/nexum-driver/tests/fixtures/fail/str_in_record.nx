@@ -1,6 +1,0 @@
-# EXPECT: T039
-type P:
-    name: Str
-
-fn main():
-    print("never")

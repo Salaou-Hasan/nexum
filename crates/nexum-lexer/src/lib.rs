@@ -25,6 +25,7 @@ pub enum TokenKind {
     KwAnd,
     KwOr,
     KwNot,
+    KwImport,
     // punctuation
     LParen,
     RParen,
@@ -294,6 +295,7 @@ impl<'a> Lexer<'a> {
                     "and" => TokenKind::KwAnd,
                     "or" => TokenKind::KwOr,
                     "not" => TokenKind::KwNot,
+                    "import" => TokenKind::KwImport,
                     _ => TokenKind::Ident,
                 };
                 self.push(kind, start, self.i);

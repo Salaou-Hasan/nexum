@@ -1,8 +1,11 @@
 //! Parser and AST for Nexum (bootstrap). AST carries source spans on every node.
 
 use nexum_diagnostics::Diagnostic;
-use nexum_lexer::{Token, TokenKind};
-use nexum_source::Span;
+use nexum_lexer::{lex, Token, TokenKind};
+use nexum_source::{SourceMap, Span};
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
@@ -142,6 +145,9 @@ pub enum StmtKind {
         value: Option<Expr>,
     },
     Expr(Expr),
+    Import {
+        path: String,
+    },
 }
 
 /// How a `for` statement iterates.
@@ -168,6 +174,7 @@ pub fn parse(tokens: &[Token]) -> ParseResult {
         tokens,
         i: 0,
         diagnostics: Vec::new(),
+        depth: 0,
     };
     let stmts = p.parse_module();
     ParseResult {
@@ -176,10 +183,97 @@ pub fn parse(tokens: &[Token]) -> ParseResult {
     }
 }
 
+/// Load a source file and everything it imports into `sm`, returning a single
+/// flattened module.
+///
+/// Every file is added to the shared [`SourceMap`] exactly once, so diagnostics
+/// and spans always refer to the right file. Imports are resolved relative to
+/// the directory of the importing file. A file that is reached twice (diamond
+/// import) or recursively (import cycle) is loaded only once; cycles are
+/// therefore broken by construction rather than by a separate check.
+pub fn load_module(sm: &mut SourceMap, root: &Path) -> (Module, Vec<Diagnostic>) {
+    let mut loaded: HashSet<PathBuf> = HashSet::new();
+    let mut stmts: Vec<Stmt> = Vec::new();
+    let mut diags: Vec<Diagnostic> = Vec::new();
+    load_file(sm, root, &mut loaded, &mut stmts, &mut diags);
+    (Module { stmts }, diags)
+}
+
+fn load_file(
+    sm: &mut SourceMap,
+    path: &Path,
+    loaded: &mut HashSet<PathBuf>,
+    stmts: &mut Vec<Stmt>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    // Canonicalize so that `a.nx` and `./a.nx` are the same file, and so a
+    // cycle terminates.
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !loaded.insert(key) {
+        return;
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            diags.push(Diagnostic::error(
+                "T047",
+                format!("cannot read `{}`: {e}", path.display()),
+            ));
+            return;
+        }
+    };
+    let fid = sm.add(path.to_path_buf(), text);
+    let sf = sm.get(fid);
+    let lexed = lex(sf);
+    let lex_errors = lexed
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == nexum_diagnostics::Severity::Error);
+    diags.extend(lexed.diagnostics.iter().cloned());
+    if lex_errors {
+        return;
+    }
+    let parsed = parse(&lexed.tokens);
+    let parse_errors = parsed
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == nexum_diagnostics::Severity::Error);
+    diags.extend(parsed.diagnostics.iter().cloned());
+    if parse_errors {
+        return;
+    }
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    for s in &parsed.module.stmts {
+        match &s.kind {
+            StmtKind::Import { path: rel } => {
+                let target = base.join(rel);
+                if !target.exists() {
+                    diags.push(
+                        Diagnostic::error(
+                            "T047",
+                            format!("cannot import `{}`: file not found", rel),
+                        )
+                        .with_span(Span::new(
+                            fid,
+                            s.span.start,
+                            s.span.start,
+                        )),
+                    );
+                    continue;
+                }
+                load_file(sm, &target, loaded, stmts, diags);
+            }
+            _ => stmts.push(s.clone()),
+        }
+    }
+}
+
 struct Parser<'a> {
     tokens: &'a [Token],
     i: usize,
     diagnostics: Vec<Diagnostic>,
+    /// Nesting depth: 0 at module level, >0 inside a function body.
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -247,6 +341,7 @@ impl<'a> Parser<'a> {
             TokenKind::KwWhile => self.parse_while(start),
             TokenKind::KwFor => self.parse_for(start),
             TokenKind::KwReturn => self.parse_return(start),
+            TokenKind::KwImport => self.parse_import(start),
             TokenKind::Ident => {
                 // Lookahead for a path assignment `a.b[i].c = ...`: scan the
                 // lvalue shape (identifier followed by `.ident` / `[...]`
@@ -704,15 +799,45 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_import(&mut self, start: usize) -> Option<Stmt> {
+        self.advance(); // consume `import`
+        if self.depth > 0 {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "P015",
+                    "`import` is only allowed at the top level of a module",
+                )
+                .with_span(self.peek().span),
+            );
+        }
+        let path = if self.kind() == TokenKind::Str {
+            let t = self.peek().text.clone();
+            self.advance();
+            t
+        } else {
+            self.expect(TokenKind::Str);
+            String::new()
+        };
+        let span = Span::new(self.peek().span.file, start, self.prev_span_end());
+        Some(Stmt {
+            kind: StmtKind::Import { path },
+            span,
+        })
+    }
+
     fn parse_block(&mut self) -> Vec<Stmt> {
         while self.kind() == TokenKind::Newline {
             self.advance();
         }
+        self.depth += 1;
         if self.kind() != TokenKind::Indent {
-            if let Some(s) = self.parse_stmt() {
-                return vec![s];
-            }
-            return Vec::new();
+            let out = if let Some(s) = self.parse_stmt() {
+                vec![s]
+            } else {
+                Vec::new()
+            };
+            self.depth -= 1;
+            return out;
         }
         self.advance();
         let mut stmts = Vec::new();
@@ -730,6 +855,7 @@ impl<'a> Parser<'a> {
         if self.kind() == TokenKind::Dedent {
             self.advance();
         }
+        self.depth -= 1;
         stmts
     }
 

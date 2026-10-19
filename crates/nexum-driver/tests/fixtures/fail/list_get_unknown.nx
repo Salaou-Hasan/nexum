@@ -1,0 +1,5 @@
+# EXPECT: T049
+# The element type cannot be inferred without a push.
+fn main():
+    let xs = list_new()
+    print(list_get(xs, 0))

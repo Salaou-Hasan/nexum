@@ -22,6 +22,9 @@ pub enum Ty {
     Record(String),
     /// Fixed-length homogeneous array: element type + length.
     Array(Box<Ty>, usize),
+    /// Growable list: element type. The element type is fixed by the first
+    /// `list_push`.
+    List(Box<Ty>),
     /// Type of expressions that never produce a value (`panic`).
     Never,
     Unknown,
@@ -38,6 +41,7 @@ impl Ty {
             Ty::Unit => "Unit".to_string(),
             Ty::Record(n) => n.clone(),
             Ty::Array(elem, n) => format!("[{}; {}]", elem.name(), n),
+            Ty::List(elem) => format!("List[{}]", elem.name()),
             Ty::Never => "Never".to_string(),
             Ty::Unknown => "?".to_string(),
             Ty::Error => "<err>".to_string(),
@@ -59,6 +63,7 @@ impl Ty {
         }
         match (self, other) {
             (Ty::Array(a, n), Ty::Array(b, m)) => n == m && a.compatible(b),
+            (Ty::List(a), Ty::List(b)) => a.compatible(b),
             _ => self == other,
         }
     }
@@ -248,15 +253,6 @@ pub fn analyze(am: &AModule) -> SemaResult {
                         .with_span(s.span),
                     );
                 }
-                if t == Ty::Str {
-                    decl_diags.push(
-                        Diagnostic::error(
-                            "T039",
-                            "managed `Str` values cannot be stored in records yet: the collector has no type descriptors; keep strings in locals, parameters and returns",
-                        )
-                        .with_span(s.span),
-                    );
-                }
                 resolved.push((fname.clone(), t));
             }
             if resolved.is_empty() {
@@ -356,11 +352,10 @@ pub fn analyze(am: &AModule) -> SemaResult {
                 // iterations can still learn it; functions that genuinely return
                 // no value are resolved to Unit after convergence.
                 let final_ret = ctx.current_ret.clone();
-                if let Some(entry) = ctx.functions.get_mut(name) {
-                    if entry.ret == Ty::Unknown {
+                if let Some(entry) = ctx.functions.get_mut(name)
+                    && entry.ret == Ty::Unknown {
                         entry.ret = final_ret.clone();
                     }
-                }
                 fns.push(HirFn {
                     name: name.clone(),
                     params: sig.params,
@@ -484,6 +479,17 @@ impl Scope {
     fn get(&self, n: &str) -> Option<VarInfo> {
         self.vars.get(n).cloned()
     }
+    /// Refine a binding's type in place (used to fix a list's element type
+    /// from its first `list_push`).
+    fn refine(&mut self, n: &str, t: Ty) -> bool {
+        match self.vars.get_mut(n) {
+            Some(info) => {
+                info.ty = t;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 fn fty_name(t: &ATypeExpr) -> String {
@@ -562,16 +568,6 @@ fn ty_check(span: Span, t: &Ty) -> (Ty, Vec<Diagnostic>) {
                     .with_span(span),
                 );
                 return (Ty::Error, diags);
-            }
-            if e2 == Ty::Str {
-                diags.push(
-                    Diagnostic::error(
-                        "T039",
-                        "managed `Str` values cannot be stored in arrays yet: the collector has no type descriptors; keep strings in locals, parameters and returns",
-                    )
-                    .with_span(span),
-                );
-                return (Ty::Array(Box::new(e2), *n), diags);
             }
             (Ty::Array(Box::new(e2), *n), diags)
         }
@@ -865,16 +861,18 @@ fn analyze_block(ctx: &mut Ctx, scope: &mut Scope, stmts: &[Stmt]) -> Vec<HirStm
                         );
                     }
                     // Record the inferred return type for callers.
-                    if let Some(entry) = ctx.functions.get_mut(&ctx.current_fn.clone()) {
-                        if entry.ret == Ty::Unknown && vt != Ty::Unknown && vt != Ty::Error {
+                    if let Some(entry) = ctx.functions.get_mut(&ctx.current_fn.clone())
+                        && entry.ret == Ty::Unknown && vt != Ty::Unknown && vt != Ty::Error {
                             entry.ret = vt;
                         }
-                    }
                 }
                 out.push(HirStmt::Return { value: v });
             }
             StmtKind::Expr(e) => {
                 out.push(HirStmt::Expr(analyze_expr(ctx, scope, e)));
+            }
+            StmtKind::Import { .. } => {
+                /* imports are resolved at module level before analysis */
             }
             StmtKind::Fn { .. } => { /* nested functions not supported yet */ }
         }
@@ -1019,8 +1017,8 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     }
                 }
                 Ty::Array(elem, n) => {
-                    if let HirExpr::Int(v, _) = &i {
-                        if *v < 0 || *v as usize >= *n {
+                    if let HirExpr::Int(v, _) = &i
+                        && (*v < 0 || *v as usize >= *n) {
                             ctx.diagnostics.push(
                                 Diagnostic::error(
                                     "T033",
@@ -1032,7 +1030,6 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                                 .with_span(index.span),
                             );
                         }
-                    }
                     HirExpr::Index {
                         base: Box::new(b),
                         index: Box::new(i),
@@ -1097,15 +1094,8 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                         elem_ty = item.ty();
                     }
                 }
-                if elem_ty == Ty::Str {
-                    ctx.diagnostics.push(
-                        Diagnostic::error(
-                            "T039",
-                            "managed `Str` values cannot be stored in arrays yet: the collector has no type descriptors; keep strings in locals, parameters and returns",
-                        )
-                        .with_span(e.span),
-                    );
-                }
+                // Managed strings may live in arrays: the collector traces
+                // references inside aggregates.
                 let n = he.len();
                 HirExpr::Array(he, Ty::Array(Box::new(elem_ty), n))
             }
@@ -1181,8 +1171,8 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                         .with_span(e.span),
                     );
                 }
-                if let Some(a0) = ha.first() {
-                    if !a0.ty().compatible(&Ty::Str) {
+                if let Some(a0) = ha.first()
+                    && !a0.ty().compatible(&Ty::Str) {
                         ctx.diagnostics.push(
                             Diagnostic::error(
                                 "T043",
@@ -1191,9 +1181,8 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                             .with_span(e.span),
                         );
                     }
-                }
-                if let Some(a1) = ha.get(1) {
-                    if !a1.ty().compatible(&Ty::Int) {
+                if let Some(a1) = ha.get(1)
+                    && !a1.ty().compatible(&Ty::Int) {
                         ctx.diagnostics.push(
                             Diagnostic::error(
                                 "T043",
@@ -1202,7 +1191,6 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                             .with_span(e.span),
                         );
                     }
-                }
                 return HirExpr::Call {
                     callee: callee.clone(),
                     args: ha,
@@ -1222,8 +1210,8 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                         .with_span(e.span),
                     );
                 }
-                if let Some(a0) = ha.first() {
-                    if !a0.ty().compatible(&Ty::Str) {
+                if let Some(a0) = ha.first()
+                    && !a0.ty().compatible(&Ty::Str) {
                         ctx.diagnostics.push(
                             Diagnostic::error(
                                 "T044",
@@ -1232,7 +1220,6 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                             .with_span(e.span),
                         );
                     }
-                }
                 for a in ha.iter().skip(1) {
                     if !a.ty().compatible(&Ty::Int) {
                         ctx.diagnostics.push(
@@ -1248,6 +1235,248 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     callee: callee.clone(),
                     args: ha,
                     ty: Ty::Str,
+                };
+            }
+            if callee == "read_file" {
+                if ha.len() != 1 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T045",
+                            format!("read_file expects 1 argument, got {}", ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                if let Some(a0) = ha.first()
+                    && !a0.ty().compatible(&Ty::Str) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T045",
+                                format!("read_file expects Str, found {}", a0.ty().name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: Ty::Str,
+                };
+            }
+            if callee == "write_file" {
+                if ha.len() != 2 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T046",
+                            format!("write_file expects 2 arguments, got {}", ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                for a in &ha {
+                    if !a.ty().compatible(&Ty::Str) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T046",
+                                format!(
+                                    "write_file expects Str arguments, found {}",
+                                    a.ty().name()
+                                ),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: Ty::Unit,
+                };
+            }
+            if callee == "list_new" {
+                if !ha.is_empty() {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T048",
+                            format!("list_new expects no arguments, got {}", ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: Ty::List(Box::new(Ty::Unknown)),
+                };
+            }
+            if callee == "list_len" {
+                if ha.len() != 1 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T048",
+                            format!("list_len expects 1 argument, got {}", ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                    return HirExpr::Int(0, Ty::Int);
+                }
+                if !matches!(ha[0].ty(), Ty::List(_)) {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T048",
+                            format!("list_len expects a list, found {}", ha[0].ty().name()),
+                        )
+                        .with_span(e.span),
+                    );
+                    return HirExpr::Int(0, Ty::Int);
+                }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: Ty::Int,
+                };
+            }
+            if callee == "list_push" || callee == "list_set" {
+                let expected = if callee == "list_push" { 2 } else { 3 };
+                if ha.len() != expected {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T048",
+                            format!(
+                                "{} expects {} arguments, got {}",
+                                callee,
+                                expected,
+                                ha.len()
+                            ),
+                        )
+                        .with_span(e.span),
+                    );
+                    return HirExpr::Call {
+                        callee: callee.clone(),
+                        args: ha,
+                        ty: Ty::Unit,
+                    };
+                }
+                let value_ty = ha.last().map(|a| a.ty()).unwrap_or(Ty::Unknown);
+                let list_ty = ha[0].ty();
+                let elem_ty = match &list_ty {
+                    Ty::List(t) => (**t).clone(),
+                    _ => {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T048",
+                                format!("{} expects a list, found {}", callee, list_ty.name()),
+                            )
+                            .with_span(e.span),
+                        );
+                        return HirExpr::Call {
+                            callee: callee.clone(),
+                            args: ha,
+                            ty: Ty::Unit,
+                        };
+                    }
+                };
+                if elem_ty == Ty::Unknown {
+                    // The element type is fixed by the first push. Refine the
+                    // binding so later uses of the list see the element type.
+                    let mut refined = false;
+                    if let Some(HirExpr::Var(name, _)) = ha.first() {
+                        let name = name.clone();
+                        refined = scope.refine(&name, Ty::List(Box::new(value_ty.clone())));
+                        if refined
+                            && let Some(first) = ha.first_mut() {
+                                *first = HirExpr::Var(name, Ty::List(Box::new(value_ty.clone())));
+                            }
+                    }
+                    if !refined {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T049",
+                                "cannot infer the element type of this list; push a value into a list variable first",
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                } else if !value_ty.compatible(&elem_ty) {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T049",
+                            format!(
+                                "list element type mismatch: expected {}, found {}",
+                                elem_ty.name(),
+                                value_ty.name()
+                            ),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                if callee == "list_set" {
+                    let idx_ty = ha[1].ty();
+                    if !idx_ty.compatible(&Ty::Int) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T049",
+                                format!("list index must be Int, found {}", idx_ty.name()),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: Ty::Unit,
+                };
+            }
+            if callee == "list_get" {
+                if ha.len() != 2 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T048",
+                            format!("list_get expects 2 arguments, got {}", ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                    return HirExpr::Int(0, Ty::Int);
+                }
+                let list_ty = ha[0].ty();
+                let elem_ty = match &list_ty {
+                    Ty::List(t) => (**t).clone(),
+                    _ => {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T048",
+                                format!("list_get expects a list, found {}", list_ty.name()),
+                            )
+                            .with_span(e.span),
+                        );
+                        return HirExpr::Int(0, Ty::Int);
+                    }
+                };
+                if elem_ty == Ty::Unknown {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T049",
+                            "cannot infer the element type of this list; push a value into a list variable first",
+                        )
+                        .with_span(e.span),
+                    );
+                    return HirExpr::Int(0, Ty::Int);
+                }
+                let idx_ty = ha[1].ty();
+                if !idx_ty.compatible(&Ty::Int) {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T049",
+                            format!("list index must be Int, found {}", idx_ty.name()),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: elem_ty,
                 };
             }
             if callee == "concat" {
@@ -1391,14 +1620,13 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
             // signature table stops changing).
             if let Some(sig) = ctx.functions.get_mut(callee) {
                 for (i, arg) in ha.iter().enumerate() {
-                    if let Some((_, pty)) = sig.params.get_mut(i) {
-                        if *pty == Ty::Unknown {
+                    if let Some((_, pty)) = sig.params.get_mut(i)
+                        && *pty == Ty::Unknown {
                             let at = arg.ty();
                             if at != Ty::Unknown && at != Ty::Error {
                                 *pty = at;
                             }
                         }
-                    }
                 }
             }
             if let Some(sig) = ctx.functions.get(callee).cloned() {
@@ -1594,8 +1822,8 @@ fn analyze_path_assign(
                         .with_span(iexpr.span),
                     );
                 }
-                if let HirExpr::Int(v, _) = &i {
-                    if *v < 0 || *v as usize >= n {
+                if let HirExpr::Int(v, _) = &i
+                    && (*v < 0 || *v as usize >= n) {
                         ctx.diagnostics.push(
                             Diagnostic::error(
                                 "T033",
@@ -1607,7 +1835,6 @@ fn analyze_path_assign(
                             .with_span(iexpr.span),
                         );
                     }
-                }
                 cur_ty = (*elem).clone();
                 steps.push(Step::Index(i, (*elem).clone()));
             }

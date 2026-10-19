@@ -77,6 +77,9 @@ for-stmt      = "for" identifier "in" ( expr ".." expr | expr ) ":" block
                   (range form: lo..hi; otherwise for-each over an array)
 return-stmt   = "return" [ expr ]
 
+import-stmt   = "import" string   (top level only; path is relative to the
+                                   importing file; loaded once per program)
+
 expr-stmt     = expr
 
 expr          = or-expr
@@ -143,11 +146,21 @@ access `.` < call.
   expression is evaluated once; `v` is bound (immutably) to each element in
   order, by value. Mutating `xs` inside the body does not affect the
   iteration.
-* **Managed strings** — `Str` is the only managed type. `concat(a, b)` builds a
+* **Managed strings** - `Str` is the only managed type. `concat(a, b)` builds a
   heap string; `collect()` runs the collector; `heap_used()` returns live
-  payload bytes. Managed `Str` values may not be stored in record fields or
-  array elements yet (T039); they are fully usable in locals, parameters and
-  returns. See `docs/runtime-abi.md`.
+  payload bytes. `Str` values may be stored in record fields and array
+  elements: the collector traces references inside aggregates. See
+  `docs/runtime-abi.md`.
+* **String units** - `Str` is a byte string. `s[i]` yields the single *byte*
+  at index `i` and `slice(s, lo, hi)` yields the byte range `[lo, hi)`, so
+  both may split a multi-byte UTF-8 character. Lengths are byte counts.
+* **Lists** - `list_new()` creates an empty growable list, `list_push(l, v)`
+  appends, and `list_len(l)`, `list_get(l, i)`, `list_set(l, i, v)` read and
+  replace elements. The element type is fixed by the first `list_push`: a
+  later push of an incompatible type is T049, and using a list whose element
+  type was never established is T049 as well. Indexes are checked at run time
+  and panic with `index out of bounds`. A list is a *reference*: two names
+  can refer to the same list.
 * **Calls** — arity (T005) and argument types (T007) are checked against the
   callee signature. `print(x)` accepts exactly one argument of any type except
   records (T013, T028).
@@ -224,10 +237,17 @@ access `.` < call.
 | T036 | invalid array element type (`Unit`/`Never`)    |
 | T037 | `mut` argument is not a mutable variable        |
 | T038 | for-each over a non-array value                 |
-| T039 | managed `Str` stored in a record or array       |
+| T039 | reserved (was: managed `Str` in aggregates)      |
 | T040 | `concat` arity/type error                      |
 | T041 | `collect` arity error                          |
 | T042 | `heap_used` arity error                        |
+| T043 | `str_char_at` arity/type error                 |
+| T044 | `slice` arity/type error                       |
+| T045 | `read_file` arity/type error                   |
+| T046 | `write_file` arity/type error                  |
+| T047 | cannot import a module                         |
+| T048 | list builtin arity/type error                  |
+| T049 | list element type error                        |
 | T043 | `str_char_at` arity/type error                 |
 | T044 | `slice` arity/type error                       |
 

@@ -573,8 +573,8 @@ fn lower_expr(ctx: &mut LowerCtx, e: &HirExpr) -> Value {
                 });
                 d
             } else {
-                let d = ctx.fresh(ty.clone());
-                d
+                
+                ctx.fresh(ty.clone())
             }
         }
         HE::Array(elems, ty) => {
@@ -737,18 +737,14 @@ fn lower_expr(ctx: &mut LowerCtx, e: &HirExpr) -> Value {
             let mut av = Vec::new();
             for (i, a) in args.iter().enumerate() {
                 let by_ref = modes.get(i).copied().unwrap_or(false);
-                if by_ref {
-                    if let HE::Var(n, vt) = a {
-                        if let Some(slot) = ctx.env.get(n).copied() {
+                if by_ref
+                    && let HE::Var(n, vt) = a
+                        && let Some(slot) = ctx.env.get(n).copied() {
                             // Keep the value type entry intact for loads/stores.
-                            if !ctx.value_types.contains_key(&slot.0) {
-                                ctx.value_types.insert(slot.0, vt.clone());
-                            }
+                            ctx.value_types.entry(slot.0).or_insert_with(|| vt.clone());
                             av.push(slot);
                             continue;
                         }
-                    }
-                }
                 av.push(lower_expr(ctx, a));
             }
             if callee == "panic" {
@@ -819,8 +815,7 @@ pub fn const_fold(m: &mut MirModule) {
                         } => {
                             if let (Some(cl), Some(cr)) =
                                 (consts.get(lhs).cloned(), consts.get(rhs).cloned())
-                            {
-                                if let Some(fc) = fold_binop(*op, &cl, &cr, ty.clone()) {
+                                && let Some(fc) = fold_binop(*op, &cl, &cr, ty.clone()) {
                                     consts.insert(*dest, fc.clone());
                                     *in_ = Instr::Const {
                                         dest: *dest,
@@ -829,7 +824,6 @@ pub fn const_fold(m: &mut MirModule) {
                                     };
                                     changed = true;
                                 }
-                            }
                         }
                         Instr::UnOp {
                             dest,
@@ -837,8 +831,8 @@ pub fn const_fold(m: &mut MirModule) {
                             operand,
                             ty,
                         } => {
-                            if let Some(c) = consts.get(operand).cloned() {
-                                if let Some(fc) = fold_unop(*op, &c, ty.clone()) {
+                            if let Some(c) = consts.get(operand).cloned()
+                                && let Some(fc) = fold_unop(*op, &c, ty.clone()) {
                                     consts.insert(*dest, fc.clone());
                                     *in_ = Instr::Const {
                                         dest: *dest,
@@ -847,7 +841,6 @@ pub fn const_fold(m: &mut MirModule) {
                                     };
                                     changed = true;
                                 }
-                            }
                         }
                         Instr::Copy { dest, src, ty } => {
                             if let Some(c) = consts.get(src).cloned() {
@@ -1158,12 +1151,11 @@ fn try_inline_one(m: &mut MirModule) -> bool {
                     let args = args.clone();
                     let d = *d;
                     // check callee exists and inlinable
-                    if let Some(ci) = m.functions.iter().position(|f| f.name == cname) {
-                        if ci != fi && inlinable(&m.functions[ci]) {
+                    if let Some(ci) = m.functions.iter().position(|f| f.name == cname)
+                        && ci != fi && inlinable(&m.functions[ci]) {
                             site = Some((fi, bi, ii, cname, args, d));
                             break 'outer;
                         }
-                    }
                 }
             }
         }
@@ -1335,11 +1327,9 @@ pub fn escape_analysis(m: &MirModule) -> String {
                     callee,
                     ..
                 } = in_
-                {
-                    if callee == "concat" {
+                    && callee == "concat" {
                         allocs.push(*d);
                     }
-                }
             }
         }
         if allocs.is_empty() {
@@ -1365,22 +1355,20 @@ fn allocation_escapes(f: &MirFn, v: Value) -> bool {
     for b in &f.blocks {
         for in_ in &b.instrs {
             match in_ {
-                Instr::Call { args, .. } => {
-                    if args.contains(&v) {
+                Instr::Call { args, .. }
+                    if args.contains(&v) => {
                         return true;
                     }
-                }
                 Instr::Store { value, .. } if *value == v => {
                     return true;
                 }
                 _ => {}
             }
         }
-        if let Some(Term::Return(Some(rv))) = &b.term {
-            if *rv == v {
+        if let Some(Term::Return(Some(rv))) = &b.term
+            && *rv == v {
                 return true;
             }
-        }
     }
     false
 }

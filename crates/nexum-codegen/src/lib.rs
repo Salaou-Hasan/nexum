@@ -11,10 +11,98 @@ fn llvm_ty(t: &Ty) -> String {
         Ty::Float => "double".to_string(),
         Ty::Bool => "i1".to_string(),
         Ty::Str => "ptr".to_string(),
+        Ty::List(_) => "ptr".to_string(),
         Ty::Unit => "void".to_string(),
         Ty::Record(n) => format!("%{}", n),
         Ty::Array(elem, n) => format!("[{} x {}]", n, llvm_ty(elem)),
         _ => "i64".to_string(),
+    }
+}
+
+/// Does this type hold a reference the collector must trace?
+fn has_refs(t: &Ty, records: &[(String, Vec<(String, Ty)>)]) -> bool {
+    match t {
+        Ty::Str | Ty::List(_) => true,
+        Ty::Array(elem, _) => has_refs(elem, records),
+        Ty::Record(name) => records
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, fields)| fields.iter().any(|(_, ft)| has_refs(ft, records)))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn llvm_align(t: &Ty, records: &[(String, Vec<(String, Ty)>)]) -> u64 {
+    match t {
+        Ty::Bool => 1,
+        Ty::Array(elem, _) => llvm_align(elem, records),
+        Ty::Record(name) => records
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, fields)| {
+                fields
+                    .iter()
+                    .map(|(_, ft)| llvm_align(ft, records))
+                    .max()
+                    .unwrap_or(1)
+            })
+            .unwrap_or(1),
+        _ => 8,
+    }
+}
+
+fn llvm_size(t: &Ty, records: &[(String, Vec<(String, Ty)>)]) -> u64 {
+    match t {
+        Ty::Int | Ty::Float | Ty::Str | Ty::List(_) => 8,
+        Ty::Bool => 1,
+        Ty::Unit => 0,
+        Ty::Array(elem, n) => (*n as u64) * llvm_size(elem, records),
+        Ty::Record(name) => records
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, fields)| record_size(fields, records))
+            .unwrap_or(0),
+        _ => 8,
+    }
+}
+
+fn record_size(fields: &[(String, Ty)], records: &[(String, Vec<(String, Ty)>)]) -> u64 {
+    let mut off: u64 = 0;
+    let mut max_align: u64 = 1;
+    for (_, ft) in fields {
+        let a = llvm_align(ft, records);
+        let s = llvm_size(ft, records);
+        max_align = max_align.max(a);
+        off = off.div_ceil(a) * a;
+        off += s;
+    }
+    off.div_ceil(max_align) * max_align
+}
+
+/// Bytes of a value the collector must scan for references. Zero means the
+/// value cannot hold a reference and does not need to be a root at all.
+fn scan_bytes(t: &Ty, records: &[(String, Vec<(String, Ty)>)]) -> u64 {
+    if !has_refs(t, records) {
+        return 0;
+    }
+    match t {
+        Ty::Str | Ty::List(_) => 8,
+        Ty::Array(elem, n) => (*n as u64) * llvm_size(elem, records),
+        Ty::Record(name) => records
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, fields)| record_size(fields, records))
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// The element type of a `List` value, if it is known.
+fn list_elem_ty(t: Option<&Ty>) -> Ty {
+    match t {
+        Some(Ty::List(elem)) => (**elem).clone(),
+        _ => Ty::Unknown,
     }
 }
 
@@ -59,6 +147,7 @@ pub fn emit(mir: &MirModule, target: &TargetSpec) -> String {
     for f in &mir.functions {
         emit_fn(
             f,
+            &mir.records,
             &mut func_buf,
             &mut globals,
             &mut global_counter,
@@ -87,20 +176,18 @@ pub fn emit(mir: &MirModule, target: &TargetSpec) -> String {
 }
 
 fn llvm_escape(s: &str) -> String {
+    // Escape per *byte*: an LLVM `\XX` escape denotes a single byte, so a
+    // multi-byte UTF-8 character must be emitted as several escapes.
     let mut r = String::new();
-    for ch in s.chars() {
-        if ch == '\\' {
-            r.push_str("\\\\");
-        } else if ch == '"' {
-            r.push_str("\\22");
-        } else if ch == '\n' {
-            r.push_str("\\0A");
-        } else if ch == '\t' {
-            r.push_str("\\09");
-        } else if (ch as u32) < 32 || (ch as u32) > 126 {
-            r.push_str(&format!("\\{:02X}", ch as u32));
-        } else {
-            r.push(ch);
+    for &b in s.as_bytes() {
+        match b {
+            b'\\' => r.push_str("\\\\"),
+            b'"' => r.push_str("\\22"),
+            b'\n' => r.push_str("\\0A"),
+            b'\t' => r.push_str("\\09"),
+            b'\r' => r.push_str("\\0D"),
+            0x20..=0x7E => r.push(b as char),
+            _ => r.push_str(&format!("\\{:02X}", b)),
         }
     }
     r
@@ -141,6 +228,7 @@ fn get_fmt_global(
 
 fn emit_fn(
     f: &MirFn,
+    records: &[(String, Vec<(String, Ty)>)],
     buf: &mut String,
     globals: &mut Vec<(String, String)>,
     gcounter: &mut usize,
@@ -191,19 +279,23 @@ fn emit_fn(
     // Counter for inline control-flow labels (bounds checks).
     let mut lc = 0usize;
 
-    // ---- Phase 4 memory plan (pre-scan; mirrors the emit order below) ----
+    // ---- Memory plan (pre-scan; mirrors the emit order below) ----
     // 1. every `alloca` is hoisted to the prologue, so allocating inside a
     //    loop can never grow the stack;
     // 2. array index reads/writes reuse a hoisted scratch slot per site
     //    (their live range is a single instruction);
-    // 3. calls whose result type is `Str` spill the result into a root slot
-    //    immediately, so a collection triggered by a later allocation can
-    //    see temporary results ("temporary roots");
-    // 4. every `Str` alloca (locals and spilled temporaries) is registered in
-    //    the function's root frame.
+    // 3. calls whose result holds references spill the result into a root
+    //    slot immediately, so a collection triggered by a later allocation
+    //    can see temporary results ("temporary roots");
+    // 4. `list_push`/`list_set` materialise the element into a hoisted
+    //    temporary, because the runtime copies elements by address;
+    // 5. every slot that can hold a reference is registered in the function's
+    //    root frame together with the number of bytes the collector must
+    //    scan (see docs/language-reference/decisions-gc.md).
     let mut hoisted: Vec<(usize, Ty)> = Vec::new();
     let mut idx_plan: Vec<(usize, String, String)> = Vec::new(); // (ordinal, reg, llvm ty)
-    let mut managed_temps: Vec<usize> = Vec::new(); // dest value ids
+    let mut managed_temps: Vec<(usize, Ty)> = Vec::new(); // (dest, ty)
+    let mut elem_temps: Vec<(usize, String, Ty)> = Vec::new(); // (ordinal, reg, elem ty)
     {
         let mut ord = 0usize;
         for b in &f.blocks {
@@ -215,8 +307,21 @@ fn emit_fn(
                         idx_plan.push((ord, format!("%isp{}", ord), llvm_ty(&bt)));
                     }
                     Instr::Call {
-                        dest: Some(d), ty, ..
-                    } if *ty == Ty::Str => managed_temps.push(d.0),
+                        dest,
+                        callee,
+                        args,
+                        ty,
+                    } => {
+                        if let Some(d) = dest
+                            && has_refs(ty, records) {
+                                managed_temps.push((d.0, ty.clone()));
+                            }
+                        if matches!(callee.as_str(), "list_push" | "list_set") {
+                            let lt = args.first().and_then(|a| vt.get(&a.0)).cloned();
+                            let elem = list_elem_ty(lt.as_ref());
+                            elem_temps.push((ord, format!("%vle{}", ord), elem));
+                        }
+                    }
                     _ => {}
                 }
                 ord += 1;
@@ -225,16 +330,29 @@ fn emit_fn(
     }
     let idx_names: HashMap<usize, String> =
         idx_plan.iter().map(|(o, n, _t)| (*o, n.clone())).collect();
-    let str_slots: Vec<usize> = hoisted
+    let elem_names: HashMap<usize, String> = elem_temps
         .iter()
-        .filter(|(_, t)| *t == Ty::Str)
-        .map(|(d, _)| *d)
+        .map(|(o, n, _t)| (*o, n.clone()))
         .collect();
-    let mut root_slots: Vec<String> = str_slots.iter().map(|d| format!("%v{}", d)).collect();
-    for d in &managed_temps {
-        root_slots.push(format!("%v{}_mt", d));
+
+    // Root entries: (slot address, bytes to scan, type for zero-initialising).
+    let mut root_entries: Vec<(String, u64, Ty)> = Vec::new();
+    for (dest, ty) in &hoisted {
+        if has_refs(ty, records) {
+            root_entries.push((format!("%v{}", dest), scan_bytes(ty, records), ty.clone()));
+        }
     }
-    let has_roots = !root_slots.is_empty();
+    for (dest, ty) in &managed_temps {
+        root_entries.push((
+            format!("%v{}_mt", dest),
+            scan_bytes(ty, records),
+            ty.clone(),
+        ));
+    }
+    for (_, reg, ty) in &elem_temps {
+        root_entries.push((reg.clone(), scan_bytes(ty, records), ty.clone()));
+    }
+    let has_roots = !root_entries.is_empty();
 
     let mut ordinal = 0usize;
     let mut first_block = true;
@@ -252,24 +370,44 @@ fn emit_fn(
             for (_, reg, ty) in &idx_plan {
                 buf.push_str(&format!("  {} = alloca {}, align 16\n", reg, ty));
             }
-            for d in &managed_temps {
-                buf.push_str(&format!("  %v{}_mt = alloca ptr\n", d));
+            for (dest, ty) in &managed_temps {
+                buf.push_str(&format!("  %v{}_mt = alloca {}\n", dest, llvm_ty(ty)));
             }
-            // Deterministic roots: zero every root slot before anything can
-            // collect, and register the frame.
-            for slot in &root_slots {
-                buf.push_str(&format!("  store ptr null, ptr {}\n", slot));
+            for (_, reg, ty) in &elem_temps {
+                buf.push_str(&format!("  {} = alloca {}\n", reg, llvm_ty(ty)));
+            }
+            // Zero every root slot so the collector never sees stale bytes,
+            // and so the root set is deterministic.
+            for (addr, _scan, ty) in &root_entries {
+                match ty {
+                    Ty::Str | Ty::List(_) => {
+                        buf.push_str(&format!("  store ptr null, ptr {}\n", addr))
+                    }
+                    _ => buf.push_str(&format!(
+                        "  store {} zeroinitializer, ptr {}\n",
+                        llvm_ty(ty),
+                        addr
+                    )),
+                }
             }
             if has_roots {
-                let n = root_slots.len();
-                buf.push_str("  %nrf = alloca [3 x i64], align 8\n");
-                buf.push_str(&format!("  %nrs = alloca [{} x ptr], align 8\n", n));
-                for (i, slot) in root_slots.iter().enumerate() {
+                let n = root_entries.len();
+                buf.push_str("  %nrf = alloca %nexum.root_frame, align 8\n");
+                buf.push_str(&format!(
+                    "  %nrs = alloca [{} x %nexum.root_entry], align 8\n",
+                    n
+                ));
+                for (i, (addr, scan, _ty)) in root_entries.iter().enumerate() {
                     buf.push_str(&format!(
-                        "  %nrsi{} = getelementptr [{} x ptr], ptr %nrs, i64 0, i64 {}\n",
+                        "  %nrsi{} = getelementptr [{} x %nexum.root_entry], ptr %nrs, i64 0, i64 {}\n",
                         i, n, i
                     ));
-                    buf.push_str(&format!("  store ptr {}, ptr %nrsi{}\n", slot, i));
+                    buf.push_str(&format!("  store ptr {}, ptr %nrsi{}\n", addr, i));
+                    buf.push_str(&format!(
+                        "  %nrss{} = getelementptr i8, ptr %nrsi{}, i64 8\n",
+                        i, i
+                    ));
+                    buf.push_str(&format!("  store i64 {}, ptr %nrss{}\n", scan, i));
                 }
                 buf.push_str("  %nrfp = getelementptr i8, ptr %nrf, i64 8\n");
                 buf.push_str("  store ptr %nrs, ptr %nrfp\n");
@@ -340,7 +478,7 @@ fn emit_fn(
                     let t = llvm_ty(ty);
                     let oty_str = vt
                         .get(&lhs.0)
-                        .map(|x| llvm_ty(x))
+                        .map(llvm_ty)
                         .unwrap_or_else(|| "i64".to_string());
                     match op {
                         MBin::Add => {
@@ -471,17 +609,7 @@ fn emit_fn(
                             }
                         }
                         MBin::Lt => {
-                            if *ty == Ty::Bool {
-                                buf.push_str(&format!(
-                                    "  {} = icmp slt {} {}, {}\n",
-                                    r, oty_str, l, rr
-                                ));
-                            } else {
-                                buf.push_str(&format!(
-                                    "  {} = icmp slt {} {}, {}\n",
-                                    r, oty_str, l, rr
-                                ));
-                            }
+                            buf.push_str(&format!("  {} = icmp slt {} {}, {}\n", r, oty_str, l, rr))
                         }
                         MBin::Gt => {
                             buf.push_str(&format!("  {} = icmp sgt {} {}, {}\n", r, oty_str, l, rr))
@@ -585,6 +713,84 @@ fn emit_fn(
                             valreg.insert(d.0, r.clone());
                             buf.push_str(&format!("  {} = add i64 0, 0\n", r)); // dummy unit
                         }
+                    } else if callee == "list_push" || callee == "list_set" {
+                        // The runtime copies elements by address, so the element
+                        // is materialised into a hoisted temporary first.
+                        let list_reg = valreg
+                            .get(&args[0].0)
+                            .cloned()
+                            .unwrap_or_else(|| format!("%v{}", args[0].0));
+                        let elem_ty = list_elem_ty(vt.get(&args[0].0));
+                        let ety = llvm_ty(&elem_ty);
+                        let tmp = elem_names
+                            .get(&ordinal)
+                            .cloned()
+                            .unwrap_or_else(|| format!("%vle{}", ordinal));
+                        if callee == "list_push" {
+                            let elem_reg = valreg
+                                .get(&args[1].0)
+                                .cloned()
+                                .unwrap_or_else(|| format!("%v{}", args[1].0));
+                            buf.push_str(&format!("  store {} {}, ptr {}\n", ety, elem_reg, tmp));
+                            buf.push_str(&format!(
+                                "  call void @nexum_list_push(ptr {}, ptr {}, i64 {}, i64 {})\n",
+                                list_reg,
+                                tmp,
+                                llvm_size(&elem_ty, records),
+                                scan_bytes(&elem_ty, records)
+                            ));
+                        } else {
+                            let idx_reg = valreg
+                                .get(&args[1].0)
+                                .cloned()
+                                .unwrap_or_else(|| format!("%v{}", args[1].0));
+                            let elem_reg = valreg
+                                .get(&args[2].0)
+                                .cloned()
+                                .unwrap_or_else(|| format!("%v{}", args[2].0));
+                            buf.push_str(&format!("  store {} {}, ptr {}\n", ety, elem_reg, tmp));
+                            buf.push_str(&format!(
+                                "  call void @nexum_list_set(ptr {}, i64 {}, ptr {})\n",
+                                list_reg, idx_reg, tmp
+                            ));
+                        }
+                        if let Some(d) = dest {
+                            let r = format!("%v{}", d.0);
+                            valreg.insert(d.0, r.clone());
+                            buf.push_str(&format!("  {} = add i64 0, 0\n", r));
+                        }
+                    } else if callee == "list_get" {
+                        let list_reg = valreg
+                            .get(&args[0].0)
+                            .cloned()
+                            .unwrap_or_else(|| format!("%v{}", args[0].0));
+                        let idx_reg = valreg
+                            .get(&args[1].0)
+                            .cloned()
+                            .unwrap_or_else(|| format!("%v{}", args[1].0));
+                        let ety = llvm_ty(ty);
+                        let p = format!("%v{}_p", ordinal);
+                        buf.push_str(&format!(
+                            "  {} = call ptr @nexum_list_get(ptr {}, i64 {})\n",
+                            p, list_reg, idx_reg
+                        ));
+                        if let Some(d) = dest {
+                            let r = format!("%v{}", d.0);
+                            valreg.insert(d.0, r.clone());
+                            buf.push_str(&format!("  {} = load {}, ptr {}\n", r, ety, p));
+                            if has_refs(ty, records) {
+                                // The element is loaded out of the list buffer,
+                                // so it needs its own root slot.
+                                let mt = format!("%v{}_mt", d.0);
+                                match ty {
+                                    Ty::Str | Ty::List(_) => {
+                                        buf.push_str(&format!("  store ptr {}, ptr {}\n", r, mt))
+                                    }
+                                    _ => buf
+                                        .push_str(&format!("  store {} {}, ptr {}\n", ety, r, mt)),
+                                }
+                            }
+                        }
                     } else {
                         // Heap builtins name runtime entry points directly.
                         let sym = match callee.as_str() {
@@ -593,6 +799,10 @@ fn emit_fn(
                             "heap_used" => "nexum_heap_used",
                             "str_char_at" => "nexum_str_char_at",
                             "slice" => "nexum_slice",
+                            "read_file" => "nexum_read_file",
+                            "write_file" => "nexum_write_file",
+                            "list_new" => "nexum_list_new",
+                            "list_len" => "nexum_list_len",
                             other => other,
                         };
                         let ret_ty = llvm_ty(ty);
@@ -615,11 +825,20 @@ fn emit_fn(
                                 sym,
                                 aregs.join(", ")
                             ));
-                            if *ty == Ty::Str {
+                            if has_refs(ty, records) {
                                 // Temporary root: spill the fresh result into a
                                 // registered slot before any later allocation
                                 // can trigger a collection.
-                                buf.push_str(&format!("  store ptr {}, ptr %v{}_mt\n", r, d.0));
+                                let mt = format!("%v{}_mt", d.0);
+                                match ty {
+                                    Ty::Str | Ty::List(_) => {
+                                        buf.push_str(&format!("  store ptr {}, ptr {}\n", r, mt))
+                                    }
+                                    _ => buf.push_str(&format!(
+                                        "  store {} {}, ptr {}\n",
+                                        ret_ty, r, mt
+                                    )),
+                                }
                             }
                         } else {
                             buf.push_str(&call_txt);
