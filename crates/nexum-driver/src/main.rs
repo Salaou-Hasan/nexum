@@ -461,13 +461,18 @@ fn update_portable(tag: &str) {
 /// Install (or update) the editor extension.
 fn install_vscode_extension(vsix: &std::path::Path) {
     use std::process::Command;
-    let out = Command::new("code")
-        .args([
-            "--install-extension",
-            vsix.to_str().unwrap_or_default(),
-            "--force",
-        ])
-        .output();
+    let vsix = vsix.to_str().unwrap_or_default();
+    // On Windows `code` is a batch file, which cannot be executed directly:
+    // it has to go through the command interpreter.
+    let out = if cfg!(target_os = "windows") {
+        Command::new("cmd.exe")
+            .args(["/c", "code", "--install-extension", vsix, "--force"])
+            .output()
+    } else {
+        Command::new("code")
+            .args(["--install-extension", vsix, "--force"])
+            .output()
+    };
     match out {
         Ok(o) if o.status.success() => {
             println!("editor extension updated");
