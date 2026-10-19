@@ -122,7 +122,9 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
         );
     } else {
         s.push_str(
-            "define internal void @nexum_panic(ptr %msg) {\n  %len = call i64 @nexum_strlen(ptr %msg)\n  %w = call i64 @nexum_sys_write(i64 2, ptr %msg, i64 %len)\n  %n = call i64 @nexum_sys_write(i64 2, ptr @nexum_nl, i64 1)\n  call void @exit(i32 1)\n  unreachable\n}\n\n",
+            "define internal void @nexum_panic(ptr %msg) {\n  %len = call i64 @nexum_strlen(ptr %msg)\n  %msgi = ptrtoint ptr %msg to i64
+  %w = call i64 @nexum_sys_write(i64 2, i64 %msgi, i64 %len)\n  %nli = ptrtoint ptr @nexum_nl to i64
+  %n = call i64 @nexum_sys_write(i64 2, i64 %nli, i64 1)\n  call void @exit(i32 1)\n  unreachable\n}\n\n",
         );
     }
 
