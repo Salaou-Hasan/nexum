@@ -124,6 +124,13 @@ struct Layout {
     instruction: &'static str,
     /// The registers the instruction clobbers.
     clobbers: &'static [&'static str],
+    /// Added to the system call number. Darwin on AArch64 puts the BSD
+    /// number in the high bits, so write is 0x2000004 and not 4.
+    number_base: i64,
+    /// Whether the call reports an error by setting the carry flag. That
+    /// is Darwin's convention: the error number comes back positive, with
+    /// the carry flag set, where Linux returns it negative.
+    error_in_carry: bool,
 }
 
 /// The layout for an operating system and an architecture.
@@ -138,6 +145,8 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             // The instruction destroys the return address and the flags, and
             // the scratch register the alignment uses.
             clobbers: &["rcx", "r11", "r12"],
+            number_base: 0,
+            error_in_carry: false,
         },
         (SysOs::Macos, SysArch::X86_64) => Layout {
             staging: &["rdi", "rsi", "rdx", "r10", "r8", "r9"],
@@ -146,6 +155,8 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             number: "rax",
             instruction: "syscall",
             clobbers: &["rcx", "r11", "r12"],
+            number_base: 0,
+            error_in_carry: true,
         },
         // On AArch64 the result comes back in the register the first
         // argument went in, so the arguments are staged in the registers the
@@ -157,6 +168,8 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             number: "x8",
             instruction: "svc #0",
             clobbers: &["x8"],
+            number_base: 0,
+            error_in_carry: false,
         },
         (SysOs::Macos, SysArch::Aarch64) => Layout {
             staging: &["x9", "x10", "x11", "x12", "x13", "x14"],
@@ -165,6 +178,9 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             number: "x16",
             instruction: "svc #0x80",
             clobbers: &["x16"],
+            // Darwin on AArch64 puts the BSD number in the high bits.
+            number_base: 0x2000000,
+            error_in_carry: true,
         },
     }
 }
@@ -202,9 +218,24 @@ fn call_body(os: SysOs, arch: SysArch, nr: i64, args: &[Arg]) -> String {
     // constant in the text: it differs per system and per call. A literal
     // dollar is written twice in an assembly block, because a single one
     // starts an operand reference.
+    let number = nr + lay.number_base;
     match arch {
-        SysArch::X86_64 => text.push_str(&format!("movq $${nr}, %{}\n", lay.number)),
-        SysArch::Aarch64 => text.push_str(&format!("mov {}, #{nr}\n", lay.number)),
+        SysArch::X86_64 => text.push_str(&format!("movq $${number}, %{}\n", lay.number)),
+        SysArch::Aarch64 => {
+            // AArch64's `mov` takes a 16-bit immediate, so a number with
+            // bits above that needs two instructions.
+            if number > 0xffff {
+                text.push_str(&format!(
+                    "movz {}, #{}, lsl #16\nmovk {}, #{}\n",
+                    lay.number,
+                    (number >> 16) & 0xffff,
+                    lay.number,
+                    number & 0xffff
+                ));
+            } else {
+                text.push_str(&format!("mov {}, #{number}\n", lay.number));
+            }
+        }
     }
     // The arguments move into the registers the instruction reads them from.
     // On x86-64 they are already there: the constraint placed them.
@@ -219,6 +250,18 @@ fn call_body(os: SysOs, arch: SysArch, nr: i64, args: &[Arg]) -> String {
     }
     text.push_str(lay.instruction);
     text.push('\n');
+    // Darwin reports an error by setting the carry flag and returning the
+    // error number, where Linux returns it negative. The result is made
+    // negative here, so that the callers can use one convention.
+    if lay.error_in_carry {
+        // A branch inside an assembly block has to target a numbered label,
+        // and the compiler renumbers it. AArch64 has a conditional negate,
+        // so it does not need one.
+        match arch {
+            SysArch::X86_64 => text.push_str("jnc 1; negq %rax; 1:\n"),
+            SysArch::Aarch64 => text.push_str("cneg x0, x0, cs\n"),
+        }
+    }
     // The stack is restored after the call.
     match arch {
         SysArch::X86_64 => text.push_str("mov %r12, %rsp"),
@@ -403,7 +446,10 @@ mod tests {
 
         let darwin = Syscalls::for_os(SysOs::Macos);
         let ir = wrappers(SysOs::Macos, SysArch::Aarch64, &darwin);
-        assert!(ir.contains("mov x16, #"), "{ir}");
+        // Darwin puts the BSD number in the high bits, so the number needs
+        // two instructions: one to set the high half, one for the low.
+        assert!(ir.contains("movz x16, #512, lsl #16"), "{ir}");
+        assert!(ir.contains("movk x16, #"), "{ir}");
         assert!(ir.contains("svc #0x80"), "{ir}");
     }
 

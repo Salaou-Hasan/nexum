@@ -54,12 +54,11 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
     s.push_str("declare i32 @fputs(ptr, ptr)\n");
     s.push_str("declare i32 @fputc(i32, ptr)\n");
     s.push_str("declare void @exit(i32)\n");
-    s.push_str("declare ptr @malloc(i64)\n");
-    s.push_str("declare void @free(ptr)\n");
 
     // The string routines are ours on every platform: a program should not
     // need the C library for a byte copy.
     s.push_str(&strings::string_routines());
+    s.push_str(&heap::allocator_ir(os, arch));
     s.push_str(&bytes::byte_routines());
 
     if msvc {
@@ -149,7 +148,7 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
     // `scan_bytes` argument is kept for callers that know better and is
     // currently the same value.
     s.push_str(
-        "define internal ptr @nexum_alloc_scanned(i64 %payload, i64 %scan_bytes) {\nentry:\n  %sz0 = add i64 %payload, 15\n  %sz = and i64 %sz0, -16\n  %total = add i64 %sz, 32\n  call void @nexum_gc_maybe()\n  %p = call ptr @malloc(i64 %total)\n  %isnull = icmp eq ptr %p, null\n  br i1 %isnull, label %oom, label %ok\noom:\n  call void @nexum_oom()\n  unreachable\nok:\n  store i64 %sz, ptr %p\n  %mp = getelementptr i8, ptr %p, i64 8\n  store i64 0, ptr %mp\n  %np = getelementptr i8, ptr %p, i64 16\n  %head = load ptr, ptr @nexum_obj_head\n  store ptr %head, ptr %np\n  store ptr %p, ptr @nexum_obj_head\n  %sbp = getelementptr i8, ptr %p, i64 24\n  store i64 %scan_bytes, ptr %sbp\n  %live = load i64, ptr @nexum_live\n  %live2 = add i64 %live, %sz\n  store i64 %live2, ptr @nexum_live\n  %since = load i64, ptr @nexum_since\n  %since2 = add i64 %since, %sz\n  store i64 %since2, ptr @nexum_since\n  %pay = getelementptr i8, ptr %p, i64 32\n  ret ptr %pay\n}\n\n",
+        "define internal ptr @nexum_alloc_scanned(i64 %payload, i64 %scan_bytes) {\nentry:\n  %sz0 = add i64 %payload, 15\n  %sz = and i64 %sz0, -16\n  %total = add i64 %sz, 32\n  call void @nexum_gc_maybe()\n  %p = call ptr @nexum_heap_alloc(i64 %total)\n  %isnull = icmp eq ptr %p, null\n  br i1 %isnull, label %oom, label %ok\noom:\n  call void @nexum_oom()\n  unreachable\nok:\n  store i64 %sz, ptr %p\n  %mp = getelementptr i8, ptr %p, i64 8\n  store i64 0, ptr %mp\n  %np = getelementptr i8, ptr %p, i64 16\n  %head = load ptr, ptr @nexum_obj_head\n  store ptr %head, ptr %np\n  store ptr %p, ptr @nexum_obj_head\n  %sbp = getelementptr i8, ptr %p, i64 24\n  store i64 %scan_bytes, ptr %sbp\n  %live = load i64, ptr @nexum_live\n  %live2 = add i64 %live, %sz\n  store i64 %live2, ptr @nexum_live\n  %since = load i64, ptr @nexum_since\n  %since2 = add i64 %since, %sz\n  store i64 %since2, ptr @nexum_since\n  %pay = getelementptr i8, ptr %p, i64 32\n  ret ptr %pay\n}\n\n",
     );
     s.push_str(
         "define internal ptr @nexum_alloc(i64 %payload) {\nentry:\n  %p = call ptr @nexum_alloc_scanned(i64 %payload, i64 0)\n  ret ptr %p\n}\n\n",
@@ -188,7 +187,7 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
     // Sweep: unmarked objects are freed and unlinked; marked objects are kept
     // and their mark bit is reset for the next cycle.
     s.push_str(
-        "define internal void @nexum_sweep() {\nentry:\n  %pvar = alloca ptr, align 8\n  %cvar = alloca ptr, align 8\n  store ptr null, ptr %pvar\n  %head = load ptr, ptr @nexum_obj_head\n  store ptr %head, ptr %cvar\n  br label %sloop\nsloop:\n  %cur = load ptr, ptr %cvar\n  %cnull = icmp eq ptr %cur, null\n  br i1 %cnull, label %sdone, label %sbody\nsbody:\n  %mp = getelementptr i8, ptr %cur, i64 8\n  %m = load i64, ptr %mp\n  %alive = icmp ne i64 %m, 0\n  br i1 %alive, label %keep, label %drop\nkeep:\n  store i64 0, ptr %mp\n  store ptr %cur, ptr %pvar\n  %np = getelementptr i8, ptr %cur, i64 16\n  %nxt = load ptr, ptr %np\n  store ptr %nxt, ptr %cvar\n  br label %sloop\ndrop:\n  %dsp = getelementptr i8, ptr %cur, i64 0\n  %sz = load i64, ptr %dsp\n  %live = load i64, ptr @nexum_live\n  %live2 = sub i64 %live, %sz\n  store i64 %live2, ptr @nexum_live\n  %dnp = getelementptr i8, ptr %cur, i64 16\n  %dnxt = load ptr, ptr %dnp\n  %pr = load ptr, ptr %pvar\n  %pnull = icmp eq ptr %pr, null\n  br i1 %pnull, label %sethead, label %setprev\nsethead:\n  store ptr %dnxt, ptr @nexum_obj_head\n  br label %advance\nsetprev:\n  %pnp = getelementptr i8, ptr %pr, i64 16\n  store ptr %dnxt, ptr %pnp\n  br label %advance\nadvance:\n  store ptr %dnxt, ptr %cvar\n  call void @free(ptr %cur)\n  br label %sloop\nsdone:\n  ret void\n}\n\n",
+        "define internal void @nexum_sweep() {\nentry:\n  %pvar = alloca ptr, align 8\n  %cvar = alloca ptr, align 8\n  store ptr null, ptr %pvar\n  %head = load ptr, ptr @nexum_obj_head\n  store ptr %head, ptr %cvar\n  br label %sloop\nsloop:\n  %cur = load ptr, ptr %cvar\n  %cnull = icmp eq ptr %cur, null\n  br i1 %cnull, label %sdone, label %sbody\nsbody:\n  %mp = getelementptr i8, ptr %cur, i64 8\n  %m = load i64, ptr %mp\n  %alive = icmp ne i64 %m, 0\n  br i1 %alive, label %keep, label %drop\nkeep:\n  store i64 0, ptr %mp\n  store ptr %cur, ptr %pvar\n  %np = getelementptr i8, ptr %cur, i64 16\n  %nxt = load ptr, ptr %np\n  store ptr %nxt, ptr %cvar\n  br label %sloop\ndrop:\n  %dsp = getelementptr i8, ptr %cur, i64 0\n  %sz = load i64, ptr %dsp\n  %live = load i64, ptr @nexum_live\n  %live2 = sub i64 %live, %sz\n  store i64 %live2, ptr @nexum_live\n  %dnp = getelementptr i8, ptr %cur, i64 16\n  %dnxt = load ptr, ptr %dnp\n  %pr = load ptr, ptr %pvar\n  %pnull = icmp eq ptr %pr, null\n  br i1 %pnull, label %sethead, label %setprev\nsethead:\n  store ptr %dnxt, ptr @nexum_obj_head\n  br label %advance\nsetprev:\n  %pnp = getelementptr i8, ptr %pr, i64 16\n  store ptr %dnxt, ptr %pnp\n  br label %advance\nadvance:\n  store ptr %dnxt, ptr %cvar\n  %tot = add i64 %sz, 32\n  call void @nexum_heap_free(ptr %cur, i64 %tot)\n  br label %sloop\nsdone:\n  ret void\n}\n\n",
     );
 
     // String concatenation: fresh NUL-terminated buffer on the managed heap.
