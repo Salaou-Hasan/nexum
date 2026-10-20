@@ -1,0 +1,8 @@
+# EXPECT: T051
+# The constraint string names one operand per constraint: the destination is
+# the first output, and the inputs follow it. The clobbers (`~{reg}`) are
+# not operands, so they are not counted.
+fn main():
+    let mut out = 0
+    asm(out, "mov $0, %rax", "=r,r", 1, 2)
+    asm(out, "mov $0, %rax", "=r,r")
