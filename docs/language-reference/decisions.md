@@ -310,3 +310,26 @@ compiler. It does not move to LLVM as a library.
 * Consequence: the link step is separable from the compile step, and
   phase 11g takes the link step first.
 * Status: decided.
+## D021 - The inline assembly template is LLVM's own (decided)
+
+An `asm` block's template is LLVM's inline assembly template. The
+registers are named in it, and LLVM's positional form (`$0`, `$1`, ...)
+works as well. The constraint string names the operands in LLVM's order -
+the outputs first, then the inputs, then the clobbers - and pins each one
+to a register, so the number of constraints before the first `~{` is one
+more than the number of inputs.
+
+The research proposed a form where each operand carries a *label* as well
+as a register class, and the template refers to the label. That is a
+better design, and it is deferred: the labels would have to be carried
+through the MIR, and the instruction does not carry them.
+
+* Rationale: the operand numbers are LLVM's, and the output is operand
+  zero, so a program that writes `$1` when it meant `$0` is silently
+  wrong. The semantic pass therefore checks that every `$N` in the
+  template is within the range the constraint string names, and that the
+  constraint count matches the inputs - so a mistake is a diagnostic and
+  not a backend crash. That is the whole reason the phase can ship
+  without the labels.
+* Status: decided. The implementation is phase 11b; the labelled form
+  comes with the wave that has room for it.
