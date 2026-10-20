@@ -122,10 +122,13 @@ fn the_kernel_reports_what_it_reports() {
     ir = ir.replace("define internal i64 @nexum_sys_", "define i64 @nexum_sys_");
     std::fs::write(&ll, &ir).expect("write the module");
 
+    // The same link the allocator's own test does: the module and the
+    // driver in one clang invocation, the module first.
     let exe = dir.join("probe");
     let out = std::process::Command::new(&tc.clang)
+        .arg("-Wno-override-module")
         .arg(&ll)
-        .arg(&obj)
+        .arg(&driver)
         .arg("-o")
         .arg(&exe)
         .output()
