@@ -45,6 +45,8 @@ pub struct Syscalls {
     pub munmap: i64,
     pub exit: i64,
     pub lseek: i64,
+    /// The wall clock, in microseconds since the epoch.
+    pub gettimeofday: i64,
     /// The flags for opening a file for reading.
     pub open_read: i64,
     /// The flags for opening a file for writing.
@@ -70,6 +72,7 @@ impl Syscalls {
                 munmap: 11,
                 exit: 60,
                 lseek: 8,
+                gettimeofday: 96,
                 open_read: 0,
                 open_write: 1 | 64 | 512,
                 open_mode: 0o644,
@@ -91,6 +94,7 @@ impl Syscalls {
                 munmap: 73,
                 exit: 1,
                 lseek: 199,
+                gettimeofday: 78,
                 open_read: 0,
                 open_write: 1 | 512 | 1024,
                 open_mode: 0o644,
@@ -365,6 +369,13 @@ pub fn wrappers(os: SysOs, arch: SysArch, sys: &Syscalls) -> String {
     );
     push("munmap", sys.munmap, &[arg(0, "%a0"), arg(1, "%a1")]);
     push("exit", sys.exit, &[arg(0, "%a0")]);
+    // The wall clock. Darwin has no clock_gettime, and gettimeofday is on
+    // both, so the clock is one call on both systems.
+    push(
+        "gettimeofday",
+        sys.gettimeofday,
+        &[arg(0, "%a0"), arg(1, "%a1")],
+    );
     s
 }
 
