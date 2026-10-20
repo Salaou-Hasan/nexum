@@ -85,9 +85,12 @@ arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`; on AArch64 the number
 goes in `x8` (Linux) or `x16` (Darwin) and the arguments in `x0` to `x5`,
 and the result comes back in `x0` - the same register the first argument
 went in, which is why the arguments are staged in `x9` to `x14` and moved
-into place. The instruction is `svc #0` on Linux and `svc #0x80` on Darwin,
-and on Darwin the number is the BSD number with `0x2000000` in the high
-bits, so it takes two instructions to build.
+into place. The instruction is `svc #0` on Linux and `svc #0x80` on Darwin. On
+x86-64 Darwin the number is the BSD number with `0x2000000` in the
+high bits, so it takes two instructions to build; on AArch64 Darwin
+the number is the plain BSD number and fits in one move. The error
+number comes back in the result register with the carry flag set, on
+both architectures.
 
 ### The runtime's own entry points
 

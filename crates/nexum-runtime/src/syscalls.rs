@@ -94,7 +94,7 @@ impl Syscalls {
                 munmap: 73,
                 exit: 1,
                 lseek: 199,
-                gettimeofday: 78,
+                gettimeofday: 116,
                 open_read: 0,
                 open_write: 1 | 512 | 1024,
                 open_mode: 0o644,
@@ -131,8 +131,11 @@ struct Layout {
     instruction: &'static str,
     /// The registers the instruction clobbers.
     clobbers: &'static [&'static str],
-    /// Added to the system call number. Darwin on AArch64 puts the BSD
-    /// number in the high bits, so write is 0x2000004 and not 4.
+    /// Added to the system call number. On Darwin x86-64 the class prefix
+    /// 0x2000000 is required (SYSCALL_CONSTRUCT_UNIX, from
+    /// osfmk/mach/i386/syscall_sw.h); on Darwin AArch64 the number is the
+    /// plain BSD number and there is no prefix - the sign of the number
+    /// selects Mach vs BSD.
     number_base: i64,
     /// Whether the call reports an error by setting the carry flag. That
     /// is Darwin's convention: the error number comes back positive, with
@@ -162,7 +165,7 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             number: "rax",
             instruction: "syscall",
             clobbers: &["rcx", "r11", "r12"],
-            number_base: 0,
+            number_base: 0x2000000,
             error_in_carry: true,
         },
         // On AArch64 the result comes back in the register the first
@@ -187,8 +190,9 @@ fn layout(os: SysOs, arch: SysArch) -> Layout {
             instruction: "svc #0x80",
             // x19 holds the aligned stack pointer across the call.
             clobbers: &["x16", "x19"],
-            // Darwin on AArch64 puts the BSD number in the high bits.
-            number_base: 0x2000000,
+            // Darwin on AArch64 uses the plain BSD number in x16. The
+            // 0x2000000 class prefix is an x86-64-only convention.
+            number_base: 0,
             error_in_carry: true,
         },
     }
@@ -472,10 +476,10 @@ mod tests {
 
         let darwin = Syscalls::for_os(SysOs::Macos);
         let ir = wrappers(SysOs::Macos, SysArch::Aarch64, &darwin);
-        // Darwin puts the BSD number in the high bits, so the number needs
-        // two instructions: one to set the high half, one for the low.
-        assert!(ir.contains("movz x16, #512, lsl #16"), "{ir}");
-        assert!(ir.contains("movk x16, #"), "{ir}");
+        // Darwin arm64 uses the plain BSD number in x16 (the 0x2000000
+        // class prefix is an x86-64 convention), so the number fits in a
+        // single move.
+        assert!(ir.contains("mov x16, #4"), "{ir}");
         assert!(ir.contains("svc #0x80"), "{ir}");
     }
 
