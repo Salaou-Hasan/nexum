@@ -19,7 +19,9 @@ fn toolchain() -> Option<nexum_toolchain::Toolchain> {
     nexum_toolchain::Toolchain::discover().ok()
 }
 
-/// The driver: the raw calls first, then the allocator.
+/// The driver: the raw calls first, then the allocator, then the same
+/// sequence the allocator's own test walks - every class, a free, and the
+/// same block again - printing after each step.
 const DRIVER: &str = r#"
 #include <stdio.h>
 
@@ -28,7 +30,13 @@ extern long long nexum_sys_mmap(long long addr, long long len, long long prot,
 extern long long nexum_sys_open(long long path, long long flags, long long mode);
 extern long long nexum_sys_write(long long fd, long long buf, long long len);
 extern void *nexum_heap_alloc(long long total);
+extern void nexum_heap_free(void *p, long long total);
 extern long long nexum_size_class(long long total);
+
+static long long class_size_of(long long c) {
+    if (c <= 254) return 32 + (c << 4);
+    return 8192LL << (c - 255);
+}
 
 int main(void) {
     printf("size_class(48) -> %lld\n", nexum_size_class(48));
@@ -38,8 +46,19 @@ int main(void) {
     printf("open -> %lld\n", o);
     long long w = nexum_sys_write(1, (long long)"hello\n", 6);
     printf("write -> %lld\n", w);
-    void *p = nexum_heap_alloc(48);
-    printf("heap_alloc(48) -> %p\n", p);
+
+    long long c;
+    for (c = 0; c <= 258; c++) {
+        long long total = class_size_of(c);
+        long long cls = nexum_size_class(total);
+        void *p = nexum_heap_alloc(total);
+        printf("class %lld %lld %lld -> %p\n", c, total, cls, p);
+        nexum_heap_free(p, total);
+        void *q = nexum_heap_alloc(total);
+        printf("class %lld again -> %p\n", c, q);
+        nexum_heap_free(q, total);
+    }
+    printf("done\n");
     return 0;
 }
 "#;
@@ -111,6 +130,11 @@ fn the_kernel_reports_what_it_reports() {
     assert!(
         allocated != "0x0" && !allocated.is_empty(),
         "the allocator did not return a block:\n{stdout}"
+    );
+    // The whole sequence the allocator's own test walks has to finish.
+    assert!(
+        stdout.contains("done"),
+        "the allocator did not serve every class:\n{stdout}"
     );
     // The contract the runtime relies on: the wrappers report an error as a
     // negative number, on every system. Linux returns the error number
