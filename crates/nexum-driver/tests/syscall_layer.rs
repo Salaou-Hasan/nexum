@@ -1117,6 +1117,7 @@ fn the_file_routines_go_through_the_system_call_layer() {
 fn work_dir(name: &str) -> PathBuf {
     let d = std::env::temp_dir()
         .join("nexum_tests")
+        .join(format!("p{}", std::process::id()))
         .join("syscall_layer")
         .join(name);
     std::fs::create_dir_all(&d).expect("the work directory");

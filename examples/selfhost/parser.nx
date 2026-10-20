@@ -49,7 +49,10 @@ fn escape(s: Str) -> Str:
                 if c == "\t":
                     out = concat(out, "\\t")
                 else:
-                    out = concat(out, c)
+                    if c == "\r":
+                        out = concat(out, "\\r")
+                    else:
+                        out = concat(out, c)
         i = i + 1
     return out
 
