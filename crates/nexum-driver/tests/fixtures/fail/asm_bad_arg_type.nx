@@ -1,0 +1,10 @@
+# EXPECT: T051
+# The `asm` builtin checks its arguments: the destination is a variable of
+# an integer type, the template and the constraint string are strings, and
+# the inputs are integers.
+fn main():
+    let mut out = 0
+    let text = "mov $0, %rax"
+    asm(text, "=r", 1)
+    asm(out, 42, "=r", 1)
+    asm(out, text, "=r", 1)

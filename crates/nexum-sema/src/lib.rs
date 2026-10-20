@@ -132,6 +132,24 @@ pub enum HirExpr {
         args: Vec<HirExpr>,
         ty: Ty,
     },
+    /// An inline-assembly block: `asm(dest, template, constraints, inputs...)`.
+    ///
+    /// `dest` is the name of the variable the result of the block goes to,
+    /// `template` and `constraints` are the assembly text and LLVM's own
+    /// constraint string, and `inputs` are the values the constraints name.
+    /// The target guard is a compile-time check, so it does not reach here.
+    Asm {
+        /// The destination variable's name.
+        dest: String,
+        /// The assembly template.
+        template: String,
+        /// The constraint string.
+        constraints: String,
+        /// The input values, in the order the constraint string names them.
+        inputs: Vec<HirExpr>,
+        /// The destination's type, which is the type of the block's result.
+        ty: Ty,
+    },
     /// Record construction: `Vec2(1.0, 2.0)`.
     Record {
         name: String,
@@ -188,6 +206,7 @@ impl HirExpr {
             | HirExpr::Str(_, t)
             | HirExpr::Var(_, t)
             | HirExpr::Call { ty: t, .. }
+            | HirExpr::Asm { ty: t, .. }
             | HirExpr::Record { ty: t, .. }
             | HirExpr::Field { ty: t, .. }
             | HirExpr::FieldSet { ty: t, .. }
@@ -205,7 +224,35 @@ pub struct SemaResult {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// The profile name of the target the compiler runs on.
+///
+/// The five profiles are the ones the target table names - `windows-x86_64`,
+/// `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64` - and
+/// the name is the operating system and the architecture joined by a dash.
+/// The sema does not depend on the target crate, so it derives the name
+/// from the constants the standard library exposes.
+fn host_target_name() -> String {
+    let arch = std::env::consts::ARCH;
+    let os = match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "macos",
+        _ => "linux",
+    };
+    format!("{os}-{arch}")
+}
+
 pub fn analyze(am: &AModule) -> SemaResult {
+    analyze_for_target(am, &host_target_name())
+}
+
+/// Analyse a module for a named target.
+///
+/// `target` is the profile name the program is compiled for - one of the
+/// five names the target table uses (`windows-x86_64`, `linux-x86_64`,
+/// `linux-aarch64`, `macos-x86_64`, `macos-aarch64`). The `asm` builtin's
+/// target guard is checked against it, so a cross build has to call this
+/// with the target it builds for and not with `analyze`.
+pub fn analyze_for_target(am: &AModule, target: &str) -> SemaResult {
     // Pass 0a: collect record names so field types can reference records.
     let mut records: HashMap<String, Vec<(String, Ty)>> = HashMap::new();
     let mut decl_diags: Vec<Diagnostic> = Vec::new();
@@ -328,6 +375,7 @@ pub fn analyze(am: &AModule) -> SemaResult {
             current_ret: Ty::Unit,
             current_fn: String::new(),
             synthetic: 0,
+            target: target.to_string(),
         };
         let mut fns = Vec::new();
         for s in &am.stmts {
@@ -454,6 +502,9 @@ struct Ctx {
     /// compound-assignment temporaries). Generated names contain `$`, which
     /// user identifiers cannot, so they can never collide.
     synthetic: usize,
+    /// The profile name of the target the program is compiled for. The
+    /// `asm` builtin's target guard is checked against it.
+    target: String,
 }
 
 #[derive(Clone)]
@@ -1414,6 +1465,9 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     ty: Ty::Unit,
                 };
             }
+            if callee == "asm" {
+                return analyze_asm(ctx, scope, e, &ha, args);
+            }
             if callee == "list_new" {
                 if !ha.is_empty() {
                     ctx.diagnostics.push(
@@ -1824,6 +1878,218 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                 }
             }
         }
+    }
+}
+
+/// The `asm` builtin: `asm(dest, template, constraints, inputs...)`.
+///
+/// * `dest` is a mutable variable of an integer type - where the result of
+///   the block goes.
+/// * `template` and `constraints` are string literals: the assembly text and
+///   LLVM's own constraint string.
+/// * the rest are the inputs, the integers the constraint string names.
+///
+/// An optional trailing string literal is the target guard: it names the
+/// target the block is written for. The guard is a compile-time check, so it
+/// does not reach the MIR - a block whose guard does not name the target the
+/// program is compiled for is an error, and the block becomes a panic.
+fn analyze_asm(
+    ctx: &mut Ctx,
+    scope: &Scope,
+    e: &Expr,
+    ha: &[HirExpr],
+    args: &[Expr],
+) -> HirExpr {
+    // The destination, the template and the constraints are always there.
+    if ha.len() < 3 {
+        return asm_error(
+            ctx,
+            e.span,
+            format!(
+                "asm expects at least 3 arguments (destination, template, constraints), got {}",
+                ha.len()
+            ),
+        );
+    }
+
+    // Argument zero: the destination. It has to be a variable, of an integer
+    // type, and mutable: the block writes its result into it.
+    let (dest, dest_ty) = match &ha[0] {
+        HirExpr::Var(name, ty) => {
+            if !ty.compatible(&Ty::Int) {
+                return asm_error(
+                    ctx,
+                    args[0].span,
+                    format!("the asm destination must be an integer, found {}", ty.name()),
+                );
+            }
+            match scope.get(name) {
+                Some(info) if !info.mutable => {
+                    return asm_error(
+                        ctx,
+                        args[0].span,
+                        format!(
+                            "the asm destination `{}` must be a mutable variable (declare it with `let mut`)",
+                            name
+                        ),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    return asm_error(
+                        ctx,
+                        args[0].span,
+                        format!("the asm destination `{}` is not a variable", name),
+                    );
+                }
+            }
+            (name.clone(), ty.clone())
+        }
+        other => {
+            return asm_error(
+                ctx,
+                args[0].span,
+                format!(
+                    "the asm destination must be a variable, found {}",
+                    other.ty().name()
+                ),
+            );
+        }
+    };
+
+    // Arguments one and two: the template and the constraint string. Both
+    // have to be string literals: the MIR carries them as strings, so the
+    // compiler has to know them now.
+    let template = match asm_string(ctx, &ha[1], &args[1], "template") {
+        Ok(s) => s,
+        Err(h) => return h,
+    };
+    let constraints = match asm_string(ctx, &ha[2], &args[2], "constraint string") {
+        Ok(s) => s,
+        Err(h) => return h,
+    };
+
+    // The target guard is the last argument when it is a string: the inputs
+    // are integers, so a string among them can only be the guard.
+    let rest = &ha[3..];
+    let (guard, inputs) = match rest.last() {
+        Some(HirExpr::Str(_, _)) => {
+            let (inputs, guard) = rest.split_at(rest.len() - 1);
+            (Some(&guard[0]), inputs)
+        }
+        _ => (None, rest),
+    };
+    if let Some(g) = guard {
+        let span = args[3 + inputs.len()].span;
+        let name = match g {
+            HirExpr::Str(s, _) => s.clone(),
+            _ => {
+                return asm_error(
+                    ctx,
+                    span,
+                    "the asm target guard must be a string literal".to_string(),
+                );
+            }
+        };
+        if name != ctx.target {
+            return asm_error(
+                ctx,
+                span,
+                format!(
+                    "the asm block is written for `{}`, but this program is compiled for `{}`",
+                    name, ctx.target
+                ),
+            );
+        }
+    }
+
+    // The inputs: the integers the constraint string names.
+    for (i, a) in inputs.iter().enumerate() {
+        if !a.ty().compatible(&Ty::Int) {
+            return asm_error(
+                ctx,
+                args[3 + i].span,
+                format!("the asm inputs must be integers, found {}", a.ty().name()),
+            );
+        }
+    }
+
+    // The constraint string names one operand per constraint: the
+    // destination is the first output, and the inputs follow it. The
+    // clobbers are not operands, so the count stops at the first one.
+    let operands = asm_operand_count(&constraints);
+    if operands != inputs.len() + 1 {
+        return asm_error(
+            ctx,
+            args[2].span,
+            format!(
+                "the asm constraint string names {} operand(s), but the block has {} (the destination and {} input(s))",
+                operands,
+                inputs.len() + 1,
+                inputs.len()
+            ),
+        );
+    }
+
+    HirExpr::Asm {
+        dest,
+        template,
+        constraints,
+        inputs: inputs.to_vec(),
+        ty: dest_ty,
+    }
+}
+
+/// The value of a string argument of the `asm` builtin, or the failed check.
+fn asm_string(
+    ctx: &mut Ctx,
+    h: &HirExpr,
+    arg: &Expr,
+    what: &str,
+) -> Result<String, HirExpr> {
+    if !h.ty().compatible(&Ty::Str) {
+        return Err(asm_error(
+            ctx,
+            arg.span,
+            format!("the asm {} must be a Str, found {}", what, h.ty().name()),
+        ));
+    }
+    match h {
+        HirExpr::Str(s, _) => Ok(s.clone()),
+        _ => Err(asm_error(
+            ctx,
+            arg.span,
+            format!("the asm {} must be a string literal", what),
+        )),
+    }
+}
+
+/// The number of operands the constraint string names.
+///
+/// The constraint string is LLVM's own: the outputs first, then the inputs,
+/// then the clobbers. A clobber (`~{reg}`) is not an operand, and neither
+/// is anything after the `|` that separates the sections, so the count stops
+/// at the first of them.
+fn asm_operand_count(constraints: &str) -> usize {
+    let head = constraints.split('|').next().unwrap_or("");
+    let head = match head.find("~{") {
+        Some(i) => &head[..i],
+        None => head,
+    };
+    head.split(',')
+        .filter(|part| !part.trim().is_empty())
+        .count()
+}
+
+/// A failed check of the `asm` builtin: the diagnostic, and the block
+/// lowered to a panic - the way the other builtins report a type error.
+fn asm_error(ctx: &mut Ctx, span: Span, message: String) -> HirExpr {
+    ctx.diagnostics
+        .push(Diagnostic::error("T051", message.clone()).with_span(span));
+    HirExpr::Call {
+        callee: "panic".to_string(),
+        args: vec![HirExpr::Str(message, Ty::Str)],
+        ty: Ty::Never,
     }
 }
 
