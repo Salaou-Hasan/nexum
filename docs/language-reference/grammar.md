@@ -249,6 +249,7 @@ access `.` < call.
 | T048 | list builtin arity/type error                  |
 | T049 | list element type error                        |
 | T050 | byte builtin arity/type error                  |
+| T051 | inline assembly builtin error                  |
 | T043 | `str_char_at` arity/type error                 |
 | T044 | `slice` arity/type error                       |
 
