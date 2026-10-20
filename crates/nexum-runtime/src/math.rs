@@ -913,7 +913,7 @@ fn floor_routine() -> String {
     let is_nan = ir.fcmp("uno", x, x);
     let out = ir.sel_d(&is_nan, x, &out);
     ir.op(format!("ret double {out}"));
-    func("floor", "double %x", &ir.body())
+    func("nexum_floor", "double %x", &ir.body())
 }
 
 /// `ceil(x)`: the smallest integer that is not smaller than `x`.
@@ -943,7 +943,7 @@ fn ceil_routine() -> String {
     let is_nan = ir.fcmp("uno", x, x);
     let out = ir.sel_d(&is_nan, x, &out);
     ir.op(format!("ret double {out}"));
-    func("ceil", "double %x", &ir.body())
+    func("nexum_ceil", "double %x", &ir.body())
 }
 
 /// `trunc(x)`: the integer part of `x`, with the sign of `x`.
@@ -968,7 +968,7 @@ fn trunc_public_routine() -> String {
     let is_nan = ir.fcmp("uno", x, x);
     let out = ir.sel_d(&is_nan, x, &out);
     ir.op(format!("ret double {out}"));
-    func("trunc", "double %x", &ir.body())
+    func("nexum_trunc", "double %x", &ir.body())
 }
 
 /// `round(x)`: the nearest integer, with a half rounded away from zero.
@@ -999,5 +999,5 @@ fn round_routine() -> String {
     let is_nan = ir.fcmp("uno", x, x);
     let out = ir.sel_d(&is_nan, x, &out);
     ir.op(format!("ret double {out}"));
-    func("round", "double %x", &ir.body())
+    func("nexum_round", "double %x", &ir.body())
 }
