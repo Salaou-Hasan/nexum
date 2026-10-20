@@ -65,15 +65,89 @@ The numbers themselves are per system, and they do not match:
 | `close` | 3 | 6 |
 | `lseek` | 8 | 199 |
 | `mmap` | 9 | 197 |
-| `munmap` | 11 | 198 |
+| `munmap` | 11 | 73 |
 | `exit` | 60 | 1 |
 
-The conventions differ as well: on x86-64 the number goes in `rax` and the
+Darwin's numbers come from the BSD master table
+(`bsd/kern/syscalls.master` in XNU), and the table is not contiguous:
+`mmap` is 197, `munmap` is 73, and 198 is an unused slot. A number copied
+from the wrong column calls a system call that does not exist, and the
+kernel says so in a way that is easy to miss.
+
+The error conventions differ as well. Linux returns the error number
+negated, so a failure is a negative result. Darwin returns the error
+number *positive* and sets the carry flag. The wrapper makes the result
+negative in the assembly, so that one convention holds everywhere and the
+callers can test for it with a single comparison.
+
+On x86-64 the number goes in `rax` and the
 arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`; on AArch64 the number
 goes in `x8` (Linux) or `x16` (Darwin) and the arguments in `x0` to `x5`,
 and the result comes back in `x0` - the same register the first argument
 went in, which is why the arguments are staged in `x9` to `x14` and moved
-into place. The instruction is `svc #0` on Linux and `svc #0x80` on Darwin.
+into place. The instruction is `svc #0` on Linux and `svc #0x80` on Darwin,
+and on Darwin the number is the BSD number with `0x2000000` in the high
+bits, so it takes two instructions to build.
+
+### The runtime's own entry points
+
+The runtime is the language's only library. Everything a program needs
+that is not the language itself lives here, and every one of these names
+is part of the ABI.
+
+**The heap** (`crates/nexum-runtime/src/heap.rs`). The collector asks
+for a block and the allocator gives it one:
+
+| Entry point | What it does |
+| ----------- | ------------ |
+| `nexum_heap_alloc(total)` | a block of `total` bytes, 16-byte aligned |
+| `nexum_heap_free(p, total)` | the block goes back to its class |
+| `nexum_size_class(total)` | the class of a size, computed rather than searched |
+| `nexum_alloc_raw(size)` | a mapping of its own, with no header and no free list |
+| `nexum_free_raw(p, size)` | the mapping is released |
+
+The class ladder is 16-byte granular from 32 to 4096 bytes, then four
+doubling classes to 65536, then a class of its own for anything larger.
+Nothing is ever split or merged, so there is no coalescing code, and the
+free list lives in the collector's own next-object word, at `+16`.
+
+**The output** (`crates/nexum-runtime/src/format.rs`). The runtime formats
+and writes; it allocates nothing on the way, so the print path does not
+depend on the allocator:
+
+| Entry point | What it does |
+| ----------- | ------------ |
+| `nexum_print_int(v)` | a decimal integer |
+| `nexum_print_bool(v)` | `0` or `1` |
+| `nexum_print_float(v)` | C's `%g`, six significant digits |
+| `nexum_print_str(s)` | the bytes |
+| `nexum_fmt_int_to(buf, v)` | the same, into the caller's buffer |
+
+The float format is the C library's `%g`, byte for byte: six significant
+digits, the exponential form when the exponent is below -4 or not below
+the precision, the trailing zeros removed, and the exponent written with
+at least two digits. The conversion is an exact six digit conversion over
+a small bignum, in 64-bit operations - the shortest round-trip form is a
+different format, and it needs a 128-bit division, which would put a
+library call back into the runtime.
+
+**The maths** (`crates/nexum-runtime/src/math.rs`). `nexum_sqrt`,
+`nexum_exp`, `nexum_log`, `nexum_tanh`, `nexum_erf`, `nexum_pow`, and
+the four rounding functions `nexum_floor`, `nexum_ceil`, `nexum_trunc` and
+`nexum_round`. The accuracy is measured against the C library rather than
+asserted: one ulp for the exponential and the logarithm, two for the
+error function, exact for the rounding functions.
+
+**The bytes** (`crates/nexum-runtime/src/bytes.rs`).
+`nexum_byte_value(s, i)` and `nexum_byte_from_value(v)`, the primitives
+every collection in the standard library is built on.
+
+**The rule about names.** Every function the runtime defines that is not
+internal is named `nexum_` something. A program that links the C library
+fails to link when two objects define the same symbol, and that failure
+lands in somebody else's build, far from the line that caused it. The
+maths builtins once defined `floor`, `ceil`, `trunc` and `round`, which
+the C library also defines; the rule now has a test.
 
 ## 1. Native (unmanaged) values
 
