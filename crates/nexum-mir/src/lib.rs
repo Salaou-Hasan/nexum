@@ -69,6 +69,19 @@ pub enum Instr {
         args: Vec<Value>,
         ty: Ty,
     },
+    /// An inline-assembly block.
+    ///
+    /// The destination is the slot of the variable the result of the block
+    /// goes to: the block writes into it, it is not a value the instruction
+    /// defines. The inputs are the values the constraint string names, in
+    /// the order it names them.
+    Asm {
+        dest: Value,
+        template: String,
+        constraints: String,
+        inputs: Vec<Value>,
+        ty: Ty,
+    },
     Copy {
         dest: Value,
         src: Value,
@@ -730,6 +743,47 @@ fn lower_expr(ctx: &mut LowerCtx, e: &HirExpr) -> Value {
             });
             d
         }
+        HE::Asm {
+            dest,
+            template,
+            constraints,
+            inputs,
+            ty,
+        } => {
+            let mut iv = Vec::new();
+            for i in inputs {
+                iv.push(lower_expr(ctx, i));
+            }
+            // The destination is a variable: its slot is where the result of
+            // the block goes. The block writes into the slot, it does not
+            // define a value of its own.
+            match ctx.env.get(dest).copied() {
+                Some(slot) => {
+                    ctx.push_instr(Instr::Asm {
+                        dest: slot,
+                        template: template.clone(),
+                        constraints: constraints.clone(),
+                        inputs: iv,
+                        ty: ty.clone(),
+                    });
+                    // The value of the expression is the destination's new
+                    // value, so it is read back.
+                    let d = ctx.fresh(ty.clone());
+                    ctx.push_instr(Instr::Load {
+                        dest: d,
+                        slot,
+                        ty: ty.clone(),
+                    });
+                    d
+                }
+                None => {
+                    // The destination is not a variable of this function: the
+                    // sema has already reported it, and the block cannot be
+                    // lowered.
+                    ctx.fresh(ty.clone())
+                }
+            }
+        }
         HE::Call { callee, args, ty } => {
             // Arguments for `mut` parameters are borrows: pass the caller's
             // slot address instead of the loaded value.
@@ -1005,6 +1059,16 @@ fn collect_uses(in_: &Instr, used: &mut std::collections::HashSet<Value>) {
                 used.insert(*a);
             }
         }
+        Instr::Asm {
+            dest, inputs, ..
+        } => {
+            // The destination is the slot the result goes into: the block
+            // writes into it, so the slot is used, not defined.
+            used.insert(*dest);
+            for i in inputs {
+                used.insert(*i);
+            }
+        }
         Instr::Copy { src, .. } => {
             used.insert(*src);
         }
@@ -1065,6 +1129,9 @@ fn instr_dest(in_: &Instr) -> Option<Value> {
         | Instr::IndexGet { dest, .. }
         | Instr::IndexSet { dest, .. } => Some(*dest),
         Instr::Call { dest, .. } => *dest,
+        // An `asm` block writes its result into the destination slot: it
+        // defines no value of its own.
+        Instr::Asm { .. } => None,
         _ => None,
     }
 }
@@ -1084,6 +1151,7 @@ fn instr_ty(in_: &Instr) -> Option<Ty> {
         | Instr::IndexGet { ty, .. }
         | Instr::IndexSet { ty, .. } => Some(ty.clone()),
         Instr::Call { ty, .. } => Some(ty.clone()),
+        Instr::Asm { ty, .. } => Some(ty.clone()),
         _ => None,
     }
 }
@@ -1091,7 +1159,12 @@ fn instr_ty(in_: &Instr) -> Option<Ty> {
 fn is_side_effecting(in_: &Instr) -> bool {
     matches!(
         in_,
-        Instr::Call { .. } | Instr::Store { .. } | Instr::Panic { .. }
+        Instr::Call { .. }
+            | Instr::Store { .. }
+            | Instr::Panic { .. }
+            // An `asm` block may write memory and destroy registers: it is
+            // never removed.
+            | Instr::Asm { .. }
     )
 }
 
@@ -1127,6 +1200,8 @@ fn inlinable(g: &MirFn) -> bool {
             | Instr::Load { .. }
             | Instr::Store { .. }
             | Instr::Panic { .. }
+            // An `asm` block is not pure: it may write memory.
+            | Instr::Asm { .. }
             | Instr::Call { .. } => return false,
             _ => {}
         }
@@ -1246,6 +1321,14 @@ fn remap_inputs(in_: &mut Instr, remap: &HashMap<Value, Value>) {
                 r(a);
             }
         }
+        Instr::Asm {
+            dest, inputs, ..
+        } => {
+            r(dest);
+            for i in inputs {
+                r(i);
+            }
+        }
         Instr::Copy { src, .. } => {
             r(src);
         }
@@ -1306,6 +1389,9 @@ fn set_instr_dest(in_: &mut Instr, v: Value) {
         | Instr::IndexGet { dest, .. }
         | Instr::IndexSet { dest, .. } => *dest = v,
         Instr::Call { dest, .. } => *dest = Some(v),
+        // An `asm` block defines no value: the destination is a slot, and
+        // `remap_inputs` has already remapped it.
+        Instr::Asm { .. } => {}
         _ => {}
     }
 }
