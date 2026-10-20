@@ -247,3 +247,51 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
 
     s
 }
+
+#[cfg(test)]
+mod tests {
+    /// The runtime must not define a symbol the C library also defines.
+    ///
+    /// A program that links the C library - a hosted build, or a test that
+    /// has a C driver - fails to link when two objects define the same
+    /// symbol, and the failure appears in somebody else's build, far from the
+    /// line that caused it. The maths builtins once did exactly this: they
+    /// defined `floor`, `ceil`, `trunc` and `round`.
+    ///
+    /// So the rule is: every function the runtime defines that is not
+    /// internal is named `nexum_` something. The internal ones are local to
+    /// the module and cannot collide.
+    #[test]
+    fn the_runtime_does_not_define_c_library_names() {
+        for (os, arch) in [
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+            ("macos", "x86_64"),
+            ("macos", "aarch64"),
+            ("windows", "x86_64"),
+        ] {
+            let ir = super::runtime_ir(os, arch);
+            for line in ir.lines() {
+                let Some(rest) = line.strip_prefix("define ") else {
+                    continue;
+                };
+                // `define internal <ty> @name(` is local to the module.
+                if rest.starts_with("internal ") {
+                    continue;
+                }
+                let Some(at) = rest.find('@') else {
+                    continue;
+                };
+                let tail = &rest[at + 1..];
+                let Some(open) = tail.find('(') else {
+                    continue;
+                };
+                let name = &tail[..open];
+                assert!(
+                    name.starts_with("nexum_"),
+                    "{os}/{arch}: the runtime defines @{name}, and the C library may define it too"
+                );
+            }
+        }
+    }
+}

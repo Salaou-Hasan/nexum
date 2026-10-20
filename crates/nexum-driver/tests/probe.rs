@@ -32,6 +32,8 @@ extern long long nexum_sys_write(long long fd, long long buf, long long len);
 extern void *nexum_heap_alloc(long long total);
 extern void nexum_heap_free(void *p, long long total);
 extern long long nexum_size_class(long long total);
+extern void *nexum_alloc_raw(long long size);
+extern void nexum_free_raw(void *p, long long size);
 
 static long long class_size_of(long long c) {
     if (c <= 254) return 32 + (c << 4);
@@ -60,6 +62,21 @@ int main(void) {
         void *q = nexum_heap_alloc(total);
         printf("class %lld again -> %p\n", c, q);
         nexum_heap_free(q, total);
+    }
+    {
+        // The large class: a mapping of its own, freed with an unmap.
+        long long total = 100000;
+        long long cls = nexum_size_class(total);
+        void *p = nexum_heap_alloc(total);
+        printf("large %lld %lld -> %p\n", total, cls, p);
+        nexum_heap_free(p, total);
+    }
+    {
+        // The raw path: a mapping of its own, freed with an unmap.
+        long long size = 1000;
+        void *p = nexum_alloc_raw(size);
+        printf("raw %lld -> %p\n", size, p);
+        nexum_free_raw(p, size);
     }
     printf("done\n");
     return 0;

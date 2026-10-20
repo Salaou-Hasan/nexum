@@ -243,7 +243,7 @@ fn harness_ir(xs: &[f64], pows: &[(f64, f64)]) -> String {
         if i > 0 {
             s.push_str(", ");
         }
-        s.push_str(&format!("ptr @{name}"));
+        s.push_str(&format!("ptr @nexum_{name}"));
     }
     s.push_str("]\n\n");
 
@@ -319,7 +319,8 @@ fn harness_ir(xs: &[f64], pows: &[(f64, f64)]) -> String {
     p.push("  br label %ploop".into());
     p.push("pend:".into());
     // The rounding functions. The C library's are not called here: the
-    // runtime defines the same names.
+    // runtime has its own names for them, so that it never defines a
+    // symbol the C library also defines.
     p.push("  store i64 0, ptr %fs".into());
     p.push("  br label %rloop".into());
     p.push("rloop:".into());
@@ -756,8 +757,8 @@ fn the_maths_ir_has_no_c_library_dependency() {
             "the maths IR calls the C library's {name}"
         );
         assert!(
-            ir.contains(&format!("define double @{name}(")),
-            "the maths IR does not define {name}"
+            ir.contains(&format!("define double @nexum_{name}(")),
+            "the maths IR does not define nexum_{name}"
         );
     }
 }
@@ -773,10 +774,10 @@ fn the_maths_functions_are_external_and_named_right() {
         "nexum_tanh",
         "nexum_pow",
         "nexum_erf",
-        "floor",
-        "ceil",
-        "trunc",
-        "round",
+        "nexum_floor",
+        "nexum_ceil",
+        "nexum_trunc",
+        "nexum_round",
     ] {
         assert!(
             ir.contains(&format!("define double @{name}(")),
