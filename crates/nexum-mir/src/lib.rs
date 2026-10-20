@@ -306,7 +306,7 @@ fn lower_fn(
             // value of the return type (documented bootstrap behavior).
             let v = ctx.fresh(hf.ret.clone());
             let c = match hf.ret {
-                Ty::Float => Const::Float(0.0),
+                Ty::Float | Ty::F32 | Ty::F64 => Const::Float(0.0),
                 Ty::Bool => Const::Bool(false),
                 _ => Const::Int(0),
             };

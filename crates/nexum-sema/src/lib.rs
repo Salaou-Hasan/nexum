@@ -15,6 +15,18 @@ use std::collections::HashMap;
 pub enum Ty {
     Int,
     Float,
+    // Numeric tower (phase 11c): fixed-width types. `Int` is `I64` and
+    // `Float` is `F64` under other names; the widths are distinct types.
+    F32,
+    F64,
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
     Bool,
     Str,
     Unit,
@@ -36,6 +48,16 @@ impl Ty {
         match self {
             Ty::Int => "Int".to_string(),
             Ty::Float => "Float".to_string(),
+            Ty::F32 => "F32".to_string(),
+            Ty::F64 => "F64".to_string(),
+            Ty::I8 => "I8".to_string(),
+            Ty::I16 => "I16".to_string(),
+            Ty::I32 => "I32".to_string(),
+            Ty::I64 => "I64".to_string(),
+            Ty::U8 => "U8".to_string(),
+            Ty::U16 => "U16".to_string(),
+            Ty::U32 => "U32".to_string(),
+            Ty::U64 => "U64".to_string(),
             Ty::Bool => "Bool".to_string(),
             Ty::Str => "Str".to_string(),
             Ty::Unit => "Unit".to_string(),
@@ -48,7 +70,24 @@ impl Ty {
         }
     }
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Ty::Int | Ty::Float)
+        matches!(
+            self,
+            Ty::Int
+                | Ty::Float
+                | Ty::F32
+                | Ty::F64
+                | Ty::I8
+                | Ty::I16
+                | Ty::I32
+                | Ty::I64
+                | Ty::U8
+                | Ty::U16
+                | Ty::U32
+                | Ty::U64
+        )
+    }
+    pub fn is_float(&self) -> bool {
+        matches!(self, Ty::Float | Ty::F64 | Ty::F32)
     }
     /// Unknown, Error and Never are compatible with everything (recovery).
     pub fn compatible(&self, other: &Ty) -> bool {
@@ -590,6 +629,16 @@ fn tty(t: &ATypeExpr, records: &HashMap<String, Vec<(String, Ty)>>) -> Ty {
         ATypeExpr::Named(n) => match n.as_str() {
             "Int" => Ty::Int,
             "Float" => Ty::Float,
+            "F32" => Ty::F32,
+            "F64" => Ty::F64,
+            "I8" => Ty::I8,
+            "I16" => Ty::I16,
+            "I32" => Ty::I32,
+            "I64" => Ty::I64,
+            "U8" => Ty::U8,
+            "U16" => Ty::U16,
+            "U32" => Ty::U32,
+            "U64" => Ty::U64,
             "Bool" => Ty::Bool,
             "Str" => Ty::Str,
             "Unit" => Ty::Unit,
@@ -1773,6 +1822,67 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     }
                 }
             }
+            // Numeric conversion builtins (phase 11c). Each takes one numeric
+            // argument and yields the named target type. The `to_*_checked`
+            // forms have the same type and arity; the trap-on-failure is a
+            // codegen/runtime concern.
+            let conv_target: Option<Ty> = match callee.as_str() {
+                "i8" | "to_i8_checked" => Some(Ty::I8),
+                "i16" | "to_i16_checked" => Some(Ty::I16),
+                "i32" | "to_i32_checked" => Some(Ty::I32),
+                "i64" | "to_i64_checked" => Some(Ty::I64),
+                "u8" | "to_u8_checked" => Some(Ty::U8),
+                "u16" | "to_u16_checked" => Some(Ty::U16),
+                "u32" | "to_u32_checked" => Some(Ty::U32),
+                "u64" | "to_u64_checked" => Some(Ty::U64),
+                "f32" | "to_f32_checked" => Some(Ty::F32),
+                "f64" | "to_f64_checked" => Some(Ty::F64),
+                _ => None,
+            };
+            // Also accept the `to_*` (non-checked) spelling.
+            let conv_target = conv_target.or(match callee.as_str() {                "to_i8" => Some(Ty::I8),
+                "to_i16" => Some(Ty::I16),
+                "to_i32" => Some(Ty::I32),
+                "to_i64" => Some(Ty::I64),
+                "to_u8" => Some(Ty::U8),
+                "to_u16" => Some(Ty::U16),
+                "to_u32" => Some(Ty::U32),
+                "to_u64" => Some(Ty::U64),
+                "to_f32" => Some(Ty::F32),
+                "to_f64" => Some(Ty::F64),
+                _ => None,
+            });
+            if let Some(target) = conv_target {
+                if ha.len() != 1 {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(
+                            "T050",
+                            format!("{} expects exactly 1 argument, got {}", callee, ha.len()),
+                        )
+                        .with_span(e.span),
+                    );
+                }
+                if let Some(a0) = ha.first()
+                    && !a0.ty().is_numeric() && a0.ty() != Ty::Bool {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                "T050",
+                                format!(
+                                    "{} expects a numeric argument, found {}",
+                                    callee,
+                                    a0.ty().name()
+                                ),
+                            )
+                            .with_span(e.span),
+                        );
+                    }
+                return HirExpr::Call {
+                    callee: callee.clone(),
+                    args: ha,
+                    ty: target,
+                };
+            }
+
             if callee == "print" {
                 if ha.len() != 1 {
                     ctx.diagnostics.push(
@@ -2351,7 +2461,9 @@ fn binop_type(ctx: &mut Ctx, span: Span, op: BinOp, l: &Ty, r: &Ty) -> Ty {
                         ),
                     );
                 }
-                if *l == Ty::Float || *r == Ty::Float {
+                if *l == *r {
+                    l.clone()
+                } else if *l == Ty::Float || *r == Ty::Float {
                     Ty::Float
                 } else {
                     Ty::Int
@@ -2372,7 +2484,9 @@ fn binop_type(ctx: &mut Ctx, span: Span, op: BinOp, l: &Ty, r: &Ty) -> Ty {
                         format!("operand of arithmetic must be numeric, found {}", r.name()),
                     );
                 }
-                if *l == Ty::Float || *r == Ty::Float {
+                if *l == *r {
+                    l.clone()
+                } else if *l == Ty::Float || *r == Ty::Float {
                     Ty::Float
                 } else if *l == Ty::Unknown || *r == Ty::Unknown {
                     // At least one operand's type is not known yet; defer the
