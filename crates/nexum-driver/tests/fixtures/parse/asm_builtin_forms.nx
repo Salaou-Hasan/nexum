@@ -1,0 +1,9 @@
+# The `asm` builtin: the destination, the template, the constraints, the
+# inputs, and the target guard when there is one.
+let mut out = 0
+let x = 3
+asm(out, "mov $1, %rax", "=r,r", x)
+asm(out, "mov $1, %rax", "=r,r", x, "linux-x86_64")
+
+fn block(mut out2: Int, y: Int):
+    asm(out2, "add $1, %rax", "=r,r", y)
