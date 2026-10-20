@@ -22,7 +22,7 @@ pub fn clock_routines() -> String {
          entry:\n\
          \x20 %ts = alloca [16 x i8], align 8\n\
          \x20 %tsi = ptrtoint ptr %ts to i64\n\
-         \x20 %r = call i64 @nexum_sys_gettimeofday(i64 %tsi, i64 0)\n\
+         \x20 %r = call i64 @nexum_sys_gettimeofday(i64 %tsi, i64 0, i64 0)\n\
          \x20 %bad = icmp slt i64 %r, 0\n\
          \x20 br i1 %bad, label %fail, label %ok\n\
          fail:\n\

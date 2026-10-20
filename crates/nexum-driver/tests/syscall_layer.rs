@@ -163,7 +163,7 @@ struct Layout {
     /// True when the wrapper has to align the stack itself.
     aligns_stack: bool,
     /// The high half of the number, where the number needs two
-    /// instructions to build. Darwin on AArch64 puts the BSD number in
+    /// instructions to build. Darwin on x86-64 puts the class prefix in
     /// the high bits.
     number_high: Option<i64>,
 }
@@ -181,7 +181,9 @@ fn layout(target: &str) -> Layout {
                 result: "x0",
                 clobbers: &["x16", "x19"],
                 aligns_stack: false,
-                number_high: Some(0x2000),
+                // Darwin on AArch64 uses the plain BSD number, so there is
+                // no high half to build.
+                number_high: None,
             }
         } else {
             Layout {
@@ -647,7 +649,11 @@ fn the_number_is_an_immediate() {
         let lay = layout(target);
         for name in WRAPPERS {
             let block = only_asm_block(target, name);
-            let n = wrapper_number(name, &numbers_for(target));
+            let mut n = wrapper_number(name, &numbers_for(target));
+            // Darwin on x86-64 adds the class prefix 0x2000000.
+            if target.contains("macos") && target.contains("x86_64") {
+                n += 0x2000000;
+            }
             if lay.aligns_stack {
                 assert!(
                     block.text.contains(&format!("movq $${n}, %{}", lay.number)),
@@ -745,19 +751,32 @@ fn the_numbers_are_per_system() {
     assert_eq!(number_in("linux-x86_64", "mmap"), 9);
     assert_eq!(number_in("linux-x86_64", "munmap"), 11);
 
-    // Darwin.
-    assert_eq!(number_in("macos-x86_64", "read"), 3);
-    assert_eq!(number_in("macos-x86_64", "write"), 4);
-    assert_eq!(number_in("macos-x86_64", "open"), 5);
-    assert_eq!(number_in("macos-x86_64", "close"), 6);
-    assert_eq!(number_in("macos-x86_64", "lseek"), 199);
-    assert_eq!(number_in("macos-x86_64", "exit"), 1);
-    assert_eq!(number_in("macos-x86_64", "mmap"), 197);
-    assert_eq!(number_in("macos-x86_64", "munmap"), 73);
+    // Darwin on x86-64: the BSD number carries the class prefix 0x2000000
+    // (SYSCALL_CONSTRUCT_UNIX), so the same call has a different number.
+    assert_eq!(number_in("macos-x86_64", "read"), 0x2000003);
+    assert_eq!(number_in("macos-x86_64", "write"), 0x2000004);
+    assert_eq!(number_in("macos-x86_64", "open"), 0x2000005);
+    assert_eq!(number_in("macos-x86_64", "close"), 0x2000006);
+    assert_eq!(number_in("macos-x86_64", "lseek"), 0x20000C7);
+    assert_eq!(number_in("macos-x86_64", "exit"), 0x2000001);
+    assert_eq!(number_in("macos-x86_64", "mmap"), 0x20000C5);
+    assert_eq!(number_in("macos-x86_64", "munmap"), 0x2000049);
+
+    // Darwin on AArch64: the plain BSD number, no prefix.
+    assert_eq!(number_in("macos-aarch64", "read"), 3);
+    assert_eq!(number_in("macos-aarch64", "write"), 4);
+    assert_eq!(number_in("macos-aarch64", "open"), 5);
+    assert_eq!(number_in("macos-aarch64", "close"), 6);
+    assert_eq!(number_in("macos-aarch64", "lseek"), 199);
+    assert_eq!(number_in("macos-aarch64", "exit"), 1);
+    assert_eq!(number_in("macos-aarch64", "mmap"), 197);
+    assert_eq!(number_in("macos-aarch64", "munmap"), 73);
 
     // The number belongs to the system, not to the architecture - with one
-    // exception: Darwin on AArch64 puts the BSD number in the high bits, so
-    // the same call has a different number there.
+    // exception: Darwin on x86-64 puts the BSD number in the high bits (the
+    // class prefix 0x2000000, SYSCALL_CONSTRUCT_UNIX), so the same call has
+    // a different number there. On Darwin arm64 the number is the plain BSD
+    // number, and Mach traps are negative.
     assert_eq!(
         number_in("linux-aarch64", "read"),
         number_in("linux-x86_64", "read")
@@ -767,19 +786,19 @@ fn the_numbers_are_per_system() {
         number_in("linux-x86_64", "exit")
     );
     assert_eq!(
-        number_in("macos-aarch64", "read") - 0x2000000,
-        number_in("macos-x86_64", "read")
+        number_in("macos-x86_64", "read") - 0x2000000,
+        number_in("macos-aarch64", "read")
     );
     assert_eq!(
-        number_in("macos-aarch64", "exit") - 0x2000000,
-        number_in("macos-x86_64", "exit")
+        number_in("macos-x86_64", "exit") - 0x2000000,
+        number_in("macos-aarch64", "exit")
     );
 
     // And the two tables are not the same table: Darwin's read is Linux's
     // close, so a table copied from one into the other turns every read
     // into a close.
     assert_eq!(
-        number_in("macos-x86_64", "read"),
+        number_in("macos-x86_64", "read") - 0x2000000,
         number_in("linux-x86_64", "close")
     );
     assert_ne!(
