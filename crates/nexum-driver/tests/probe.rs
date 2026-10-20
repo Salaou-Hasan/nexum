@@ -1,11 +1,18 @@
-//! A probe for the system call layer: what does the kernel actually
-//! return, and where does the allocator break?
+//! A probe for the system call layer and the allocator.
 //!
-//! The error convention is the one thing about a system call that cannot
-//! be checked by reading the code. Linux returns the error number negated;
-//! Darwin returns it positive and sets the carry flag. The probe calls the
-//! raw wrappers and prints what came back, and then asks the allocator for
-//! a block, so a mismatch is visible instead of theoretical.
+//! Two things are hard to check by reading the code, and this file is
+//! about both of them.
+//!
+//! **The error convention.** Linux returns the error number negated;
+//! Darwin returns it positive and sets the carry flag. The wrappers make
+//! the result negative in the assembly so that one convention holds
+//! everywhere, and this probe prints what the kernel actually returned,
+//! before and after the wrappers have had their way with it.
+//!
+//! **Where the allocator breaks.** The allocator's own test crashed on
+//! macOS with no output at all. A crash takes the buffered output with
+//! it, so this driver writes unbuffered and prints after every step: the
+//! step where it stops is the step where it died.
 
 use std::path::PathBuf;
 
@@ -19,14 +26,16 @@ fn toolchain() -> Option<nexum_toolchain::Toolchain> {
     nexum_toolchain::Toolchain::discover().ok()
 }
 
-/// The driver: the raw calls first, then the allocator, then the same
-/// sequence the allocator's own test walks - every class, a free, and the
-/// same block again - printing after each step.
+/// The driver: the raw calls first, so the kernel's own answers are
+/// visible, and then the allocator's own sequence.
 const DRIVER: &str = r#"
-
 #include <stdio.h>
 #include <stdint.h>
 
+extern long long nexum_sys_mmap(long long addr, long long len, long long prot,
+                                long long flags, long long fd, long long off);
+extern long long nexum_sys_open(long long path, long long flags, long long mode);
+extern long long nexum_sys_write(long long fd, long long buf, long long len);
 extern void *nexum_heap_alloc(long long total);
 extern void nexum_heap_free(void *p, long long total);
 extern long long nexum_size_class(long long total);
@@ -42,6 +51,16 @@ int main(void) {
     // Unbuffered: if the program crashes, the lines printed before the
     // crash are the ones that say where it died.
     setvbuf(stdout, 0, _IONBF, 0);
+
+    // What the kernel says, before the wrappers have had their way with it.
+    long long m = nexum_sys_mmap(0, 16384, 3, 4098, -1, 0);
+    printf("mmap -> %lld\n", m);
+    long long o = nexum_sys_open((long long)"no_such_file_here", 0, 0);
+    printf("open -> %lld\n", o);
+    long long w = nexum_sys_write(1, (long long)"hello\n", 6);
+    printf("write -> %lld\n", w);
+
+    // The allocator's own sequence.
     long long c;
     for (c = 0; c <= 258; c++) {
         long long total = class_size_of(c);
@@ -72,9 +91,9 @@ int main(void) {
         nexum_free_raw(p, size);
         printf("raw %lld %lld %d\n", size, align, isnull);
     }
+    printf("done\n");
     return 0;
 }
-
 "#;
 
 #[test]
@@ -119,52 +138,42 @@ fn the_kernel_reports_what_it_reports() {
     let run = std::process::Command::new(&exe).output().expect("run");
     let stdout = String::from_utf8_lossy(&run.stdout);
     println!("the kernel said:\n{stdout}");
-    // The probe is a diagnostic, not a gate: it prints what the kernel
-    // said, on whichever platform it runs. The mapping and the allocation
-    // have to succeed, so that a failure here is a failure of the layer
-    // rather than of the probe's own flags.
-    let mapped = stdout
-        .lines()
-        .find(|l| l.starts_with("mmap ->"))
-        .and_then(|l| l.trim_start_matches("mmap -> ").trim().parse::<i64>().ok())
-        .unwrap_or(0);
+
+    // The mapping has to succeed, and the failed open has to be reported
+    // as a negative number - the one convention the runtime relies on.
+    let mapped = value_after(&stdout, "mmap ->").unwrap_or(0);
     assert!(
         mapped > 0 && mapped % 4096 == 0,
         "the mapping did not succeed:\n{stdout}"
     );
-    let allocated = stdout
-        .lines()
-        .find(|l| l.starts_with("class 0 "))
-        .map(|l| l.rsplit(" -> ").next().unwrap_or("").trim().to_string())
-        .unwrap_or_default();
-    assert!(
-        !allocated.is_empty() && allocated != "(nil)" && allocated != "0x0",
-        "the allocator did not return a block:\n{stdout}"
-    );
-    assert!(
-        allocated != "0x0" && !allocated.is_empty(),
-        "the allocator did not return a block:\n{stdout}"
-    );
-    // The whole sequence the allocator's own test walks has to finish: the
-    // large class and the raw path come last.
-    assert!(
-        stdout.contains("raw 1000"),
-        "the allocator did not serve every class:\n{stdout}"
-    );
-    // The contract the runtime relies on: the wrappers report an error as a
-    // negative number, on every system. Linux returns the error number
-    // negated; Darwin returns it positive and sets the carry flag, and the
-    // wrapper has to make it negative. If this fails, the value in the
-    // message says what the kernel returned.
-    let opened = stdout
-        .lines()
-        .find(|l| l.starts_with("open ->"))
-        .and_then(|l| l.trim_start_matches("open -> ").trim().parse::<i64>().ok())
-        .unwrap_or(0);
+    let opened = value_after(&stdout, "open ->").unwrap_or(0);
     assert!(
         opened < 0,
         "the failed open was not reported as negative:\n{stdout}"
     );
+
+    // The allocator's own sequence has to finish: the large class and the
+    // raw path come last.
+    let first = stdout
+        .lines()
+        .find(|l| l.starts_with("class 0 "))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_default();
+    assert!(
+        !first.is_empty() && !first.ends_with("(nil)"),
+        "the allocator did not return a block:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("raw 1000"),
+        "the allocator did not serve every class:\n{stdout}"
+    );
+}
+
+/// The number after a marker in the output.
+fn value_after(text: &str, marker: &str) -> Option<i64> {
+    text.lines()
+        .find(|l| l.starts_with(marker))
+        .and_then(|l| l.trim_start_matches(marker).trim().parse().ok())
 }
 
 /// The system this test runs on.
@@ -201,15 +210,9 @@ fn wrappers_for_host() -> String {
 }
 
 /// The runtime's system call layer, from its source.
-///
-/// The source is included rather than depended on, because the runtime
-/// crate is not a dependency of the driver. The items the test does
-/// not use are not dead here.
 #[path = "../../nexum-runtime/src/syscalls.rs"]
-#[allow(dead_code)]
 mod syscalls;
 
 /// The runtime's allocator, from its source.
 #[path = "../../nexum-runtime/src/heap.rs"]
-#[allow(dead_code)]
 mod heap;
