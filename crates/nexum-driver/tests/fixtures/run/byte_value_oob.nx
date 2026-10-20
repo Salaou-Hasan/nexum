@@ -1,0 +1,9 @@
+# A value that is not a byte stops the program with a panic (message on
+# stderr, exit code 1): the language has no `Option` to say "not a byte".
+# A constant that is not a byte is caught by the compiler instead.
+
+fn main():
+    print("before")
+    let v = 256
+    print(byte_from_value(v))
+    print("unreachable")

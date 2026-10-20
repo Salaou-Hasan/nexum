@@ -1,0 +1,12 @@
+# BENCH unit=ns-per-alloc ops=4000000 expect=4000000 note="the paired baseline of alloc_concat: the same loop, without the allocation"
+#
+# The same loop without the allocation, so the harness can subtract the
+# loop bookkeeping and the process start-up from alloc_concat.
+
+fn main():
+    let mut acc = 0
+    let mut i = 0
+    while i < 4000000:
+        acc = acc + 1
+        i = i + 1
+    print(acc)

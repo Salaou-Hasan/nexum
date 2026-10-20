@@ -81,18 +81,63 @@ Each of these was a pull request against `main`, written by one agent, in
 
 Phase 11a.2, one pull request each, disjoint files:
 
-| Agent | Owns |
-| ----- | ---- |
-| the allocator | `crates/nexum-runtime/src/heap.rs`, `tests/allocator.rs` |
-| the output | `crates/nexum-runtime/src/format.rs`, the codegen's `print` block, `tests/output.rs` |
-| the maths | `crates/nexum-runtime/src/math.rs`, `tests/math.rs` |
-| the bytes | `crates/nexum-runtime/src/bytes.rs`, the sema's builtin dispatch |
-| the layout | `crates/nexum-target/src/lib.rs` and its tests |
-| the benchmarks | `crates/nexum-driver/src/bin/nx-bench.rs`, `benchmarks/suite/` |
-| the syscall tests | `crates/nexum-driver/tests/syscall_layer.rs` |
+| Agent | Owns | State |
+| ----- | ---- | ----- |
+| the allocator | `crates/nexum-runtime/src/heap.rs`, `tests/allocator.rs` | **merged** |
+| the output | `crates/nexum-runtime/src/format.rs`, the codegen's `print` block, `tests/output.rs` | in flight |
+| the maths | `crates/nexum-runtime/src/math.rs`, `tests/math.rs` | in flight |
+| the bytes | `crates/nexum-runtime/src/bytes.rs`, the sema's builtin dispatch | **merged** |
+| the layout | `crates/nexum-target/src/lib.rs` and its tests | **merged** |
+| the benchmarks | `crates/nexum-driver/src/bin/nx-bench.rs`, `benchmarks/suite/` | in flight |
+| the syscall tests | `crates/nexum-driver/tests/syscall_layer.rs` | **merged** |
 
 The contract is `specs/contracts/phase-11a2.md`; the contract for the
 language phases is `specs/contracts/phase-11b-11f.md`.
+
+### What the phase has achieved so far
+
+A Linux program declared seventeen external symbols when the programme
+started. It declares **none** now: the heap is our allocator over the
+system calls, the string routines are ours, the file routines go through
+the kernel, the output is formatted by the runtime and written with a
+system call, and the panic exits through the kernel.
+
+| Piece | Before | Now |
+| ----- | ------ | --- |
+| the system call layer | none | Linux and macOS, x86-64 and AArch64 |
+| the string routines | libc | ours, on every platform |
+| the file routines | libc | the system calls, on the POSIX targets |
+| the heap | `malloc` | ours, on every platform |
+| the output | `printf` | ours, on the POSIX targets |
+| the float format | the C library's `%g` | ours, matched against it over four million values |
+
+The Windows build is still on the C library for its output and its file
+routines. Its heap is ours now, though: the allocator uses `VirtualAlloc`,
+which is the kernel and not the C library.
+
+## The one open item
+
+**The allocator fails on macOS.** Linux and Windows pass. The symptom is
+a crash in the first allocation, with no output.
+
+What is known:
+
+* The system call layer itself works on macOS: the file routines read and
+  write, and a probe that maps memory directly succeeds.
+* So the failure is in the allocator's own logic, and it is specific to
+  Darwin. The one thing that differs is the page size: 16384 there,
+  4096 everywhere else, and Darwin's `munmap` refuses a length that is
+  not a multiple of it.
+
+Two hypotheses were tested and ruled out by measurement rather than by
+argument: the operand numbering (the wrappers name the registers instead
+of numbering the operands) and the stack alignment (the AArch64 wrappers
+now align the stack for the call, as the x86-64 ones always did).
+
+The probe (`crates/nexum-driver/tests/probe.rs`) prints what the kernel
+returns for a mapping, for an open of a file that is not there, and for a
+write, and then asks the allocator for a block. It is a diagnostic, not a
+gate, and it exists because two rounds of guessing were wrong.
 
 ## The decisions this programme has taken so far
 
