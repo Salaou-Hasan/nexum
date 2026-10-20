@@ -25,7 +25,7 @@ jobs:
       - name: Build
         run: cargo build --workspace
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
       - name: Cross-target IR verification (host clang)
         if: runner.os == 'Linux' || runner.os == 'macOS' || runner.os == 'Windows'
         run: cargo test --test backend ir_verifies_for_all_targets
