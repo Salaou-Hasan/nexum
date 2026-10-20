@@ -241,6 +241,31 @@ fn stmt(out: &mut String, indent: usize, s: &Stmt) {
         StmtKind::Import { path } => {
             out.push_str(&format!("{}import {}\n", pad, path));
         }
+        StmtKind::Asm {
+            dest,
+            template,
+            constraints,
+            inputs,
+            target,
+        } => {
+            out.push_str(&format!("{}asm\n", pad));
+            let inner = " ".repeat(indent + 2);
+            out.push_str(&format!("{}asm-dest\n", inner));
+            expr(out, indent + 4, dest);
+            out.push_str(&format!("{}asm-template {}\n", inner, escape(template)));
+            out.push_str(&format!(
+                "{}asm-constraints {}\n",
+                inner,
+                escape(constraints)
+            ));
+            for i in inputs {
+                out.push_str(&format!("{}asm-input\n", inner));
+                expr(out, indent + 4, i);
+            }
+            if let Some(t) = target {
+                out.push_str(&format!("{}asm-target {}\n", inner, escape(t)));
+            }
+        }
     }
 }
 
