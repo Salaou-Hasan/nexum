@@ -131,6 +131,31 @@ fn run(source: &str, name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"))
 }
 
+/// The error codes of a program, analysed for a named target.
+///
+/// The target is the one the program is compiled for: the `asm` builtin's
+/// target guard is checked against it, so the same program is fine for one
+/// target and an error for another.
+fn error_codes(source: &str, target: &str, name: &str) -> Vec<String> {
+    let work = work_dir(name);
+    let src = work.join("program.nx");
+    std::fs::write(&src, source).expect("write the program");
+    let mut sm = nexum_source::SourceMap::new();
+    let (module, diags) = nexum_parser::load_module(&mut sm, &src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != nexum_diagnostics::Severity::Error),
+        "the program must parse: {diags:?}"
+    );
+    let sema = nexum_sema::analyze_for_target(&module, target);
+    sema.diagnostics
+        .iter()
+        .filter(|d| d.severity == nexum_diagnostics::Severity::Error)
+        .map(|d| d.code.0.to_string())
+        .collect()
+}
+
 /// The body of a function definition, by its name.
 ///
 /// The definition, not a call to it: a call site has the same name and no
@@ -278,5 +303,115 @@ fn the_stack_is_aligned_at_a_block() {
     assert_eq!(
         out, "0\n",
         "the stack is not aligned at the block: it is at the wrong offset"
+    );
+}
+
+/// The target guard is checked against the target the program is compiled
+/// for.
+///
+/// The guard is an assertion and not a filter: a block that is written for
+/// another target is an error, and the block is not silently dropped. The
+/// check is against the target being built and not against the host, so a
+/// cross build is checked against the target it builds for.
+#[test]
+fn the_target_guard_is_checked_against_the_target_being_compiled() {
+    let source = "fn main():\n    let mut out = 0\n    let x = 21\n    \
+                  asm(out, \"movq %rdi, %rax\", \"={rax},{rdi}\", x, \"linux-x86_64\")\n    \
+                  print(out)\n";
+    // The block is written for linux-x86_64, so that is the target it is
+    // fine for.
+    let ok = error_codes(source, "linux-x86_64", "guard_ok");
+    assert!(ok.is_empty(), "the guard must match its target: {ok:?}");
+    // Every other target is an error.
+    for other in [
+        "windows-x86_64",
+        "linux-aarch64",
+        "macos-x86_64",
+        "macos-aarch64",
+    ] {
+        let codes = error_codes(source, other, "guard_bad");
+        assert!(
+            codes.contains(&"T051".to_string()),
+            "the guard must be checked against {other}: {codes:?}"
+        );
+    }
+}
+
+/// The destination is a mutable variable of an integer type.
+///
+/// The block writes its result into the destination, so a binding that
+/// cannot be written to is not a destination, and a value is not one
+/// either.
+#[test]
+fn the_destination_must_be_a_mutable_integer() {
+    // A mutable variable of an integer type is a destination.
+    let ok = error_codes(&program(), "windows-x86_64", "dest_ok");
+    assert!(ok.is_empty(), "a mutable integer is a destination: {ok:?}");
+
+    // An immutable one is not.
+    let immutable = "fn main():\n    let out = 0\n    \
+                     asm(out, \"movq %rdi, %rax\", \"={rax},{rdi}\", 1)\n";
+    let codes = error_codes(immutable, "windows-x86_64", "dest_immutable");
+    assert!(
+        codes.contains(&"T051".to_string()),
+        "an immutable binding is not a destination: {codes:?}"
+    );
+
+    // A value is not a variable.
+    let value = "fn main():\n    let mut out = 0\n    \
+                 asm(1, \"movq %rdi, %rax\", \"={rax},{rdi}\", 1)\n";
+    let codes = error_codes(value, "windows-x86_64", "dest_value");
+    assert!(
+        codes.contains(&"T051".to_string()),
+        "a value is not a destination: {codes:?}"
+    );
+}
+
+/// The template and the constraint string are string literals.
+///
+/// The parser takes them out of the literals that were written, and leaves
+/// the empty string when the argument was not a literal. An empty template
+/// is an error, so a template that is not a literal never reaches the
+/// code generator.
+#[test]
+fn the_template_and_the_constraints_must_be_string_literals() {
+    let template = "fn main():\n    let mut out = 0\n    \
+                    asm(out, 42, \"={rax},{rdi}\", 1)\n";
+    let codes = error_codes(template, "windows-x86_64", "template");
+    assert!(
+        codes.contains(&"T051".to_string()),
+        "a template that is not a literal is an error: {codes:?}"
+    );
+
+    let constraints = "fn main():\n    let mut out = 0\n    \
+                      asm(out, \"movq %rdi, %rax\", 1, 1)\n";
+    let codes = error_codes(constraints, "windows-x86_64", "constraints");
+    assert!(
+        codes.contains(&"T051".to_string()),
+        "a constraint string that is not a literal is an error: {codes:?}"
+    );
+}
+
+/// The constraint string names one operand more than there are inputs.
+///
+/// The destination is the first output, so the number of constraints
+/// before the first `~{` is one more than the number of inputs. The
+/// clobbers are not operands, so they are not counted.
+#[test]
+fn the_constraint_string_names_one_operand_more_than_there_are_inputs() {
+    // One input, two constraints: the destination and the input. The
+    // clobber is not an operand.
+    let ok = "fn main():\n    let mut out = 0\n    let x = 21\n    \
+              asm(out, \"movq %rdi, %rax\", \"={rax},{rdi},~{rcx}\", x)\n";
+    let codes = error_codes(ok, "windows-x86_64", "count_ok");
+    assert!(codes.is_empty(), "the counts must agree: {codes:?}");
+
+    // Two inputs and two constraints: one too few.
+    let bad = "fn main():\n    let mut out = 0\n    let x = 21\n    \
+               asm(out, \"movq %rdi, %rax\", \"={rax},{rdi}\", x, x)\n";
+    let codes = error_codes(bad, "windows-x86_64", "count_bad");
+    assert!(
+        codes.contains(&"T051".to_string()),
+        "the constraint string must name one operand more than the inputs: {codes:?}"
     );
 }

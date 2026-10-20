@@ -946,6 +946,30 @@ fn analyze_block(ctx: &mut Ctx, scope: &mut Scope, stmts: &[Stmt]) -> Vec<HirStm
                 /* imports are resolved at module level before analysis */
             }
             StmtKind::Fn { .. } => { /* nested functions not supported yet */ }
+            StmtKind::Asm {
+                dest,
+                template,
+                constraints,
+                inputs,
+                target,
+            } => {
+                // The inline-assembly block. The parser gives it a statement
+                // of its own, so the checks are made here and not in the
+                // builtin dispatch.
+                let h = analyze_asm(
+                    ctx,
+                    scope,
+                    &AsmBlock {
+                        span: s.span,
+                        dest,
+                        template,
+                        constraints,
+                        inputs,
+                        target,
+                    },
+                );
+                out.push(HirStmt::Expr(h));
+            }
         }
     }
     out
@@ -1465,9 +1489,10 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     ty: Ty::Unit,
                 };
             }
-            if callee == "asm" {
-                return analyze_asm(ctx, scope, e, &ha, args);
-            }
+            // `asm` is not here: the parser gives the inline-assembly
+            // block a statement of its own, so the block is analysed by
+            // `analyze_block`, not by this function. A call to a function
+            // called `asm` is a call to a function that does not exist.
             if callee == "list_new" {
                 if !ha.is_empty() {
                     ctx.diagnostics.push(
@@ -1881,45 +1906,55 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
     }
 }
 
+/// The parts of an inline-assembly block, as the parser gives them.
+///
+/// The parser takes the template, the constraint string and the target
+/// guard out of the string literals that were written, so the block
+/// arrives here already in the shape the checks work on.
+struct AsmBlock<'a> {
+    /// The span of the whole block.
+    span: Span,
+    /// The destination: the variable the result of the block goes to.
+    dest: &'a Expr,
+    /// The assembly text.
+    template: &'a str,
+    /// The constraint string.
+    constraints: &'a str,
+    /// The inputs, in the order the constraint string names them.
+    inputs: &'a [Expr],
+    /// The target guard, when there is one.
+    target: &'a Option<String>,
+}
+
 /// The `asm` builtin: `asm(dest, template, constraints, inputs...)`.
 ///
-/// * `dest` is a mutable variable of an integer type - where the result of
-///   the block goes.
-/// * `template` and `constraints` are string literals: the assembly text and
-///   LLVM's own constraint string.
-/// * the rest are the inputs, the integers the constraint string names.
+/// The parser gives the block a shape of its own, so the checks are made
+/// here and not in the builtin dispatch:
 ///
-/// An optional trailing string literal is the target guard: it names the
-/// target the block is written for. The guard is a compile-time check, so it
-/// does not reach the MIR - a block whose guard does not name the target the
-/// program is compiled for is an error, and the block becomes a panic.
-fn analyze_asm(
-    ctx: &mut Ctx,
-    scope: &Scope,
-    e: &Expr,
-    ha: &[HirExpr],
-    args: &[Expr],
-) -> HirExpr {
-    // The destination, the template and the constraints are always there.
-    if ha.len() < 3 {
-        return asm_error(
-            ctx,
-            e.span,
-            format!(
-                "asm expects at least 3 arguments (destination, template, constraints), got {}",
-                ha.len()
-            ),
-        );
-    }
-
-    // Argument zero: the destination. It has to be a variable, of an integer
-    // type, and mutable: the block writes its result into it.
-    let (dest, dest_ty) = match &ha[0] {
+/// * the destination is a variable of an integer type, and it is mutable -
+///   the block writes its result into it;
+/// * the template and the constraint string are not empty. The parser
+///   takes them out of the string literals that were written, and leaves
+///   the empty string when the argument was not a literal;
+/// * the inputs are the integers the constraint string names;
+/// * the constraint string names one operand per constraint, and the
+///   destination is the first output, so the count is one more than the
+///   number of inputs;
+/// * the target guard, when there is one, names the target the program is
+///   compiled for.
+///
+/// The guard is a compile-time check, so it does not reach the MIR: a block
+/// whose guard names another target is an error, and the block becomes a
+/// panic - the way the other builtins report a type error.
+fn analyze_asm(ctx: &mut Ctx, scope: &mut Scope, block: &AsmBlock<'_>) -> HirExpr {
+    // The destination: a variable, of an integer type, and mutable.
+    let dh = analyze_expr(ctx, scope, block.dest);
+    let (dest_name, dest_ty) = match &dh {
         HirExpr::Var(name, ty) => {
             if !ty.compatible(&Ty::Int) {
                 return asm_error(
                     ctx,
-                    args[0].span,
+                    block.dest.span,
                     format!("the asm destination must be an integer, found {}", ty.name()),
                 );
             }
@@ -1927,7 +1962,7 @@ fn analyze_asm(
                 Some(info) if !info.mutable => {
                     return asm_error(
                         ctx,
-                        args[0].span,
+                        block.dest.span,
                         format!(
                             "the asm destination `{}` must be a mutable variable (declare it with `let mut`)",
                             name
@@ -1938,7 +1973,7 @@ fn analyze_asm(
                 None => {
                     return asm_error(
                         ctx,
-                        args[0].span,
+                        block.dest.span,
                         format!("the asm destination `{}` is not a variable", name),
                     );
                 }
@@ -1948,7 +1983,7 @@ fn analyze_asm(
         other => {
             return asm_error(
                 ctx,
-                args[0].span,
+                block.dest.span,
                 format!(
                     "the asm destination must be a variable, found {}",
                     other.ty().name()
@@ -1957,110 +1992,78 @@ fn analyze_asm(
         }
     };
 
-    // Arguments one and two: the template and the constraint string. Both
-    // have to be string literals: the MIR carries them as strings, so the
+    // The template and the constraint string. The parser leaves the empty
+    // string when the argument was not a string literal, and an empty
+    // template is not a template: the MIR carries both as strings, so the
     // compiler has to know them now.
-    let template = match asm_string(ctx, &ha[1], &args[1], "template") {
-        Ok(s) => s,
-        Err(h) => return h,
-    };
-    let constraints = match asm_string(ctx, &ha[2], &args[2], "constraint string") {
-        Ok(s) => s,
-        Err(h) => return h,
-    };
+    if block.template.is_empty() {
+        return asm_error(
+            ctx,
+            block.span,
+            "the asm template must be a non-empty string literal".to_string(),
+        );
+    }
+    if block.constraints.is_empty() {
+        return asm_error(
+            ctx,
+            block.span,
+            "the asm constraint string must be a non-empty string literal".to_string(),
+        );
+    }
 
-    // The target guard is the last argument when it is a string: the inputs
-    // are integers, so a string among them can only be the guard.
-    let rest = &ha[3..];
-    let (guard, inputs) = match rest.last() {
-        Some(HirExpr::Str(_, _)) => {
-            let (inputs, guard) = rest.split_at(rest.len() - 1);
-            (Some(&guard[0]), inputs)
-        }
-        _ => (None, rest),
-    };
-    if let Some(g) = guard {
-        let span = args[3 + inputs.len()].span;
-        let name = match g {
-            HirExpr::Str(s, _) => s.clone(),
-            _ => {
-                return asm_error(
-                    ctx,
-                    span,
-                    "the asm target guard must be a string literal".to_string(),
-                );
-            }
-        };
-        if name != ctx.target {
-            return asm_error(
-                ctx,
-                span,
-                format!(
-                    "the asm block is written for `{}`, but this program is compiled for `{}`",
-                    name, ctx.target
-                ),
-            );
-        }
+    // The target guard: it names the target the block is written for. The
+    // guard is an assertion and not a filter: a block whose guard names
+    // another target is an error, and the block is not silently dropped.
+    if let Some(name) = block.target
+        && name != &ctx.target
+    {
+        return asm_error(
+            ctx,
+            block.span,
+            format!(
+                "the asm block is written for `{}`, but this program is compiled for `{}`",
+                name, ctx.target
+            ),
+        );
     }
 
     // The inputs: the integers the constraint string names.
-    for (i, a) in inputs.iter().enumerate() {
-        if !a.ty().compatible(&Ty::Int) {
+    let mut hi = Vec::with_capacity(block.inputs.len());
+    for e in block.inputs {
+        let h = analyze_expr(ctx, scope, e);
+        if !h.ty().compatible(&Ty::Int) {
             return asm_error(
                 ctx,
-                args[3 + i].span,
-                format!("the asm inputs must be integers, found {}", a.ty().name()),
+                e.span,
+                format!("the asm inputs must be integers, found {}", h.ty().name()),
             );
         }
+        hi.push(h);
     }
 
     // The constraint string names one operand per constraint: the
     // destination is the first output, and the inputs follow it. The
     // clobbers are not operands, so the count stops at the first one.
-    let operands = asm_operand_count(&constraints);
-    if operands != inputs.len() + 1 {
+    let operands = asm_operand_count(block.constraints);
+    if operands != hi.len() + 1 {
         return asm_error(
             ctx,
-            args[2].span,
+            block.span,
             format!(
                 "the asm constraint string names {} operand(s), but the block has {} (the destination and {} input(s))",
                 operands,
-                inputs.len() + 1,
-                inputs.len()
+                hi.len() + 1,
+                hi.len()
             ),
         );
     }
 
     HirExpr::Asm {
-        dest,
-        template,
-        constraints,
-        inputs: inputs.to_vec(),
+        dest: dest_name,
+        template: block.template.to_string(),
+        constraints: block.constraints.to_string(),
+        inputs: hi,
         ty: dest_ty,
-    }
-}
-
-/// The value of a string argument of the `asm` builtin, or the failed check.
-fn asm_string(
-    ctx: &mut Ctx,
-    h: &HirExpr,
-    arg: &Expr,
-    what: &str,
-) -> Result<String, HirExpr> {
-    if !h.ty().compatible(&Ty::Str) {
-        return Err(asm_error(
-            ctx,
-            arg.span,
-            format!("the asm {} must be a Str, found {}", what, h.ty().name()),
-        ));
-    }
-    match h {
-        HirExpr::Str(s, _) => Ok(s.clone()),
-        _ => Err(asm_error(
-            ctx,
-            arg.span,
-            format!("the asm {} must be a string literal", what),
-        )),
     }
 }
 
