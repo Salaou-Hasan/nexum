@@ -176,7 +176,8 @@ fn pow_inputs() -> Vec<(f64, f64)> {
 /// program that runs both over the table and writes the answers down.
 fn harness_ir(xs: &[f64], pows: &[(f64, f64)]) -> String {
     let mut s = String::new();
-    s.push_str("target triple = \"x86_64-pc-windows-msvc\"\n\n");
+    // No target triple: the module is built for the host, so the
+    // harness links against the host's C library on every platform.
     for (_, c) in C_FUNCTIONS {
         s.push_str(&format!("declare double @{c}(double)\n"));
     }
@@ -384,8 +385,21 @@ fn run_harness(tag: &str, xs: &[f64], pows: &[(f64, f64)]) -> Option<Results> {
     std::fs::write(&ll, harness_ir(xs, pows)).expect("write ir");
     nexum_toolchain::verify_ir(&tc.clang, ll.to_str().unwrap())
         .unwrap_or_else(|e| panic!("the maths IR does not verify:\n{e}"));
-    nexum_toolchain::run_clang(&tc.clang, ll.to_str().unwrap(), exe.to_str().unwrap())
+    // The harness calls the C library's own exp, log, tanh, erf and sqrt as
+    // the reference, so it links against them: libm on Linux, and libSystem
+    // everywhere else.
+    let mut link = Command::new(&tc.clang);
+    link.arg(ll.to_str().unwrap()).arg("-o").arg(exe.to_str().unwrap());
+    #[cfg(target_os = "linux")]
+    link.arg("-lm");
+    let linked = link
+        .output()
         .unwrap_or_else(|e| panic!("the maths harness does not link:\n{e}"));
+    assert!(
+        linked.status.success(),
+        "the maths harness does not link:\n{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
     let _ = std::fs::remove_file(&out);
     let run = Command::new(&exe)
         .arg(out.to_str().unwrap())
