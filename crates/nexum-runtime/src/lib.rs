@@ -65,7 +65,11 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
     s.push_str(&strings::string_routines());
     s.push_str(&heap::allocator_ir(os, arch));
     s.push_str(&bytes::byte_routines());
-    s.push_str(&clock::clock_routines());
+    // The clock reaches the system through the call layer, and Windows has
+    // no call layer yet, so the clock is POSIX only for now.
+    if !msvc {
+        s.push_str(&clock::clock_routines());
+    }
     s.push_str(&math::math_routines());
     s.push_str(&format::format_routines(!msvc));
 
