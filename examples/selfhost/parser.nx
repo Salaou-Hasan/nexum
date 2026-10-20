@@ -15,6 +15,13 @@
 # Scope: functions, `let`, assignment, expression statements, `return`,
 # `if`/`else`, `while`, `for`, record declarations, `import` and type
 # annotations. Path assignments (`a.b[i] = v`) are not parsed yet.
+#
+# The inline assembly builtin is parsed as a statement: `asm(dest, template,
+# constraints, inputs...)`. The destination is the variable the result goes
+# to, the template and the constraints are strings, and the rest are the
+# inputs. A last argument that is a string literal names the target the
+# block is for. The normalised form of the block is pinned by
+# `specs/contracts/phase-11b-inline-asm.md`.
 
 import "lexer_lib.nx"
 
@@ -702,6 +709,57 @@ fn parse_path_assign_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) 
         i = i - 1
     return add_node(nodes, kind, op, root_node, chain, value)
 
+# The inline assembly builtin: `asm(dest, template, constraints, inputs...)`.
+# The destination is the variable the result of the block goes to, the
+# template and the constraints are strings, and the rest are the inputs, in
+# the order the constraint string names them. A last argument that is a
+# string literal is the target guard: it names the target the block is for.
+#
+# The arguments are collected in a local list first, for the same reason the
+# arguments of a call are: a nested call appends its own arguments to the
+# side table while this one is being parsed, so the arguments are only
+# contiguous once the whole list has been parsed.
+fn parse_asm_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
+    pos = pos + 1
+    pos = pos + 1
+    let args = list_new()
+    list_push(args, 0)
+    let mut more = true
+    while more:
+        let kk = kind_at(tokens, pos)
+        if kk == "RParen":
+            more = false
+        else:
+            if kk == "Eof":
+                more = false
+            else:
+                let arg = parse_or(nodes, extra, tokens, pos)
+                list_push(args, arg)
+                if kind_at(tokens, pos) == "Comma":
+                    pos = pos + 1
+                else:
+                    more = false
+    if kind_at(tokens, pos) == "RParen":
+        pos = pos + 1
+    # The arguments go into the side table, in the order they were written.
+    let start = list_len(extra)
+    let mut count = 0
+    let mut i = 1
+    let total = list_len(args)
+    while i < total:
+        list_push(extra, list_get(args, i))
+        count = count + 1
+        i = i + 1
+    # The inputs are the arguments from the third on. The target guard, when
+    # there is one, is the last argument and it is a string literal, so the
+    # inputs are the ones before it.
+    let mut ninputs = count - 3
+    if ninputs > 0:
+        let last = list_get(nodes, list_get(extra, start + count - 1))
+        if last.kind == "str":
+            ninputs = ninputs - 1
+    return add_node(nodes, "asm", "", start, count, ninputs)
+
 # A statement: one of the keyword forms, or an assignment, or an expression.
 fn parse_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
     let k = kind_at(tokens, pos)
@@ -722,6 +780,11 @@ fn parse_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
     if k == "KwImport":
         return parse_import_stmt(nodes, extra, tokens, pos)
     if k == "Ident":
+        # The inline assembly builtin: `asm(dest, template, constraints,
+        # inputs...)`. It is a statement, so it is only recognised here and
+        # not in an expression.
+        if text_at(tokens, pos) == "asm" and kind_at(tokens, pos + 1) == "LParen":
+            return parse_asm_stmt(nodes, extra, tokens, pos)
         # `name = value` and `name op= value` are assignments; anything else
         # that starts with a name is an expression statement.
         let k1 = kind_at(tokens, pos + 1)
@@ -736,6 +799,86 @@ fn parse_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
     return add_node(nodes, "expr", "", e, 0, 0)
 
 # --- the normalized form ---
+
+# An expression on one line: the words the normalized form prints for it,
+# joined by single spaces. The `asm` block puts the destination and the
+# inputs on one line each, so the expression has to fit on one.
+fn expr_inline(nodes: List, extra: List, idx: Int) -> Str:
+    let n = list_get(nodes, idx)
+    if n.kind == "call":
+        let mut out = concat("call ", n.text)
+        let mut i = 0
+        while i < n.b:
+            out = concat(concat(out, " "), expr_inline(nodes, extra, list_get(extra, n.a + i)))
+            i = i + 1
+        return out
+    if n.kind == "binop":
+        let lhs = expr_inline(nodes, extra, n.a)
+        let rhs = expr_inline(nodes, extra, n.b)
+        return concat(concat(concat("binop ", n.text), " "), concat(concat(lhs, " "), rhs))
+    if n.kind == "unop":
+        return concat(concat(concat("unop ", n.text), " "), expr_inline(nodes, extra, n.a))
+    if n.kind == "field":
+        return concat(concat(concat("field ", n.text), " "), expr_inline(nodes, extra, n.a))
+    if n.kind == "index":
+        let base = expr_inline(nodes, extra, n.a)
+        let ix = expr_inline(nodes, extra, n.b)
+        return concat(concat("index ", base), concat(" ", ix))
+    if n.kind == "str":
+        return concat("str ", escape(n.text))
+    if n.kind == "array":
+        if n.text == "":
+            # An array literal: the elements follow.
+            let mut out = "array"
+            let mut i = 0
+            while i < n.b:
+                out = concat(concat(out, " "), expr_inline(nodes, extra, list_get(extra, n.a + i)))
+                i = i + 1
+            return out
+        # An array type: the element type follows.
+        return concat(concat(concat("array ", n.text), " "), expr_inline(nodes, extra, n.a))
+    # The leaves and the default: the kind and its text.
+    return concat(concat(n.kind, " "), n.text)
+
+# The text of a string argument of the `asm` builtin: the content of the
+# literal, escaped so that it occupies exactly one line. An argument that
+# is not a literal is printed as the expression it is.
+fn asm_text(nodes: List, extra: List, idx: Int) -> Str:
+    let n = list_get(nodes, idx)
+    if n.kind == "str":
+        return escape(n.text)
+    return expr_inline(nodes, extra, idx)
+
+# The `asm` block. The lines are the ones the contract pins:
+#
+#   asm
+#     asm-dest <the destination expression>
+#     asm-template <the template>
+#     asm-constraints <the constraints>
+#     asm-input <the input expression>
+#     asm-target <the target>          (only when there is one)
+#
+# `start` is where the arguments start in the side table, `count` is how
+# many there are and `ninputs` is how many of them are the inputs.
+fn print_asm(nodes: List, extra: List, start: Int, count: Int, ninputs: Int, depth: Int):
+    let pad = spaces(depth + 2)
+    if count > 0:
+        let dest = list_get(extra, start)
+        print(concat(pad, concat("asm-dest ", expr_inline(nodes, extra, dest))))
+    if count > 1:
+        let template = list_get(extra, start + 1)
+        print(concat(pad, concat("asm-template ", asm_text(nodes, extra, template))))
+    if count > 2:
+        let constraints = list_get(extra, start + 2)
+        print(concat(pad, concat("asm-constraints ", asm_text(nodes, extra, constraints))))
+    let mut i = 0
+    while i < ninputs:
+        let input = list_get(extra, start + 3 + i)
+        print(concat(pad, concat("asm-input ", expr_inline(nodes, extra, input))))
+        i = i + 1
+    if count > 3 + ninputs:
+        let target = list_get(extra, start + 3 + ninputs)
+        print(concat(pad, concat("asm-target ", asm_text(nodes, extra, target))))
 
 fn print_statements(nodes: List, extra: List, start: Int, count: Int, depth: Int):
     let mut i = 0
@@ -771,6 +914,10 @@ fn print_node(nodes: List, extra: List, idx: Int, depth: Int):
     if n.kind == "call":
         print(concat(concat(pad, "call "), n.text))
         print_statements(nodes, extra, n.a, n.b, depth + 2)
+        return
+    if n.kind == "asm":
+        print(concat(pad, "asm"))
+        print_asm(nodes, extra, n.a, n.b, n.c, depth)
         return
     if n.kind == "field":
         print(concat(concat(pad, "field "), n.text))
