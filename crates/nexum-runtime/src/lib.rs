@@ -64,6 +64,7 @@ pub fn runtime_ir(os: &str, arch: &str) -> String {
     s.push_str(&strings::string_routines());
     s.push_str(&heap::allocator_ir(os, arch));
     s.push_str(&bytes::byte_routines());
+    s.push_str(&math::math_routines());
     s.push_str(&format::format_routines(!msvc));
 
     if msvc {
