@@ -35,7 +35,7 @@ the marker that says the block is unsafe - are carried in the arguments.
 
 ```
 let mut out = 0
-asm(out, "mov $1, %rax", "=r,r", x, y)
+asm(out, "mov $value, %rax", "=r,r", 42)
 ```
 
 The arguments, in order:
@@ -54,7 +54,13 @@ positional form LLVM wants. A literal dollar is written twice.
 The constraint string is the user's, and it must name the operands in
 LLVM's order: the outputs first, then the inputs, then the clobbers. The
 result of the block is the value of the first output, and the destination
-is the variable in argument zero.
+is the variable in argument zero. So the number of constraints before the
+first `~{` is one more than the number of inputs: the destination is the
+first output.
+
+The target guard is **the last argument when it is a string literal**,
+and the inputs are the integers before it. The inputs are integers, so
+there is no other way to read the argument list.
 
 **The safety marker.** The builtin is only accepted inside an `unsafe`
 region, and phase 11d introduces the region. Until then, the builtin is
