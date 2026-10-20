@@ -805,25 +805,28 @@ fn parse_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
 
 # --- the normalized form ---
 
-# An expression on one line is not needed here: the `asm` block prints the
-# destination and the inputs with the ordinary node printer, one level
-# under the label.
+# The text of a string argument of the `asm` builtin: the content of the
+# literal, escaped so that it occupies exactly one line. An argument that
+# is not a literal is not a string: the Rust front end reads it as the
+# empty string.
 fn asm_text(nodes: List, extra: List, idx: Int) -> Str:
     let n = list_get(nodes, idx)
     if n.kind == "str":
         return escape(n.text)
-    # An argument that is not a string literal is not a string: the Rust
-    # front end reads it as the empty string.
     return ""
 
-# The `asm` block. The lines are the ones the contract pins:
+# The `asm` block. The lines are the ones the contract pins, with the
+# destination and the inputs as the expressions they are, one level under
+# the label:
 #
 #   asm
-#     asm-dest <the destination expression>
-#     asm-template <the template>
-#     asm-constraints <the constraints>
-#     asm-input <the input expression>
-#     asm-target <the target>          (only when there is one)
+#     asm-dest
+#       var out
+#     asm-template mov $1, %rax
+#     asm-constraints =r,r
+#     asm-input
+#       var x
+#     asm-target linux-x86_64          (only when there is one)
 #
 # `start` is where the arguments start in the side table, `count` is how
 # many there are and `ninputs` is how many of them are the inputs.
