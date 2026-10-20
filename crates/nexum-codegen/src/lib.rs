@@ -1,6 +1,6 @@
 //! Backend: MIR -> LLVM IR text (bootstrap).
 
-use nexum_mir::{BinOp as MBin, Const, Instr, MirFn, MirModule, Term, UnOp as MUn};
+use nexum_mir::{BinOp as MBin, Const, Instr, MirFn, MirModule, Term, UnOp as MUn, Value};
 use nexum_sema::Ty;
 use nexum_target::TargetSpec;
 use std::collections::HashMap;
@@ -286,12 +286,17 @@ fn emit_fn(
     let mut managed_temps: Vec<(usize, Ty)> = Vec::new(); // (dest, ty)
     let mut elem_temps: Vec<(usize, String, Ty)> = Vec::new(); // (ordinal, reg, elem ty)
     let mut agg_temps: Vec<(usize, String, Ty)> = Vec::new(); // (ordinal, reg, ty)
+    // Whether the function contains an assembly block. A block needs a
+    // frame: a function without one is entered with the stack at 8 modulo
+    // 16, and a block that reaches the kernel wants 16.
+    let mut has_asm = false;
     {
         let mut ord = 0usize;
         for b in &f.blocks {
             for in_ in &b.instrs {
                 match in_ {
                     Instr::Alloca { dest, ty } => hoisted.push((dest.0, ty.clone())),
+                    Instr::Asm { .. } => has_asm = true,
                     Instr::IndexGet { base, .. } => {
                         let bt = vt.get(&base.0).cloned().unwrap_or(Ty::Unknown);
                         idx_plan.push((ord, format!("%isp{}", ord), llvm_ty(&bt)));
@@ -386,6 +391,24 @@ fn emit_fn(
         buf.push_str(&format!("bb{}:\n", b.id.0));
         if first_block {
             first_block = false;
+            if has_asm {
+                // The frame anchor.
+                //
+                // A function without a frame is entered with the stack at 8
+                // modulo 16, and a function with one at 0 modulo 16. The
+                // system call instruction wants 16, and the runtime's own
+                // wrappers align the stack by hand because they cannot count
+                // on a frame. A block in a Nexum function can count on one,
+                // because the compiler gives the function one.
+                buf.push_str("  %vasmframe = alloca [16 x i8], align 16\n");
+                // The slot is written to, so that neither the slot nor the
+                // frame can be taken away: an alloca nobody writes to is
+                // dead, and a function without a frame has a stack at 8
+                // modulo 16.
+                buf.push_str(
+                    "  store volatile [16 x i8] zeroinitializer, ptr %vasmframe\n",
+                );
+            }
             for (dest, ty) in &hoisted {
                 let r = format!("%v{}", dest);
                 valreg.insert(*dest, r.clone());
@@ -940,6 +963,27 @@ fn emit_fn(
                         }
                     }
                 }
+                Instr::Asm {
+                    dest,
+                    template,
+                    constraints,
+                    inputs,
+                    ty,
+                } => {
+                    emit_asm_block(
+                        buf,
+                        &AsmBlock {
+                            dest: *dest,
+                            template,
+                            constraints,
+                            inputs,
+                            ty,
+                        },
+                        &valreg,
+                        vt,
+                        ordinal,
+                    );
+                }
                 Instr::Record { dest, name, fields } => {
                     let mut cur = "undef".to_string();
                     for (i, fv) in fields.iter().enumerate() {
@@ -1290,4 +1334,414 @@ fn emit_fn(
         }
     }
     buf.push_str("}\n\n");
+}
+
+/// One inline-assembly block, in the shape the code generator sees it.
+struct AsmBlock<'a> {
+    /// Where the result goes.
+    dest: Value,
+    /// The assembly text.
+    template: &'a str,
+    /// The constraint string.
+    constraints: &'a str,
+    /// The inputs, in the order the constraint string names them.
+    inputs: &'a [Value],
+    /// The type of the result.
+    ty: &'a Ty,
+}
+
+/// The lowering of an inline-assembly block.
+///
+/// One LLVM instruction:
+///
+/// ```llvm
+/// %r = call i64 asm sideeffect "<template>", "<constraints>"(<operands>)
+/// ```
+///
+/// * The operands are the **inputs**, in the order the constraint string
+///   names them. The output is not an argument: it comes back in the result
+///   of the call, and the constraint string counts the output as operand
+///   zero, so an argument that is one too many or one too few is silent.
+///   A `~{reg}` clobber is not an argument either, so a block that clobbers
+///   three registers still takes one argument per input.
+/// * The registers the operands are pinned to are the ones the constraint
+///   string names. That is LLVM's work, and the constraint string is passed
+///   on unchanged: it is the contract between the program and the
+///   assembler.
+/// * The newlines of the template are written `\0A`. LLVM's inline-assembly
+///   template does not interpret `\n`, so a newline that is not escaped
+///   reaches the assembler as a backslash and an `n`.
+/// * The result is stored into the destination variable.
+///
+/// The template is the program's own text and is passed on as it is, with
+/// the newlines escaped: it is in LLVM's positional form (`$0` is the
+/// output, `$1` the first input), because the instruction carries no
+/// operand names with it and there is nothing to rewrite them from. A
+/// literal dollar is written twice - `$$` - in the program and in LLVM, so
+/// it passes through unchanged.
+fn emit_asm_block(
+    buf: &mut String,
+    block: &AsmBlock<'_>,
+    valreg: &HashMap<usize, String>,
+    vt: &HashMap<usize, Ty>,
+    ordinal: usize,
+) {
+    // The result of the block is a temporary of its own: the destination is
+    // a place, not a value, so the block's result is not the destination's
+    // value until it is stored.
+    let result = format!("%vasm{ordinal}");
+    let operands: Vec<String> = block
+        .inputs
+        .iter()
+        .map(|v| {
+            let reg = valreg
+                .get(&v.0)
+                .cloned()
+                .unwrap_or_else(|| format!("%v{}", v.0));
+            // An operand is an integer: the sema admits nothing else, and a
+            // floating-point operand is deferred (a pinned `d0` is printed
+            // as `v0` on AArch64, which does not assemble).
+            let t = vt.get(&v.0).map(llvm_ty).unwrap_or_else(|| "i64".to_string());
+            format!("{} {}", t, reg)
+        })
+        .collect();
+    buf.push_str(&format!(
+        "  {} = call {} asm sideeffect \"{}\", \"{}\"({})\n",
+        result,
+        llvm_ty(block.ty),
+        llvm_escape(block.template),
+        llvm_escape(block.constraints),
+        operands.join(", ")
+    ));
+    let slot = valreg
+        .get(&block.dest.0)
+        .cloned()
+        .unwrap_or_else(|| format!("%v{}", block.dest.0));
+    buf.push_str(&format!(
+        "  store {} {}, ptr {}\n",
+        llvm_ty(block.ty),
+        result,
+        slot
+    ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexum_mir::{BasicBlock, BlockId};
+
+    /// A module with one function that contains one assembly block.
+    ///
+    /// The function has a destination variable (the slot `%v0`) and one
+    /// input (the value `%v1`), and the block writes the input into the
+    /// destination through a register.
+    fn asm_module(template: &str, constraints: &str, inputs: Vec<Value>) -> MirModule {
+        let mut value_types = HashMap::new();
+        value_types.insert(0, Ty::Int);
+        value_types.insert(1, Ty::Int);
+        MirModule {
+            records: Vec::new(),
+            functions: vec![MirFn {
+                name: "main".to_string(),
+                params: Vec::new(),
+                mut_params: Vec::new(),
+                ret: Ty::Int,
+                locals: vec![("out".to_string(), Ty::Int)],
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instrs: vec![
+                        Instr::Alloca {
+                            dest: Value(0),
+                            ty: Ty::Int,
+                        },
+                        Instr::Const {
+                            dest: Value(1),
+                            c: Const::Int(21),
+                            ty: Ty::Int,
+                        },
+                        Instr::Asm {
+                            dest: Value(0),
+                            template: template.to_string(),
+                            constraints: constraints.to_string(),
+                            inputs,
+                            ty: Ty::Int,
+                        },
+                    ],
+                    term: Some(Term::Return(None)),
+                }],
+                entry: BlockId(0),
+                value_types,
+            }],
+        }
+    }
+
+    /// The module of a function with no assembly block in it.
+    fn plain_module() -> MirModule {
+        let mut value_types = HashMap::new();
+        value_types.insert(0, Ty::Int);
+        value_types.insert(1, Ty::Int);
+        MirModule {
+            records: Vec::new(),
+            functions: vec![MirFn {
+                name: "main".to_string(),
+                params: Vec::new(),
+                mut_params: Vec::new(),
+                ret: Ty::Int,
+                locals: vec![("out".to_string(), Ty::Int)],
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instrs: vec![
+                        Instr::Alloca {
+                            dest: Value(0),
+                            ty: Ty::Int,
+                        },
+                        Instr::Const {
+                            dest: Value(1),
+                            c: Const::Int(21),
+                            ty: Ty::Int,
+                        },
+                    ],
+                    term: Some(Term::Return(None)),
+                }],
+                entry: BlockId(0),
+                value_types,
+            }],
+        }
+    }
+
+    /// The generated module of an assembly block.
+    fn asm_ir(template: &str, constraints: &str, inputs: Vec<Value>) -> String {
+        emit(&asm_module(template, constraints, inputs), &TargetSpec::host())
+    }
+
+    /// The block is one instruction: a call to the assembly, with the
+    /// inputs as the arguments, and the result stored into the destination.
+    ///
+    /// The output is not an argument - it comes back in the result of the
+    /// call - and a clobber is not an argument either, so the number of
+    /// arguments is the number of inputs and nothing else.
+    #[test]
+    fn the_block_is_one_call() {
+        let ir = asm_ir(
+            "movq %rdi, %rax",
+            "={rax},{rdi},~{rcx},~{memory}",
+            vec![Value(1)],
+        );
+        assert!(
+            ir.contains(
+                "= call i64 asm sideeffect \"movq %rdi, %rax\", \
+                 \"={rax},{rdi},~{rcx},~{memory}\"(i64 %v1)"
+            ),
+            "{ir}"
+        );
+        // The result is stored into the destination variable.
+        assert!(ir.contains("store i64 %vasm2, ptr %v0"), "{ir}");
+    }
+
+    /// A block with no inputs takes no arguments.
+    #[test]
+    fn a_block_with_no_inputs_takes_no_arguments() {
+        let ir = asm_ir("nop", "={rax},~{memory}", Vec::new());
+        assert!(
+            ir.contains("= call i64 asm sideeffect \"nop\", \"={rax},~{memory}\"()"),
+            "{ir}"
+        );
+    }
+
+    /// The constraint string is the program's own, and it is passed on
+    /// unchanged: it is the contract between the program and the assembler,
+    /// and the code generator has nothing to add to it.
+    #[test]
+    fn the_constraint_string_is_passed_on_unchanged() {
+        let constraints = "={rax},{rdi},{rsi},~{rcx},~{r11},~{memory}";
+        let ir = asm_ir("movq %rsi, %rax", constraints, vec![Value(1)]);
+        assert!(ir.contains(&format!("\"{constraints}\"")), "{ir}");
+    }
+
+    /// The newlines of the template are escapes.
+    ///
+    /// LLVM's inline-assembly template does not interpret `\n`, so a
+    /// newline that is not escaped reaches the assembler as a backslash and
+    /// an `n`, and the assembler is asked for something else entirely.
+    #[test]
+    fn the_newlines_of_the_template_are_escapes() {
+        let ir = asm_ir("movq $$1, %rax\nsyscall", "={rax}", Vec::new());
+        assert!(
+            ir.contains("asm sideeffect \"movq $$1, %rax\\0Asyscall\""),
+            "{ir}"
+        );
+        // and the template has no newline in it any more.
+        let start = ir
+            .find("asm sideeffect \"movq $$1, %rax")
+            .expect("the block is in the module");
+        let rest = &ir[start + "asm sideeffect \"".len()..];
+        let end = rest.find('"').expect("the template is closed");
+        let template = &rest[..end];
+        assert!(!template.contains('\n'), "{template}");
+    }
+
+    /// A function with a block gets a frame, and a function without one
+    /// does not.
+    ///
+    /// A function without a frame is entered with the stack at 8 modulo 16,
+    /// and a block that reaches the kernel wants 16.
+    #[test]
+    fn a_function_with_a_block_gets_a_frame() {
+        let ir = asm_ir("nop", "={rax}", Vec::new());
+        assert!(
+            ir.contains("%vasmframe = alloca [16 x i8], align 16"),
+            "{ir}"
+        );
+        let plain = emit(&plain_module(), &TargetSpec::host());
+        assert!(
+            !plain.contains("%vasmframe"),
+            "a function without a block has a frame"
+        );
+    }
+
+    /// A module that runs a block and prints what it produced.
+    ///
+    /// The block is the shape the runtime's own system call layer has: the
+    /// input is pinned to the register the constraint string names, and the
+    /// result comes back in the register the output is pinned to.
+    fn program_module() -> MirModule {
+        let mut value_types = HashMap::new();
+        value_types.insert(0, Ty::Int); // the destination slot
+        value_types.insert(1, Ty::Int); // the input
+        value_types.insert(2, Ty::Int); // the value that is printed
+        MirModule {
+            records: Vec::new(),
+            functions: vec![MirFn {
+                name: "main".to_string(),
+                params: Vec::new(),
+                mut_params: Vec::new(),
+                ret: Ty::Int,
+                locals: vec![
+                    ("out".to_string(), Ty::Int),
+                    ("x".to_string(), Ty::Int),
+                ],
+                blocks: vec![BasicBlock {
+                    id: BlockId(0),
+                    instrs: vec![
+                        Instr::Alloca {
+                            dest: Value(0),
+                            ty: Ty::Int,
+                        },
+                        Instr::Const {
+                            dest: Value(1),
+                            c: Const::Int(21),
+                            ty: Ty::Int,
+                        },
+                        Instr::Asm {
+                            dest: Value(0),
+                            template: "movq %rdi, %rax".to_string(),
+                            constraints: "={rax},{rdi},~{rcx},~{memory}".to_string(),
+                            inputs: vec![Value(1)],
+                            ty: Ty::Int,
+                        },
+                        Instr::Load {
+                            dest: Value(2),
+                            slot: Value(0),
+                            ty: Ty::Int,
+                        },
+                        Instr::Call {
+                            dest: None,
+                            callee: "print".to_string(),
+                            args: vec![Value(2)],
+                            ty: Ty::Unit,
+                        },
+                    ],
+                    term: Some(Term::Return(None)),
+                }],
+                entry: BlockId(0),
+                value_types,
+            }],
+        }
+    }
+
+    /// Build the module, hand it to clang, run it, and return what it
+    /// printed.
+    ///
+    /// The name is the test's own: the tests run at the same time, and two
+    /// of them writing the same file would run each other's program.
+    fn run_module(mir: &MirModule, name: &str) -> String {
+        let Some(tc) = nexum_toolchain::Toolchain::discover().ok() else {
+            // Without clang the block cannot be run, and the check would
+            // prove nothing. The rest of the file checks the shape of the
+            // generated code, which needs no toolchain.
+            eprintln!("clang is not on the PATH: the block was not run");
+            return String::new();
+        };
+        let work = std::env::temp_dir()
+            .join("nexum_codegen_tests")
+            .join("asm")
+            .join(name);
+        std::fs::create_dir_all(&work).expect("the work directory");
+        let ll = work.join("program.ll");
+        let exe = work.join("program.exe");
+        let ir = emit(mir, &TargetSpec::host());
+        std::fs::write(&ll, &ir).expect("write the module");
+        nexum_toolchain::verify_ir(&tc.clang, ll.to_str().expect("a path"))
+            .unwrap_or_else(|e| panic!("the module must verify:\n{e}\n{ir}"));
+        nexum_toolchain::run_clang(
+            &tc.clang,
+            ll.to_str().expect("a path"),
+            exe.to_str().expect("a path"),
+        )
+        .unwrap_or_else(|e| panic!("the program must link:\n{e}\n{ir}"));
+        let out = std::process::Command::new(&exe)
+            .output()
+            .expect("the program must run");
+        assert!(
+            out.status.success(),
+            "the program failed: {:?}\n{ir}",
+            out.status
+        );
+        String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n")
+    }
+
+    /// The block runs, and the value it produces is the value the program
+    /// asked for.
+    ///
+    /// A mistake in the numbering of the operands is silent: the program
+    /// keeps running and prints the wrong number, or the wrong register,
+    /// and nothing says so. So the number is checked here, against what
+    /// the block was asked to do.
+    #[test]
+    fn the_block_produces_the_value() {
+        let out = run_module(&program_module(), "value");
+        if out.is_empty() {
+            // clang is not there; the shape tests above still ran.
+            return;
+        }
+        assert_eq!(out, "21\n", "the block did not produce the value");
+    }
+
+    /// The stack is aligned at a block.
+    ///
+    /// A function without a frame is entered with the stack at 8 modulo 16,
+    /// and a function with one at 0 modulo 16. The system call instruction
+    /// wants 16, so the compiler gives a function with a block a frame -
+    /// which is what the runtime's own wrappers do by hand, because they
+    /// cannot count on one.
+    #[test]
+    fn the_stack_is_aligned_at_a_block() {
+        if !cfg!(target_arch = "x86_64") {
+            // The text of the block is x86-64's; the alignment rule is the
+            // same everywhere, but the register is not.
+            return;
+        }
+        let mut mir = program_module();
+        if let Instr::Asm { template, .. } = &mut mir.functions[0].blocks[0].instrs[2] {
+            *template = "movq %rsp, %rax\nandq $$15, %rax".to_string();
+        }
+        let out = run_module(&mir, "alignment");
+        if out.is_empty() {
+            return;
+        }
+        assert_eq!(
+            out, "0\n",
+            "the stack is not aligned at the block: it is at the wrong offset"
+        );
+    }
 }
