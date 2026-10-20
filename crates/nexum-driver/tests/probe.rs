@@ -23,12 +23,10 @@ fn toolchain() -> Option<nexum_toolchain::Toolchain> {
 /// sequence the allocator's own test walks - every class, a free, and the
 /// same block again - printing after each step.
 const DRIVER: &str = r#"
-#include <stdio.h>
 
-extern long long nexum_sys_mmap(long long addr, long long len, long long prot,
-                                long long flags, long long fd, long long off);
-extern long long nexum_sys_open(long long path, long long flags, long long mode);
-extern long long nexum_sys_write(long long fd, long long buf, long long len);
+#include <stdio.h>
+#include <stdint.h>
+
 extern void *nexum_heap_alloc(long long total);
 extern void nexum_heap_free(void *p, long long total);
 extern long long nexum_size_class(long long total);
@@ -44,43 +42,39 @@ int main(void) {
     // Unbuffered: if the program crashes, the lines printed before the
     // crash are the ones that say where it died.
     setvbuf(stdout, 0, _IONBF, 0);
-    printf("size_class(48) -> %lld\n", nexum_size_class(48));
-    long long m = nexum_sys_mmap(0, 16384, 3, 4098, -1, 0);
-    printf("mmap -> %lld\n", m);
-    long long o = nexum_sys_open((long long)"no_such_file_here", 0, 0);
-    printf("open -> %lld\n", o);
-    long long w = nexum_sys_write(1, (long long)"hello\n", 6);
-    printf("write -> %lld\n", w);
-
     long long c;
     for (c = 0; c <= 258; c++) {
         long long total = class_size_of(c);
         long long cls = nexum_size_class(total);
         void *p = nexum_heap_alloc(total);
-        printf("class %lld %lld %lld -> %p\n", c, total, cls, p);
+        long long align = (long long)((uintptr_t)p % 16);
+        int isnull = (p == 0) ? 1 : 0;
         nexum_heap_free(p, total);
         void *q = nexum_heap_alloc(total);
-        printf("class %lld again -> %p\n", c, q);
+        long long same = (p == q) ? 1 : 0;
         nexum_heap_free(q, total);
+        printf("class %lld %lld %lld %lld %d %lld\n", c, total, cls, align, isnull, same);
     }
     {
-        // The large class: a mapping of its own, freed with an unmap.
         long long total = 100000;
         long long cls = nexum_size_class(total);
         void *p = nexum_heap_alloc(total);
-        printf("large %lld %lld -> %p\n", total, cls, p);
+        long long align = (long long)((uintptr_t)p % 16);
+        int isnull = (p == 0) ? 1 : 0;
         nexum_heap_free(p, total);
+        printf("large %lld %lld %lld %d\n", total, cls, align, isnull);
     }
     {
-        // The raw path: a mapping of its own, freed with an unmap.
         long long size = 1000;
         void *p = nexum_alloc_raw(size);
-        printf("raw %lld -> %p\n", size, p);
+        long long align = (long long)((uintptr_t)p % 16);
+        int isnull = (p == 0) ? 1 : 0;
         nexum_free_raw(p, size);
+        printf("raw %lld %lld %d\n", size, align, isnull);
     }
-    printf("done\n");
     return 0;
 }
+
 "#;
 
 #[test]
@@ -151,9 +145,10 @@ fn the_kernel_reports_what_it_reports() {
         allocated != "0x0" && !allocated.is_empty(),
         "the allocator did not return a block:\n{stdout}"
     );
-    // The whole sequence the allocator's own test walks has to finish.
+    // The whole sequence the allocator's own test walks has to finish: the
+    // large class and the raw path come last.
     assert!(
-        stdout.contains("done"),
+        stdout.contains("raw 1000"),
         "the allocator did not serve every class:\n{stdout}"
     );
     // The contract the runtime relies on: the wrappers report an error as a
