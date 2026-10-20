@@ -85,7 +85,10 @@ impl Syscalls {
                 open: 5,
                 close: 6,
                 mmap: 197,
-                munmap: 198,
+                // Darwin numbers its calls from the BSD master table, and
+                // munmap is 73 there, not the 198 that sits next to
+                // mmap. 198 is an unused slot.
+                munmap: 73,
                 exit: 1,
                 lseek: 199,
                 open_read: 0,
