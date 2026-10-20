@@ -92,6 +92,42 @@ reaches the filesystem through `fopen`.
 Phases 11a and 11b are the ones that change the character of the language;
 the rest build on them.
 
+### What 11a looks like now
+
+A program built for Linux or macOS **declares no external symbol at all**.
+It used to declare seventeen. What replaced them:
+
+| Was | Is now |
+| --- | ------- |
+| `malloc`, `free` | a size-class allocator over `mmap`, with the free list in the collector's own next-object word |
+| `printf`, `fputs`, `fputc` | the runtime's own formatters, with the float format being C's `%g` byte for byte |
+| `exit` | the system call |
+| `strlen`, `memcpy`, `strcmp` | the runtime's own string routines, on every platform |
+| `fopen`, `fread`, `fwrite` | the system calls, through the runtime's file routines |
+| libm's `exp`, `log`, `tanh`, `erf`, `pow`, `sqrt` and the rounding functions | the runtime's own, in 64-bit operations with no `i128` and no integer division |
+
+Windows is still on the C library for its output and its file routines,
+because its kernel interface lives behind `ntdll` and the system call
+stubs have to be generated rather than assembled. Its heap is ours now:
+`VirtualAlloc` is the kernel and not the C library.
+
+The gate `crates/nexum-driver/tests/freestanding.rs` pins the list, so it
+can only get shorter.
+
+### Where the rest of the phases are
+
+| Phase | State |
+| ----- | ----- |
+| **11b** inline assembly | in flight |
+| **11c** the numeric tower | contracted, waiting for 11b |
+| **11d** memory and layout | researched |
+| **11e** concurrency | researched |
+| **11f** vectors | researched |
+| **11g** the native linker | researched |
+| **11h** the GPU path | researched |
+| **11i** the model framework | researched |
+| **11j** self-hosting | researched |
+
 ## The decisions this implies
 
 These are recorded in `docs/language-reference/decisions.md`:
