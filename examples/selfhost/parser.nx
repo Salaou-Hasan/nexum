@@ -56,7 +56,12 @@ fn escape(s: Str) -> Str:
                 if c == "\t":
                     out = concat(out, "\\t")
                 else:
-                    out = concat(out, c)
+                    # A carriage return. The language has no escape for one,
+                    # so the byte's value is asked for instead: 13.
+                    if byte_value(c, 0) == 13:
+                        out = concat(out, "\\r")
+                    else:
+                        out = concat(out, c)
         i = i + 1
     return out
 

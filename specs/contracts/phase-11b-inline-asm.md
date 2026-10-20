@@ -47,16 +47,35 @@ The arguments, in order:
 | 2 | `Str` | the constraint string, LLVM's own |
 | 3.. | values | the inputs, in the order the constraint string names them |
 
-The template's operands are **named**, never numbered: `$name` refers to
-the operand called `name`, and the compiler rewrites the names to the
-positional form LLVM wants. A literal dollar is written twice.
+The template is **LLVM's own inline assembly template**. The registers are
+named in it, and LLVM's positional form works too:
 
-The constraint string is the user's, and it must name the operands in
-LLVM's order: the outputs first, then the inputs, then the clobbers. The
-result of the block is the value of the first output, and the destination
-is the variable in argument zero. So the number of constraints before the
-first `~{` is one more than the number of inputs: the destination is the
-first output.
+```
+let mut out = 0
+asm(out, "movq %rdi, %rax", "={rax},{rdi}", 42)
+```
+
+The constraint string is the contract between the program and the
+assembler: it names the operands in LLVM's order - the outputs first,
+then the inputs, then the clobbers - and it pins each operand to a
+register. So the number of constraints before the first `~{` is one more
+than the number of inputs: the destination is the first output.
+
+**The operand numbers are LLVM's, and the output is operand zero.** That
+is the trap the research warned about: a program that writes `$1` when it
+meant `$0` is silently wrong. The semantic pass therefore checks two
+things about the template, so that a mistake is a diagnostic and not a
+backend crash:
+
+* the number of `$N` references must be within the range the constraint
+  string names;
+* the number of constraints must be one more than the number of inputs.
+
+**The research's form, where each operand carries a label as well as a
+register class, is deferred.** The labels would have to be carried
+through the MIR, and the pinned instruction does not carry them. The
+register form above covers what the phase needs; the labelled form comes
+with the wave that has room for it.
 
 The target guard is **the last argument when it is a string literal**,
 and the inputs are the integers before it. The inputs are integers, so
