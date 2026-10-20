@@ -753,6 +753,11 @@ fn parse_asm_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
     # The inputs are the arguments from the third on. The target guard, when
     # there is one, is the last argument and it is a string literal, so the
     # inputs are the ones before it.
+    if count < 3:
+        # The block needs a destination, a template and the constraints.
+        # The Rust front end reports it and drops the statement, and the
+        # self-hosted one drops it too: it has no diagnostics to report.
+        return -1
     let mut ninputs = count - 3
     if ninputs > 0:
         let last = list_get(nodes, list_get(extra, start + count - 1))
@@ -800,82 +805,49 @@ fn parse_stmt(nodes: List, extra: List, tokens: List, mut pos: Int) -> Int:
 
 # --- the normalized form ---
 
-# An expression on one line: the words the normalized form prints for it,
-# joined by single spaces. The `asm` block puts the destination and the
-# inputs on one line each, so the expression has to fit on one.
-fn expr_inline(nodes: List, extra: List, idx: Int) -> Str:
-    let n = list_get(nodes, idx)
-    if n.kind == "call":
-        let mut out = concat("call ", n.text)
-        let mut i = 0
-        while i < n.b:
-            out = concat(concat(out, " "), expr_inline(nodes, extra, list_get(extra, n.a + i)))
-            i = i + 1
-        return out
-    if n.kind == "binop":
-        let lhs = expr_inline(nodes, extra, n.a)
-        let rhs = expr_inline(nodes, extra, n.b)
-        return concat(concat(concat("binop ", n.text), " "), concat(concat(lhs, " "), rhs))
-    if n.kind == "unop":
-        return concat(concat(concat("unop ", n.text), " "), expr_inline(nodes, extra, n.a))
-    if n.kind == "field":
-        return concat(concat(concat("field ", n.text), " "), expr_inline(nodes, extra, n.a))
-    if n.kind == "index":
-        let base = expr_inline(nodes, extra, n.a)
-        let ix = expr_inline(nodes, extra, n.b)
-        return concat(concat("index ", base), concat(" ", ix))
-    if n.kind == "str":
-        return concat("str ", escape(n.text))
-    if n.kind == "array":
-        if n.text == "":
-            # An array literal: the elements follow.
-            let mut out = "array"
-            let mut i = 0
-            while i < n.b:
-                out = concat(concat(out, " "), expr_inline(nodes, extra, list_get(extra, n.a + i)))
-                i = i + 1
-            return out
-        # An array type: the element type follows.
-        return concat(concat(concat("array ", n.text), " "), expr_inline(nodes, extra, n.a))
-    # The leaves and the default: the kind and its text.
-    return concat(concat(n.kind, " "), n.text)
-
 # The text of a string argument of the `asm` builtin: the content of the
 # literal, escaped so that it occupies exactly one line. An argument that
-# is not a literal is printed as the expression it is.
+# is not a literal is not a string: the Rust front end reads it as the
+# empty string.
 fn asm_text(nodes: List, extra: List, idx: Int) -> Str:
     let n = list_get(nodes, idx)
     if n.kind == "str":
         return escape(n.text)
-    return expr_inline(nodes, extra, idx)
+    return ""
 
-# The `asm` block. The lines are the ones the contract pins:
+# The `asm` block. The lines are the ones the contract pins, with the
+# destination and the inputs as the expressions they are, one level under
+# the label:
 #
 #   asm
-#     asm-dest <the destination expression>
-#     asm-template <the template>
-#     asm-constraints <the constraints>
-#     asm-input <the input expression>
-#     asm-target <the target>          (only when there is one)
+#     asm-dest
+#       var out
+#     asm-template mov $1, %rax
+#     asm-constraints =r,r
+#     asm-input
+#       var x
+#     asm-target linux-x86_64          (only when there is one)
 #
 # `start` is where the arguments start in the side table, `count` is how
 # many there are and `ninputs` is how many of them are the inputs.
 fn print_asm(nodes: List, extra: List, start: Int, count: Int, ninputs: Int, depth: Int):
     let pad = spaces(depth + 2)
-    if count > 0:
-        let dest = list_get(extra, start)
-        print(concat(pad, concat("asm-dest ", expr_inline(nodes, extra, dest))))
-    if count > 1:
-        let template = list_get(extra, start + 1)
-        print(concat(pad, concat("asm-template ", asm_text(nodes, extra, template))))
-    if count > 2:
-        let constraints = list_get(extra, start + 2)
-        print(concat(pad, concat("asm-constraints ", asm_text(nodes, extra, constraints))))
+    # the destination
+    print(concat(pad, "asm-dest"))
+    print_node(nodes, extra, list_get(extra, start), depth + 4)
+    # the template
+    let template = list_get(extra, start + 1)
+    print(concat(pad, concat("asm-template ", asm_text(nodes, extra, template))))
+    # the constraints
+    let constraints = list_get(extra, start + 2)
+    print(concat(pad, concat("asm-constraints ", asm_text(nodes, extra, constraints))))
+    # the inputs
     let mut i = 0
     while i < ninputs:
-        let input = list_get(extra, start + 3 + i)
-        print(concat(pad, concat("asm-input ", expr_inline(nodes, extra, input))))
+        print(concat(pad, "asm-input"))
+        print_node(nodes, extra, list_get(extra, start + 3 + i), depth + 4)
         i = i + 1
+    # the target guard
     if count > 3 + ninputs:
         let target = list_get(extra, start + 3 + ninputs)
         print(concat(pad, concat("asm-target ", asm_text(nodes, extra, target))))
