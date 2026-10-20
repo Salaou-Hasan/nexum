@@ -132,6 +132,24 @@ pub enum HirExpr {
         args: Vec<HirExpr>,
         ty: Ty,
     },
+    /// An inline-assembly block: `asm(dest, template, constraints, inputs...)`.
+    ///
+    /// `dest` is the name of the variable the result of the block goes to,
+    /// `template` and `constraints` are the assembly text and LLVM's own
+    /// constraint string, and `inputs` are the values the constraints name.
+    /// The target guard is a compile-time check, so it does not reach here.
+    Asm {
+        /// The destination variable's name.
+        dest: String,
+        /// The assembly template.
+        template: String,
+        /// The constraint string.
+        constraints: String,
+        /// The input values, in the order the constraint string names them.
+        inputs: Vec<HirExpr>,
+        /// The destination's type, which is the type of the block's result.
+        ty: Ty,
+    },
     /// Record construction: `Vec2(1.0, 2.0)`.
     Record {
         name: String,
@@ -188,6 +206,7 @@ impl HirExpr {
             | HirExpr::Str(_, t)
             | HirExpr::Var(_, t)
             | HirExpr::Call { ty: t, .. }
+            | HirExpr::Asm { ty: t, .. }
             | HirExpr::Record { ty: t, .. }
             | HirExpr::Field { ty: t, .. }
             | HirExpr::FieldSet { ty: t, .. }
@@ -205,7 +224,35 @@ pub struct SemaResult {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// The profile name of the target the compiler runs on.
+///
+/// The five profiles are the ones the target table names - `windows-x86_64`,
+/// `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64` - and
+/// the name is the operating system and the architecture joined by a dash.
+/// The sema does not depend on the target crate, so it derives the name
+/// from the constants the standard library exposes.
+fn host_target_name() -> String {
+    let arch = std::env::consts::ARCH;
+    let os = match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "macos",
+        _ => "linux",
+    };
+    format!("{os}-{arch}")
+}
+
 pub fn analyze(am: &AModule) -> SemaResult {
+    analyze_for_target(am, &host_target_name())
+}
+
+/// Analyse a module for a named target.
+///
+/// `target` is the profile name the program is compiled for - one of the
+/// five names the target table uses (`windows-x86_64`, `linux-x86_64`,
+/// `linux-aarch64`, `macos-x86_64`, `macos-aarch64`). The `asm` builtin's
+/// target guard is checked against it, so a cross build has to call this
+/// with the target it builds for and not with `analyze`.
+pub fn analyze_for_target(am: &AModule, target: &str) -> SemaResult {
     // Pass 0a: collect record names so field types can reference records.
     let mut records: HashMap<String, Vec<(String, Ty)>> = HashMap::new();
     let mut decl_diags: Vec<Diagnostic> = Vec::new();
@@ -328,6 +375,7 @@ pub fn analyze(am: &AModule) -> SemaResult {
             current_ret: Ty::Unit,
             current_fn: String::new(),
             synthetic: 0,
+            target: target.to_string(),
         };
         let mut fns = Vec::new();
         for s in &am.stmts {
@@ -454,6 +502,9 @@ struct Ctx {
     /// compound-assignment temporaries). Generated names contain `$`, which
     /// user identifiers cannot, so they can never collide.
     synthetic: usize,
+    /// The profile name of the target the program is compiled for. The
+    /// `asm` builtin's target guard is checked against it.
+    target: String,
 }
 
 #[derive(Clone)]
@@ -895,6 +946,30 @@ fn analyze_block(ctx: &mut Ctx, scope: &mut Scope, stmts: &[Stmt]) -> Vec<HirStm
                 /* imports are resolved at module level before analysis */
             }
             StmtKind::Fn { .. } => { /* nested functions not supported yet */ }
+            StmtKind::Asm {
+                dest,
+                template,
+                constraints,
+                inputs,
+                target,
+            } => {
+                // The inline-assembly block. The parser gives it a statement
+                // of its own, so the checks are made here and not in the
+                // builtin dispatch.
+                let h = analyze_asm(
+                    ctx,
+                    scope,
+                    &AsmBlock {
+                        span: s.span,
+                        dest,
+                        template,
+                        constraints,
+                        inputs,
+                        target,
+                    },
+                );
+                out.push(HirStmt::Expr(h));
+            }
         }
     }
     out
@@ -1414,6 +1489,10 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                     ty: Ty::Unit,
                 };
             }
+            // `asm` is not here: the parser gives the inline-assembly
+            // block a statement of its own, so the block is analysed by
+            // `analyze_block`, not by this function. A call to a function
+            // called `asm` is a call to a function that does not exist.
             if callee == "list_new" {
                 if !ha.is_empty() {
                     ctx.diagnostics.push(
@@ -1824,6 +1903,196 @@ fn analyze_expr(ctx: &mut Ctx, scope: &mut Scope, e: &Expr) -> HirExpr {
                 }
             }
         }
+    }
+}
+
+/// The parts of an inline-assembly block, as the parser gives them.
+///
+/// The parser takes the template, the constraint string and the target
+/// guard out of the string literals that were written, so the block
+/// arrives here already in the shape the checks work on.
+struct AsmBlock<'a> {
+    /// The span of the whole block.
+    span: Span,
+    /// The destination: the variable the result of the block goes to.
+    dest: &'a Expr,
+    /// The assembly text.
+    template: &'a str,
+    /// The constraint string.
+    constraints: &'a str,
+    /// The inputs, in the order the constraint string names them.
+    inputs: &'a [Expr],
+    /// The target guard, when there is one.
+    target: &'a Option<String>,
+}
+
+/// The `asm` builtin: `asm(dest, template, constraints, inputs...)`.
+///
+/// The parser gives the block a shape of its own, so the checks are made
+/// here and not in the builtin dispatch:
+///
+/// * the destination is a variable of an integer type, and it is mutable -
+///   the block writes its result into it;
+/// * the template and the constraint string are not empty. The parser
+///   takes them out of the string literals that were written, and leaves
+///   the empty string when the argument was not a literal;
+/// * the inputs are the integers the constraint string names;
+/// * the constraint string names one operand per constraint, and the
+///   destination is the first output, so the count is one more than the
+///   number of inputs;
+/// * the target guard, when there is one, names the target the program is
+///   compiled for.
+///
+/// The guard is a compile-time check, so it does not reach the MIR: a block
+/// whose guard names another target is an error, and the block becomes a
+/// panic - the way the other builtins report a type error.
+fn analyze_asm(ctx: &mut Ctx, scope: &mut Scope, block: &AsmBlock<'_>) -> HirExpr {
+    // The destination: a variable, of an integer type, and mutable.
+    let dh = analyze_expr(ctx, scope, block.dest);
+    let (dest_name, dest_ty) = match &dh {
+        HirExpr::Var(name, ty) => {
+            if !ty.compatible(&Ty::Int) {
+                return asm_error(
+                    ctx,
+                    block.dest.span,
+                    format!("the asm destination must be an integer, found {}", ty.name()),
+                );
+            }
+            match scope.get(name) {
+                Some(info) if !info.mutable => {
+                    return asm_error(
+                        ctx,
+                        block.dest.span,
+                        format!(
+                            "the asm destination `{}` must be a mutable variable (declare it with `let mut`)",
+                            name
+                        ),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    return asm_error(
+                        ctx,
+                        block.dest.span,
+                        format!("the asm destination `{}` is not a variable", name),
+                    );
+                }
+            }
+            (name.clone(), ty.clone())
+        }
+        other => {
+            return asm_error(
+                ctx,
+                block.dest.span,
+                format!(
+                    "the asm destination must be a variable, found {}",
+                    other.ty().name()
+                ),
+            );
+        }
+    };
+
+    // The template and the constraint string. The parser leaves the empty
+    // string when the argument was not a string literal, and an empty
+    // template is not a template: the MIR carries both as strings, so the
+    // compiler has to know them now.
+    if block.template.is_empty() {
+        return asm_error(
+            ctx,
+            block.span,
+            "the asm template must be a non-empty string literal".to_string(),
+        );
+    }
+    if block.constraints.is_empty() {
+        return asm_error(
+            ctx,
+            block.span,
+            "the asm constraint string must be a non-empty string literal".to_string(),
+        );
+    }
+
+    // The target guard: it names the target the block is written for. The
+    // guard is an assertion and not a filter: a block whose guard names
+    // another target is an error, and the block is not silently dropped.
+    if let Some(name) = block.target
+        && name != &ctx.target
+    {
+        return asm_error(
+            ctx,
+            block.span,
+            format!(
+                "the asm block is written for `{}`, but this program is compiled for `{}`",
+                name, ctx.target
+            ),
+        );
+    }
+
+    // The inputs: the integers the constraint string names.
+    let mut hi = Vec::with_capacity(block.inputs.len());
+    for e in block.inputs {
+        let h = analyze_expr(ctx, scope, e);
+        if !h.ty().compatible(&Ty::Int) {
+            return asm_error(
+                ctx,
+                e.span,
+                format!("the asm inputs must be integers, found {}", h.ty().name()),
+            );
+        }
+        hi.push(h);
+    }
+
+    // The constraint string names one operand per constraint: the
+    // destination is the first output, and the inputs follow it. The
+    // clobbers are not operands, so the count stops at the first one.
+    let operands = asm_operand_count(block.constraints);
+    if operands != hi.len() + 1 {
+        return asm_error(
+            ctx,
+            block.span,
+            format!(
+                "the asm constraint string names {} operand(s), but the block has {} (the destination and {} input(s))",
+                operands,
+                hi.len() + 1,
+                hi.len()
+            ),
+        );
+    }
+
+    HirExpr::Asm {
+        dest: dest_name,
+        template: block.template.to_string(),
+        constraints: block.constraints.to_string(),
+        inputs: hi,
+        ty: dest_ty,
+    }
+}
+
+/// The number of operands the constraint string names.
+///
+/// The constraint string is LLVM's own: the outputs first, then the inputs,
+/// then the clobbers. A clobber (`~{reg}`) is not an operand, and neither
+/// is anything after the `|` that separates the sections, so the count stops
+/// at the first of them.
+fn asm_operand_count(constraints: &str) -> usize {
+    let head = constraints.split('|').next().unwrap_or("");
+    let head = match head.find("~{") {
+        Some(i) => &head[..i],
+        None => head,
+    };
+    head.split(',')
+        .filter(|part| !part.trim().is_empty())
+        .count()
+}
+
+/// A failed check of the `asm` builtin: the diagnostic, and the block
+/// lowered to a panic - the way the other builtins report a type error.
+fn asm_error(ctx: &mut Ctx, span: Span, message: String) -> HirExpr {
+    ctx.diagnostics
+        .push(Diagnostic::error("T051", message.clone()).with_span(span));
+    HirExpr::Call {
+        callee: "panic".to_string(),
+        args: vec![HirExpr::Str(message, Ty::Str)],
+        ty: Ty::Never,
     }
 }
 

@@ -1,0 +1,8 @@
+# EXPECT: T051
+# The target guard names the target the block is written for. It is a
+# compile-time check: the guard does not reach the MIR, and a block whose
+# guard does not name the target the program is compiled for is an error.
+# The name below is a target no build uses, so the guard never matches.
+fn main():
+    let mut out = 0
+    asm(out, "mov $0, %rax", "=r,r", 1, "sparc64-unknown-none")

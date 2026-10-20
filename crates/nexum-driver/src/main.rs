@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use nexum_diagnostics::render;
 mod setup;
 use nexum_mir::{lower, optimize_level, verify};
-use nexum_sema::analyze;
+use nexum_sema::analyze_for_target;
 use nexum_target::TargetSpec;
 use nexum_toolchain::Toolchain;
 use std::cmp::Ordering;
@@ -585,6 +585,19 @@ fn format_nx(text: &str) -> Result<String, String> {
             _ => " = ",
         }
     }
+    fn fmt_str(out: &mut String, s: &str) {
+        out.push('"');
+        for ch in s.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
     fn fmt_expr(out: &mut String, e: &Expr) {
         match &e.kind {
             ExprKind::Int(v) => out.push_str(&v.to_string()),
@@ -596,19 +609,7 @@ fn format_nx(text: &str) -> Result<String, String> {
                 out.push_str(&s);
             }
             ExprKind::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
-            ExprKind::Str(s) => {
-                out.push('"');
-                for ch in s.chars() {
-                    match ch {
-                        '\\' => out.push_str("\\\\"),
-                        '"' => out.push_str("\\\""),
-                        '\n' => out.push_str("\\n"),
-                        '\t' => out.push_str("\\t"),
-                        c => out.push(c),
-                    }
-                }
-                out.push('"');
-            }
+            ExprKind::Str(s) => fmt_str(out, s),
             ExprKind::Var(n) => out.push_str(n),
             ExprKind::Call { callee, args } => {
                 out.push_str(callee);
@@ -839,6 +840,33 @@ fn format_nx(text: &str) -> Result<String, String> {
                 out.push_str(path);
                 out.push('"');
             }
+            StmtKind::Asm {
+                dest,
+                template,
+                constraints,
+                inputs,
+                target,
+            } => {
+                // The inline-assembly block: `asm(dest, template,
+                // constraints, inputs...)`, with the target guard last when
+                // there is one.
+                ind(out, level);
+                out.push_str("asm(");
+                fmt_expr(out, dest);
+                out.push_str(", ");
+                fmt_str(out, template);
+                out.push_str(", ");
+                fmt_str(out, constraints);
+                for i in inputs {
+                    out.push_str(", ");
+                    fmt_expr(out, i);
+                }
+                if let Some(t) = target {
+                    out.push_str(", ");
+                    fmt_str(out, t);
+                }
+                out.push(')');
+            }
         }
     }
 
@@ -1040,6 +1068,17 @@ fn current_target() -> TargetSpec {
     }
 }
 
+/// The profile name of a target: the name the target table uses.
+///
+/// The table names five profiles - `windows-x86_64`, `linux-x86_64`,
+/// `linux-aarch64`, `macos-x86_64` and `macos-aarch64` - and the name is
+/// the operating system and the architecture joined by a dash. The
+/// semantic pass needs the name, not the triple: the `asm` builtin's
+/// target guard is checked against the target being compiled.
+fn target_name(target: &TargetSpec) -> String {
+    format!("{}-{}", target.os, target.arch)
+}
+
 fn compile_to_mir(
     file: &Path,
     opt_level: u8,
@@ -1057,7 +1096,11 @@ fn compile_to_mir(
     {
         return Err("parse errors".into());
     }
-    let sema = analyze(&module);
+    // The semantic pass is run for the target the program is being built
+    // for, not for the host: the `asm` builtin's target guard is checked
+    // against it, and a cross build has to be checked against the target
+    // it builds for.
+    let sema = analyze_for_target(&module, &target_name(&current_target()));
     for d in &sema.diagnostics {
         eprintln!("{}", render(d, &sm));
     }

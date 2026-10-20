@@ -9,6 +9,17 @@ use std::path::{Path, PathBuf};
 
 pub mod normalize;
 
+/// The name of the inline-assembly builtin.
+///
+/// `asm` is a builtin and not a keyword, so the lexer knows nothing about
+/// it and the parser sees an ordinary call to this name - the way it sees
+/// a call to `print` or to `read_file`. The builtin dispatch, the chain of
+/// `if callee == "..."` arms the semantic pass walks, is what tells a
+/// builtin apart from a call to a function that does not exist; the parser
+/// recognises the name only because this one builtin has a statement shape
+/// of its own.
+const ASM_BUILTIN: &str = "asm";
+
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
     Named(String),
@@ -150,6 +161,20 @@ pub enum StmtKind {
     Import {
         path: String,
     },
+    /// An inline-assembly block, written `asm(dest, template, constraints,
+    /// inputs...)`.
+    ///
+    /// `asm` is a builtin, not a keyword: the parser sees an ordinary call
+    /// to the name `asm`, the way it sees a call to `print` or to
+    /// `read_file`, and the builtin dispatch is what gives the call this
+    /// shape.
+    Asm {
+        dest: Expr,          // the variable the result goes to
+        template: String,    // the assembly text
+        constraints: String, // the constraint string
+        inputs: Vec<Expr>,   // the values, in order
+        target: Option<String>,
+    },
 }
 
 /// How a `for` statement iterates.
@@ -270,6 +295,20 @@ fn load_file(
     }
 }
 
+/// The text of a string literal, if the expression is one.
+///
+/// The inline-assembly builtin records its template, its constraint string
+/// and its target guard as strings, so the parser has to take the text out
+/// of the literal. An argument that is not a literal has no text to take:
+/// the empty string stands for it, and the semantic pass is the one that
+/// says so.
+fn string_value(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Str(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
 struct Parser<'a> {
     tokens: &'a [Token],
     i: usize,
@@ -284,6 +323,14 @@ impl<'a> Parser<'a> {
     }
     fn kind(&self) -> TokenKind {
         self.peek().kind
+    }
+    /// The kind of the token `offset` places ahead of the cursor, or `Eof`
+    /// when there is no such token.
+    fn peek_kind(&self, offset: usize) -> TokenKind {
+        self.tokens
+            .get(self.i + offset)
+            .map(|t| t.kind)
+            .unwrap_or(TokenKind::Eof)
     }
     fn advance(&mut self) {
         if self.i < self.tokens.len() {
@@ -345,6 +392,12 @@ impl<'a> Parser<'a> {
             TokenKind::KwReturn => self.parse_return(start),
             TokenKind::KwImport => self.parse_import(start),
             TokenKind::Ident => {
+                // `asm(...)` is the inline-assembly builtin. It is a call by
+                // name, like every other builtin; this is the one that has a
+                // statement shape, so the parser gives it one.
+                if self.peek().text == ASM_BUILTIN && self.peek_kind(1) == TokenKind::LParen {
+                    return self.parse_asm(start);
+                }
                 // Lookahead for a path assignment `a.b[i].c = ...`: scan the
                 // lvalue shape (identifier followed by `.ident` / `[...]`
                 // segments) up to a top-level `=`. Bracket depth is tracked so
@@ -827,6 +880,75 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The inline-assembly builtin: `asm(dest, template, constraints,
+    /// inputs...)`.
+    ///
+    /// The arguments are recorded as they were written: the destination is
+    /// the first, the template and the constraint string are the second and
+    /// the third, and the rest are the inputs, in order. The target guard,
+    /// when there is one, is the last argument and it is a string literal -
+    /// the inputs are the integers before it.
+    ///
+    /// The parser only checks the syntax: that the call has the three
+    /// arguments it must have. Whether the destination is a mutable integer
+    /// variable, whether the inputs are integers and whether the constraint
+    /// string names as many operands as there are arguments are the
+    /// semantic pass's business.
+    fn parse_asm(&mut self, start: usize) -> Option<Stmt> {
+        self.advance(); // asm
+        self.expect(TokenKind::LParen);
+        let mut args: Vec<Expr> = Vec::new();
+        while self.kind() != TokenKind::RParen && self.kind() != TokenKind::Eof {
+            args.push(self.parse_expr());
+            if self.kind() == TokenKind::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen);
+        let span = Span::new(self.peek().span.file, start, self.prev_span_end());
+        if args.len() < 3 {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "P016",
+                    format!(
+                        "asm expects at least 3 arguments (destination, template, constraints), got {}",
+                        args.len()
+                    ),
+                )
+                .with_span(span),
+            );
+            return None;
+        }
+        let dest = args[0].clone();
+        let template = string_value(&args[1]).unwrap_or_default();
+        let constraints = string_value(&args[2]).unwrap_or_default();
+        let mut inputs: Vec<Expr> = args[3..].to_vec();
+        // The target guard is the last argument when it is a string literal;
+        // an input is a value, and the guard is the only string among them.
+        let target = match inputs.pop() {
+            Some(last) => match string_value(&last) {
+                Some(t) => Some(t),
+                None => {
+                    inputs.push(last);
+                    None
+                }
+            },
+            None => None,
+        };
+        Some(Stmt {
+            kind: StmtKind::Asm {
+                dest,
+                template,
+                constraints,
+                inputs,
+                target,
+            },
+            span,
+        })
+    }
+
     fn parse_block(&mut self) -> Vec<Stmt> {
         while self.kind() == TokenKind::Newline {
             self.advance();
@@ -1292,5 +1414,98 @@ mod tests {
             StmtKind::If { else_branch, .. } => assert!(else_branch.is_some()),
             other => panic!("expected if, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn the_asm_builtin_is_a_statement_of_its_own() {
+        let pr = parse_str(
+            "fn main():\n    let mut out = 0\n    asm(out, \"mov $1, %rax\", \"=r,r\", 1, 2)\n",
+        );
+        assert!(pr.diagnostics.is_empty(), "{:?}", pr.diagnostics);
+        let body = first_fn_body(&pr);
+        match &body[1].kind {
+            StmtKind::Asm {
+                dest,
+                template,
+                constraints,
+                inputs,
+                target,
+            } => {
+                match &dest.kind {
+                    ExprKind::Var(n) => assert_eq!(n, "out"),
+                    other => panic!("expected a variable, got {:?}", other),
+                }
+                assert_eq!(template, "mov $1, %rax");
+                assert_eq!(constraints, "=r,r");
+                assert_eq!(inputs.len(), 2);
+                assert!(target.is_none());
+            }
+            other => panic!("expected asm, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn the_target_guard_is_the_last_argument() {
+        let pr = parse_str(
+            "fn main():\n    let mut out = 0\n    asm(out, \"mov $1, %rax\", \"=r,r\", 1, 2, \"linux-x86_64\")\n",
+        );
+        assert!(pr.diagnostics.is_empty(), "{:?}", pr.diagnostics);
+        let body = first_fn_body(&pr);
+        match &body[1].kind {
+            StmtKind::Asm { inputs, target, .. } => {
+                assert_eq!(inputs.len(), 2);
+                assert_eq!(target.as_deref(), Some("linux-x86_64"));
+            }
+            other => panic!("expected asm, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn asm_needs_a_destination_a_template_and_the_constraints() {
+        let pr = parse_str("fn main():\n    asm(out, \"mov $1, %rax\")\n");
+        assert_eq!(pr.diagnostics.len(), 1, "{:?}", pr.diagnostics);
+        assert_eq!(pr.diagnostics[0].code.0, "P016");
+    }
+
+    #[test]
+    fn a_call_that_is_not_the_builtin_stays_a_call() {
+        let pr = parse_str("fn main():\n    not_a_builtin(1, 2)\n");
+        assert!(pr.diagnostics.is_empty(), "{:?}", pr.diagnostics);
+        let body = first_fn_body(&pr);
+        match &body[0].kind {
+            StmtKind::Expr(Expr {
+                kind: ExprKind::Call { callee, args },
+                ..
+            }) => {
+                assert_eq!(callee, "not_a_builtin");
+                assert_eq!(args.len(), 2);
+            }
+            other => panic!("expected a call, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn asm_normalises_to_the_contract_form() {
+        let pr = parse_str(
+            "fn main():\n    let mut out = 0\n    asm(out, \"mov $1, %rax\", \"=r,r\", 1, 2, \"linux-x86_64\")\n",
+        );
+        assert!(pr.diagnostics.is_empty(), "{:?}", pr.diagnostics);
+        let expected = "\
+fn main
+  let-mut
+    name out
+    int 0
+  asm
+    asm-dest
+      var out
+    asm-template mov $1, %rax
+    asm-constraints =r,r
+    asm-input
+      int 1
+    asm-input
+      int 2
+    asm-target linux-x86_64
+";
+        assert_eq!(normalize::normalize(&pr.module), expected);
     }
 }
