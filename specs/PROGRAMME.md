@@ -72,6 +72,35 @@ Phase 11a.2, one pull request each, disjoint files.
 The contract is `specs/contracts/phase-11a2.md`; the contract for the
 language phases is `specs/contracts/phase-11b-11f.md`.
 
+### Wave A: inline assembly
+
+Four agents, four pull requests, merged together on a branch so that
+`main` never went red in the middle of the wave:
+
+| Agent | Owns | State |
+| ----- | ---- | ----- |
+| the Rust front end | `crates/nexum-parser/src/lib.rs`, `normalize.rs` | **merged** |
+| the self-hosted front end | `examples/selfhost/parser.nx` | **merged** |
+| the sema | `crates/nexum-sema/src/lib.rs`, `crates/nexum-mir/src/lib.rs` | **merged** |
+| the code generator | `crates/nexum-codegen/src/lib.rs` | **merged** |
+
+**The wave found a hole in its own contract**, which is the most useful
+thing that happened in it. The contract said the template's operands are
+named, but the pinned MIR instruction carries no operand names, so a
+program written that way reached LLVM unchanged and **crashed the
+backend** instead of producing a diagnostic. The code generator's agent
+found it, said plainly that it was not its file to fix, and set out the
+two ways out. D021 settles it: the template is LLVM's own, and the
+semantic pass checks the operand range and the constraint count, so a
+mistake is a diagnostic.
+
+**The two front ends designed different shapes** - the parser made
+`asm(...)` a statement, the sema expected an ordinary call - because the
+contract settled the semantics and not the boundary between the two
+crates. That is what an integration agent is for, and it is the lesson
+for the next contract: a contract has to settle the shape, not only the
+meaning.
+
 ### What the phase achieved
 
 A Linux program declared seventeen external symbols when the programme
