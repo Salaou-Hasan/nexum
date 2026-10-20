@@ -1599,12 +1599,28 @@ mod tests {
         );
     }
 
+    /// The block that copies its input into its output, in the dialect of
+    /// the host.
+    ///
+    /// x86-64's inline-assembly dialect is AT&T, on every x86-64 target
+    /// including Windows; AArch64 has its own syntax, and the register names
+    /// there carry no sigil. The block is assembled and run, so the text
+    /// has to be the host's.
+    fn copy_block() -> (&'static str, &'static str) {
+        if cfg!(target_arch = "aarch64") {
+            ("mov x0, x1", "={x0},{x1},~{x16},~{memory}")
+        } else {
+            ("movq %rdi, %rax", "={rax},{rdi},~{rcx},~{memory}")
+        }
+    }
+
     /// A module that runs a block and prints what it produced.
     ///
     /// The block is the shape the runtime's own system call layer has: the
     /// input is pinned to the register the constraint string names, and the
     /// result comes back in the register the output is pinned to.
     fn program_module() -> MirModule {
+        let (template, constraints) = copy_block();
         let mut value_types = HashMap::new();
         value_types.insert(0, Ty::Int); // the destination slot
         value_types.insert(1, Ty::Int); // the input
@@ -1634,8 +1650,8 @@ mod tests {
                         },
                         Instr::Asm {
                             dest: Value(0),
-                            template: "movq %rdi, %rax".to_string(),
-                            constraints: "={rax},{rdi},~{rcx},~{memory}".to_string(),
+                            template: template.to_string(),
+                            constraints: constraints.to_string(),
                             inputs: vec![Value(1)],
                             ty: Ty::Int,
                         },
