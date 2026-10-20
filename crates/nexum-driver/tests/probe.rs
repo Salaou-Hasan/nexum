@@ -217,8 +217,10 @@ fn wrappers_for_host() -> String {
 
 /// The runtime's system call layer, from its source.
 #[path = "../../nexum-runtime/src/syscalls.rs"]
+#[allow(dead_code)]
 mod syscalls;
 
 /// The runtime's allocator, from its source.
 #[path = "../../nexum-runtime/src/heap.rs"]
+#[allow(dead_code)]
 mod heap;
