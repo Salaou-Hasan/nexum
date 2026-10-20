@@ -285,6 +285,21 @@ expected a numeric array length, P014 expected `]` to close an array literal.
   the address of the argument binding.
 * `panic` lowers to the bootstrap runtime helper `nexum_panic` (message to
   stderr, `exit(1)`).
+* An `asm(...)` call lowers to one LLVM inline assembly block. The
+  arguments are the destination variable, the template, the constraint
+  string, and the inputs. The template's operands are **named** - `$name`
+  refers to the operand called `name` - and the compiler rewrites the
+  names into LLVM's positional form, because the numbering of the
+  operands in an assembly block counts the output as operand zero. The
+  constraint string names the operands in LLVM's order: the outputs
+  first, then the inputs, then the clobbers, so the number of
+  constraints before the first `~{` is one more than the number of
+  inputs. The result of the block is the value of the first output, and
+  it is stored in the destination. The target guard, when there is one,
+  is the last argument and it is a string literal; the guard is checked
+  against the target being compiled, and a mismatch is an error rather
+  than a silent omission. `asm` is a builtin and not a keyword, so the
+  grammar has no production for it and the lexer has no token for it.
 
 ## 7. Accepted-but-unspecified (to be resolved in later phases)
 
