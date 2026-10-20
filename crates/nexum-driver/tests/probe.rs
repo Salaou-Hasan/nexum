@@ -112,6 +112,20 @@ fn the_kernel_reports_what_it_reports() {
         allocated != "0x0" && !allocated.is_empty(),
         "the allocator did not return a block:\n{stdout}"
     );
+    // The contract the runtime relies on: the wrappers report an error as a
+    // negative number, on every system. Linux returns the error number
+    // negated; Darwin returns it positive and sets the carry flag, and the
+    // wrapper has to make it negative. If this fails, the value in the
+    // message says what the kernel returned.
+    let opened = stdout
+        .lines()
+        .find(|l| l.starts_with("open ->"))
+        .and_then(|l| l.trim_start_matches("open -> ").trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    assert!(
+        opened < 0,
+        "the failed open was not reported as negative:\n{stdout}"
+    );
 }
 
 /// The system this test runs on.
@@ -148,9 +162,15 @@ fn wrappers_for_host() -> String {
 }
 
 /// The runtime's system call layer, from its source.
+///
+/// The source is included rather than depended on, because the runtime
+/// crate is not a dependency of the driver. The items the test does
+/// not use are not dead here.
 #[path = "../../nexum-runtime/src/syscalls.rs"]
+#[allow(dead_code)]
 mod syscalls;
 
 /// The runtime's allocator, from its source.
 #[path = "../../nexum-runtime/src/heap.rs"]
+#[allow(dead_code)]
 mod heap;
