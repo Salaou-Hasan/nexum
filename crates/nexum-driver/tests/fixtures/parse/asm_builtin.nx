@@ -1,0 +1,7 @@
+# The inline-assembly builtin: a call by name, with and without a target
+# guard.
+fn main():
+    let mut out = 0
+    asm(out, "mov $1, %rax", "=r,r", 1, 2)
+    asm(out, "mov $1, %rax", "=r,r", 1, 2, "linux-x86_64")
+    print(out)
