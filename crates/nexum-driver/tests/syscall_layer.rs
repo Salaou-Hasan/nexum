@@ -97,7 +97,10 @@ impl Numbers {
                 close: 6,
                 lseek: 199,
                 mmap: 197,
-                munmap: 198,
+                // munmap is 73 here, not the 198 that sits next to mmap:
+                // the BSD master table is not contiguous, and 198 is an
+                // unused slot.
+                munmap: 73,
                 exit: 1,
                 // 1 | 512 | 1024: write only, create, truncate.
                 open_write: 1537,
@@ -750,7 +753,7 @@ fn the_numbers_are_per_system() {
     assert_eq!(number_in("macos-x86_64", "lseek"), 199);
     assert_eq!(number_in("macos-x86_64", "exit"), 1);
     assert_eq!(number_in("macos-x86_64", "mmap"), 197);
-    assert_eq!(number_in("macos-x86_64", "munmap"), 198);
+    assert_eq!(number_in("macos-x86_64", "munmap"), 73);
 
     // The number belongs to the system, not to the architecture - with one
     // exception: Darwin on AArch64 puts the BSD number in the high bits, so
