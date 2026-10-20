@@ -14,7 +14,13 @@ fn toolchain() -> Option<nexum_toolchain::Toolchain> {
 }
 
 fn tmp_dir() -> std::path::PathBuf {
-    let d = std::env::temp_dir().join("nexum_tests");
+    // The process id is in the path: two test runs at the same time - an
+    // agent's and the orchestrator's, say - would otherwise write over
+    // each other's files and fail with a difference that is not a
+    // difference.
+    let d = std::env::temp_dir()
+        .join("nexum_tests")
+        .join(format!("p{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

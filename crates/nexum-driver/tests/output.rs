@@ -33,7 +33,10 @@ fn toolchain() -> Option<nexum_toolchain::Toolchain> {
 
 /// A private work directory.
 fn work_dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join("nexum_tests").join(name);
+    let d = std::env::temp_dir()
+        .join("nexum_tests")
+        .join(format!("p{}", std::process::id()))
+        .join(name);
     std::fs::create_dir_all(&d).unwrap();
     d
 }

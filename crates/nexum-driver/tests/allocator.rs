@@ -158,6 +158,7 @@ fn toolchain() -> Option<nexum_toolchain::Toolchain> {
 fn work_dir(name: &str) -> PathBuf {
     let d = std::env::temp_dir()
         .join("nexum_tests")
+        .join(format!("p{}", std::process::id()))
         .join("allocator")
         .join(name);
     std::fs::create_dir_all(&d).expect("work dir");
