@@ -39,6 +39,9 @@ static long long class_size_of(long long c) {
 }
 
 int main(void) {
+    // Unbuffered: if the program crashes, the lines printed before the
+    // crash are the ones that say where it died.
+    setvbuf(stdout, 0, _IONBF, 0);
     printf("size_class(48) -> %lld\n", nexum_size_class(48));
     long long m = nexum_sys_mmap(0, 16384, 3, 4098, -1, 0);
     printf("mmap -> %lld\n", m);
@@ -120,13 +123,13 @@ fn the_kernel_reports_what_it_reports() {
     );
     let allocated = stdout
         .lines()
-        .find(|l| l.starts_with("heap_alloc(48) ->"))
-        .map(|l| {
-            l.trim_start_matches("heap_alloc(48) -> ")
-                .trim()
-                .to_string()
-        })
+        .find(|l| l.starts_with("class 0 "))
+        .map(|l| l.rsplit(" -> ").next().unwrap_or("").trim().to_string())
         .unwrap_or_default();
+    assert!(
+        !allocated.is_empty() && allocated != "(nil)" && allocated != "0x0",
+        "the allocator did not return a block:\n{stdout}"
+    );
     assert!(
         allocated != "0x0" && !allocated.is_empty(),
         "the allocator did not return a block:\n{stdout}"
