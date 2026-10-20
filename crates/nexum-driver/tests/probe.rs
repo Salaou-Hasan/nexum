@@ -43,6 +43,7 @@ int main(void) {
 "#;
 
 #[test]
+#[cfg_attr(target_os = "windows", ignore = "the probe makes POSIX system calls")]
 fn the_kernel_reports_what_it_reports() {
     let Some(tc) = toolchain() else { return };
     let dir = work_dir();
