@@ -33,68 +33,46 @@ The goal: a Nexum program depends on the kernel and on nothing else.
 | The runtime's own file routines (POSIX) | **done** |
 | The cross-target verification assembles for the target | **done** |
 | The freestanding gate (the external symbol list) | **done** |
-| The allocator over `mmap` (replaces `malloc`/`free`) | in research |
-| The output formatting (replaces `printf`/`fputs`/`fputc`) | in research |
+| The allocator over `mmap` (replaces `malloc`/`free`) | **done** |
+| The output formatting (replaces `printf`/`fputs`/`fputc`) | **done** |
+| The maths builtins (replaces libm) | **done** |
 | The Windows system call stubs | in research |
 
-A program built for Linux declares six external symbols today:
-`printf`, `fputs`, `fputc`, `exit`, `malloc`, `free`. It used to declare
-seventeen. The gate `crates/nexum-driver/tests/freestanding.rs` pins the
-list, so it can only get shorter.
+## The research: 25 documents, all merged
 
-## The research in flight
+Each is a pull request against `main`, written by one agent, in
+`specs/research/`. The decisions they settled are in
+`docs/language-reference/decisions.md` (D012 to D020) and in the
+contracts.
 
-Each of these was a pull request against `main`, written by one agent, in
-`specs/research/`. All twenty-two are merged.
+The documents cover: the numeric tower, the f32 touchpoints, the
+allocator's design, the number formatting, the maths implementations, the
+inline assembly design, the memory and layout model, the record layout,
+concurrency, the memory model and atomics, vectors and SIMD, the native
+linker, the code generator's backend, the toolchain's dependencies, the
+GPU path, the Windows system calls, the model framework, the C dependency
+audit, the error model, the syntax's growth, the standard library, the
+self-hosting plan, the compiler pipeline, the test surface, the
+performance methodology, interoperability, and WebAssembly.
 
-| Document | Question |
-| -------- | -------- |
-| `f32-touchpoints.md` | where a new primitive type has to thread through the compiler |
-| `numeric-tower.md` | the numeric types and the exact semantics of every operation |
-| `allocator-design.md` | the allocator that replaces `malloc`, and the collector's needs |
-| `number-formatting.md` | the formatting that replaces `printf`, matching C's output |
-| `math-implementations.md` | the maths builtins, implemented without libm |
-| `inline-asm-design.md` | inline assembly as a first-class language feature |
-| `memory-layout.md` | pointers, explicit layout, volatile, unsafe, arenas |
-| `record-layout.md` | the record layout rules and how to control them |
-| `concurrency.md` | threads without the C library |
-| `atomics-model.md` | the atomic types, the orderings, the memory model |
-| `simd-vectors.md` | vectors and SIMD |
-| `native-linker.md` | linking a program without clang |
-| `codegen-backend-options.md` | textual IR against LLVM as a library |
-| `toolchain-dependencies.md` | what the toolchain may depend on |
-| `gpu-path.md` | the GPU path without CUDA or a C binding |
-| `windows-syscalls.md` | reaching the Windows kernel without the C library |
-| `ml-framework.md` | the model framework and what it needs from each phase |
-| `ffi-audit.md` | the complete checklist of remaining C dependencies |
-| `error-handling-model.md` | what replaces the panic-only model |
-| `syntax-evolution.md` | how the syntax grows for the systems work |
-| `standard-library-plan.md` | the standard library, written in Nexum |
-| `self-hosting-plan.md` | how the compiler comes to be written in Nexum |
-| `compiler-pipeline.md` | the compiler stage by stage, and the extension points |
-| `test-surface.md` | the test surface, and where a new feature's tests belong |
-| `performance-methodology.md` | how the programme measures speed |
-| `interop-policy.md` | interoperability without a C binding |
-| `wasm-target.md` | WebAssembly as a target |
+## The implementation: seven agents, seven pull requests, all merged
 
-## The implementation in flight
-
-Phase 11a.2, one pull request each, disjoint files:
+Phase 11a.2, one pull request each, disjoint files.
 
 | Agent | Owns | State |
 | ----- | ---- | ----- |
 | the allocator | `crates/nexum-runtime/src/heap.rs`, `tests/allocator.rs` | **merged** |
-| the output | `crates/nexum-runtime/src/format.rs`, the codegen's `print` block, `tests/output.rs` | in flight |
-| the maths | `crates/nexum-runtime/src/math.rs`, `tests/math.rs` | in flight |
+| the output | `crates/nexum-runtime/src/format.rs`, the codegen's `print` block, `tests/output.rs` | **merged** |
+| the maths | `crates/nexum-runtime/src/math.rs`, `tests/math.rs` | **merged** |
 | the bytes | `crates/nexum-runtime/src/bytes.rs`, the sema's builtin dispatch | **merged** |
 | the layout | `crates/nexum-target/src/lib.rs` and its tests | **merged** |
-| the benchmarks | `crates/nexum-driver/src/bin/nx-bench.rs`, `benchmarks/suite/` | in flight |
+| the benchmarks | `crates/nexum-driver/src/bin/nx-bench.rs`, `benchmarks/suite/` | **merged** |
 | the syscall tests | `crates/nexum-driver/tests/syscall_layer.rs` | **merged** |
 
 The contract is `specs/contracts/phase-11a2.md`; the contract for the
 language phases is `specs/contracts/phase-11b-11f.md`.
 
-### What the phase has achieved so far
+### What the phase achieved
 
 A Linux program declared seventeen external symbols when the programme
 started. It declares **none** now: the heap is our allocator over the
@@ -110,6 +88,7 @@ system call, and the panic exits through the kernel.
 | the heap | `malloc` | ours, on every platform |
 | the output | `printf` | ours, on the POSIX targets |
 | the float format | the C library's `%g` | ours, matched against it over four million values |
+| the maths | libm | ours: `exp`, `log`, `tanh`, `erf`, `pow`, `sqrt` and the four rounding functions, in 64-bit operations with no `i128` and no integer division |
 
 The Windows build is still on the C library for its output and its file
 routines. Its heap is ours now, though: the allocator uses `VirtualAlloc`,
@@ -120,24 +99,28 @@ which is the kernel and not the C library.
 **The allocator fails on macOS.** Linux and Windows pass. The symptom is
 a crash in the first allocation, with no output.
 
-What is known:
+What is known, from measurement rather than argument:
 
 * The system call layer itself works on macOS: the file routines read and
-  write, and a probe that maps memory directly succeeds.
-* So the failure is in the allocator's own logic, and it is specific to
-  Darwin. The one thing that differs is the page size: 16384 there,
-  4096 everywhere else, and Darwin's `munmap` refuses a length that is
-  not a multiple of it.
-
-Two hypotheses were tested and ruled out by measurement rather than by
-argument: the operand numbering (the wrappers name the registers instead
-of numbering the operands) and the stack alignment (the AArch64 wrappers
-now align the stack for the call, as the x86-64 ones always did).
+  write, and a probe that maps memory directly succeeds on Linux.
+* The mapping arguments are in the right order and the page size is
+  right - 16384 on macOS on Apple Silicon, 4096 everywhere else.
+* **Darwin's `munmap` is 73**, not the 198 that sits next to `mmap` in the
+  BSD master table; 198 is an unused slot. The table had it wrong, so the
+  allocator's unmap called a system call that does not exist.
+* Darwin reports an error by setting the carry flag and returning the
+  error number *positive*, where Linux returns it negative. The runtime
+  makes the result negative in the assembly so that one convention holds
+  everywhere - but that only works if the flag is what the kernel sets.
 
 The probe (`crates/nexum-driver/tests/probe.rs`) prints what the kernel
 returns for a mapping, for an open of a file that is not there, and for a
-write, and then asks the allocator for a block. It is a diagnostic, not a
-gate, and it exists because two rounds of guessing were wrong.
+write, and then walks the allocator's own sequence. It writes unbuffered,
+so a crash does not take the lines that say where it happened with it.
+
+Two rounds of guessing were wrong before the probe existed, which is the
+lesson the research had already written down and the orchestrator had not
+applied to its own debugging.
 
 ## The decisions this programme has taken so far
 
@@ -154,7 +137,7 @@ gate, and it exists because two rounds of guessing were wrong.
 ## What the research found, and what it cost
 
 The research was supposed to design the later phases. Instead it found
-**six live defects**, each confirmed by running the compiler rather than
+**nine live defects**, each confirmed by running the compiler rather than
 by reading it:
 
 | Defect | Found by |
@@ -163,8 +146,11 @@ by reading it:
 | an integer literal that does not fit `i64` silently became `0` | the numeric tower |
 | the most negative `i64` could not be written | the numeric tower |
 | the link step ignored `--target`, so a cross build produced a host binary | two agents |
-| the `mmap` wrapper put the descriptor in the flags register | three agents |
-| the write path passed a pointer where the wrapper wanted an integer | the test surface |
+| the `mmap` wrapper put the file descriptor in the flags register | three agents |
+| the write path passed a pointer where an integer was wanted | the test surface |
+| the data layouts had drifted from clang's on all five targets | the backend |
+| Darwin's system call numbers were wrong in two places | the syscall tests |
+| Darwin's `munmap` was 198, an unused slot | the XNU master table |
 
 And one fact about the gates themselves: **the LLVM verifier does not
 catch a call with mismatched argument types**, because clang passes
@@ -187,5 +173,6 @@ first call.
 
 The lesson for the programme: **anything that only fails on one platform
 needs a test that runs everywhere.** The unit tests in
-`crates/nexum-runtime/src/syscalls.rs` and the gate in
-`crates/nexum-driver/tests/freestanding.rs` exist because of that.
+`crates/nexum-runtime/src/syscalls.rs`, the gate in
+`crates/nexum-driver/tests/freestanding.rs` and the probe in
+`crates/nexum-driver/tests/probe.rs` exist because of that.
