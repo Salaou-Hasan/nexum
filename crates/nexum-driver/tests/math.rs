@@ -74,7 +74,8 @@ fn ulps_between(a: f64, b: f64) -> i64 {
 
 /// The work directory for the compiled harness.
 fn work_dir() -> PathBuf {
-    let d = std::env::temp_dir().join("nexum_math_tests");
+    let d = std::env::temp_dir()
+        .join(format!("nexum_math_tests_p{}", std::process::id()));
     std::fs::create_dir_all(&d).expect("work dir");
     d
 }

@@ -17,7 +17,10 @@
 use std::path::PathBuf;
 
 fn work_dir() -> PathBuf {
-    let d = std::env::temp_dir().join("nexum_tests").join("probe");
+    let d = std::env::temp_dir()
+        .join("nexum_tests")
+        .join(format!("p{}", std::process::id()))
+        .join("probe");
     std::fs::create_dir_all(&d).unwrap();
     d
 }

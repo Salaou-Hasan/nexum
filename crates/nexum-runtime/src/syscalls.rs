@@ -215,6 +215,11 @@ fn call_body(os: SysOs, arch: SysArch, nr: i64, args: &[Arg]) -> String {
     let mut text = String::new();
     // The stack has to be aligned for the call. A function without a frame is
     // entered with the stack at 8 modulo 16, and the kernel wants 16.
+    //
+    // The wrapper is `noinline` for the same reason: it aligns the stack
+    // by hand, and that dance is only right inside a real call. An internal
+    // function may be inlined into its caller, and an inlined copy would
+    // align a stack that is already aligned - or, worse, one that is not.
     match arch {
         SysArch::X86_64 => {
             // A literal dollar is written twice in an assembly block: a
@@ -315,7 +320,7 @@ pub fn wrappers(os: SysOs, arch: SysArch, sys: &Syscalls) -> String {
     let mut s = String::new();
     let mut push = |name: &str, nr: i64, args: &[Arg]| {
         s.push_str(&format!(
-            "define internal i64 @nexum_sys_{name}(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) {{\nentry:\n{}  ret i64 %r\n}}\n\n",
+            "define internal i64 @nexum_sys_{name}(i64 %a0, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5) noinline {{\nentry:\n{}  ret i64 %r\n}}\n\n",
             call_body(os, arch, nr, args)
         ));
     };
